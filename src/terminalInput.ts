@@ -60,18 +60,31 @@ let lastSuggestionRows = 0;
 let lastStatusRows = 0;
 let currentSuggestions: SlashCommand[] = [];
 let statusLine: string | undefined;
+/** A second pinned row under the status line: the models in use (see modelQueue.ts). */
+let modelStrip: string | undefined;
+let lastPanelRows = 0;
+
+/** A small interactive panel drawn in the pinned area, above the prompt, while the stream keeps scrolling above it. */
+export interface PinnedPanel {
+  rows(): string[];
+  /** Receives every key while the panel is open. "close" closes it; "redraw" repaints it. */
+  key(str: string | undefined, key: { name?: string; ctrl?: boolean } | undefined): "close" | "redraw";
+}
+let panel: PinnedPanel | undefined;
+let panelSavedLine = "";
 // Bracketed paste: a paste is one answer, never several submitted lines.
 const BRACKETED_PASTE_ON = "\x1b[?2004h";
 const BRACKETED_PASTE_OFF = "\x1b[?2004l";
 const paste = new PasteCollector();
 let exitHookSet = false;
-const liveCommands = new Map<string, () => void | Promise<void>>();
+const liveCommands = new Map<string, { run: () => void | Promise<void>; when?: () => boolean }>();
 
 /** Commands that run the moment they are typed, even mid-run or at a question. Returns a function that removes them. */
-export function registerLiveCommands(commands: string[], run: () => void | Promise<void>): () => void {
-  for (const c of commands) liveCommands.set(c.toLowerCase(), run);
+export function registerLiveCommands(commands: string[], run: () => void | Promise<void>, when?: () => boolean): () => void {
+  const entry = { run, when };
+  for (const c of commands) liveCommands.set(c.toLowerCase(), entry);
   return () => {
-    for (const c of commands) if (liveCommands.get(c.toLowerCase()) === run) liveCommands.delete(c.toLowerCase());
+    for (const c of commands) if (liveCommands.get(c.toLowerCase()) === entry) liveCommands.delete(c.toLowerCase());
   };
 }
 
@@ -180,7 +193,7 @@ function dividerLine(): string {
 const DIVIDER_ROWS = 1;
 
 function totalReservedRows(): number {
-  return lastStatusRows + DIVIDER_ROWS + lastSuggestionRows + lastPromptRows;
+  return lastStatusRows + DIVIDER_ROWS + lastSuggestionRows + lastPanelRows + lastPromptRows;
 }
 
 function clearInputArea(): void {
@@ -211,6 +224,49 @@ export function setStatusLine(text: string | undefined): void {
   redrawInputArea();
 }
 
+/** The models-in-use row, pinned under the status line. */
+export function setModelStrip(text: string | undefined): void {
+  if (text === modelStrip) return;
+  modelStrip = text;
+  if (!rl) return;
+  clearInputArea();
+  redrawInputArea();
+}
+
+/** One panel row cut to the terminal width so it can never wrap and desync the reserved-row count. */
+function fitPanelRow(row: string): string {
+  const cols = process.stdout.columns || 80;
+  if (visibleWidth(row) <= cols - 1) return row;
+  const plain = stripAnsi(row);
+  const cut = plain.slice(0, Math.max(1, cols - 2)) + "…";
+  return row.includes("\x1b[7m") ? "\x1b[7m" + cut + "\x1b[0m" : cut;
+}
+
+/** Opens a panel in the pinned area. Returns a function that closes it. No-op (returns a no-op) without a pinned input. */
+export function openPanel(p: PinnedPanel): () => void {
+  if (!rl) return () => {};
+  panel = p;
+  panelSavedLine = rl.line;
+  refreshInputArea();
+  return () => closePanel(p);
+}
+
+function closePanel(p?: PinnedPanel): void {
+  if (!panel || (p && panel !== p)) return;
+  panel = undefined;
+  if (rl) {
+    (rl as any).line = panelSavedLine;
+    (rl as any).cursor = panelSavedLine.length;
+  }
+  lastPanelRows = 0;
+  refreshInputArea();
+}
+
+/** Repaint the open panel, for when its contents changed without a key. */
+export function refreshPanel(): void {
+  if (panel) refreshInputArea();
+}
+
 function renderStatusLine(text: string): string {
   const cols = process.stdout.columns || 80;
   const line = `\x1b[2m▸\x1b[0m ${text}`;
@@ -237,11 +293,14 @@ function redrawInputArea(): void {
   // second instead of ever overwriting the same line.
   readline.cursorTo(process.stdout, 0);
   readline.clearLine(process.stdout, 0);
+  lastStatusRows = 0;
   if (statusLine) {
     process.stdout.write(renderStatusLine(statusLine) + "\n");
-    lastStatusRows = 1;
-  } else {
-    lastStatusRows = 0;
+    lastStatusRows++;
+  }
+  if (modelStrip) {
+    process.stdout.write(renderStatusLine(modelStrip) + "\n");
+    lastStatusRows++;
   }
   process.stdout.write(dividerLine() + "\n");
   const colWidth = currentSuggestions.reduce((w, c) => Math.max(w, c.cmd.length), 0) + 3;
@@ -249,6 +308,13 @@ function redrawInputArea(): void {
     process.stdout.write(renderSuggestionLine(entry, colWidth) + "\n");
   }
   lastSuggestionRows = currentSuggestions.length;
+  lastPanelRows = 0;
+  if (panel) {
+    for (const row of panel.rows()) {
+      process.stdout.write(fitPanelRow(row) + "\n");
+      lastPanelRows++;
+    }
+  }
   rl.prompt(true); // preserveCursor: true — re-renders label+line, cursor from rl.cursor
   lastPromptRows = currentPromptRows();
 }
@@ -356,9 +422,16 @@ function handleLine(rawLine: string): void {
     return;
   }
 
+  // While the panel is open, Enter belongs to it (its own key handler picks the row), not to the prompt.
+  if (panel) {
+    refreshInputArea();
+    return;
+  }
+
   // A command that must work while a run is in flight (pairing a phone). Handled on the spot instead of being queued as
   // the answer to the next question; the run keeps going and the output scrolls above the pinned line as usual.
-  const live = liveCommands.get(trimmed.toLowerCase());
+  const liveEntry = liveCommands.get(trimmed.toLowerCase());
+  const live = liveEntry && (!liveEntry.when || liveEntry.when()) ? liveEntry.run : undefined;
   if (live) {
     if (activeClaim) activeClaim.lines.length = 0;
     refreshInputArea();
@@ -458,6 +531,16 @@ function setup(): void {
         (rl as any).cursor = shown.length;
         refreshInputArea();
       }
+      return;
+    }
+    if (panel && !(key?.ctrl && key.name === "c")) {
+      // While the panel is open every key belongs to it. readline has already applied the key to its own line (an arrow
+      // loads history, a letter is inserted), so put the line back as it was.
+      (rl as any).line = panelSavedLine;
+      (rl as any).cursor = panelSavedLine.length;
+      const outcome = panel.key(_str, key);
+      if (outcome === "close") closePanel();
+      else refreshInputArea();
       return;
     }
     if (key?.name === "escape") {

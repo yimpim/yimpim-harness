@@ -17,7 +17,7 @@ describe("live commands", () => {
   });
   test("the line handler runs them before queueing text as an answer, case-insensitively", () => {
     const t = src("terminalInput.ts");
-    assert.match(t, /const live = liveCommands\.get\(trimmed\.toLowerCase\(\)\);\s*if \(live\) \{/);
+    assert.match(t, /const liveEntry = liveCommands\.get\(trimmed\.toLowerCase\(\)\);[\s\S]*?if \(live\) \{/);
     assert.ok(t.indexOf("liveCommands.get(trimmed") < t.indexOf("runControl.provideForNextQuestion(trimmed)"));
   });
   test("pairing mid-run keeps the screen and does not drop a phone already paired", () => {
