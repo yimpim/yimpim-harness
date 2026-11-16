@@ -130,7 +130,7 @@ import {
 } from "./cli.js";
 import { resolveConfig, locateConfigFile, writeSetting, clearSetting } from "./settings.js";
 import { globalConfigPath } from "./globalConfig.js";
-import { PERSONAS, Persona, candidatesFor, chainProblem, fetchCatalog, roleInfoWire } from "./models.js";
+import { PERSONAS, Persona, candidatesFor, chainProblem, fetchCatalog, formatModel, roleInfoWire, type CatalogModel } from "./models.js";
 import { pickModel, askHidden, isCancelAnswer } from "./setup.js";
 import { storeApiKey } from "./secrets.js";
 import { RunLock, describeHeldLock } from "./runLock.js";
@@ -151,7 +151,9 @@ import {
 import { buildRemovalCommand } from "./cleanupCommand.js";
 import { runControl, AbortedError, askAnywhere, askChoice, setQuestionExplainer } from "./remote/control.js";
 import { plainWordsFor } from "./plainWords.js";
-import { installPersistentInput, registerLiveCommands, printAbove, writeRawAbove, pauseInput, resumeInput, setStatusLine } from "./terminalInput.js";
+import { installPersistentInput, registerLiveCommands, printAbove, writeRawAbove, pauseInput, resumeInput, setStatusLine, setModelStrip, openPanel, refreshPanel } from "./terminalInput.js";
+import { ModelQueue, renderModelStrip } from "./modelQueue.js";
+import { ModelPanel } from "./modelPanel.js";
 import { provisionRelay, RelayUnavailable, ProvisionedRelay } from "./remote/autoRelay.js";
 import { executeLinkFlow, getValidProToken } from "./remote/auth.js";
 import { loadApiKey, describeBackend, detectStaleEnvKey } from "./secrets.js";
@@ -196,6 +198,7 @@ import { saveLastFailure, loadLastFailure, clearLastFailure } from "./lastFailur
 import { detectCommandTypo } from "./commandTypo.js";
 import { toAnsi, stripAnsi, colorizeRoleTag } from "./richText.js";
 import { linkifyFilePaths } from "./terminalLinks.js";
+import { parseContinueAnswer } from "./continueAnswer.js";
 import { rollUpAgentUsage, phaseUsageWire, type PhaseUsageWire } from "./usageWire.js";
 import { collectChangeSet } from "./staticQa.js";
 import { readPushPreference, writePushPreference, detectOrigin, verifyOriginAccess, parsePushDenial, describePushDenial, PushPreference } from "./gitRemote.js";
@@ -4698,6 +4701,8 @@ async function main(): Promise<void> {
   // unrelated later multi-screen ask gets its own confirmation rather than
   // silently inheriting a "yes" given to a completely different backlog.
   let autoContinueConfirmed = false;
+  /** "yes to all" given to a roadmap. Its own flag: the task queue resets autoContinueConfirmed whenever a unit's plan adds follow-ups, which made the roadmap ask again after every unit. Cleared only by a "no", a failed unit, or a new roadmap. */
+  let roadmapAutoContinue = false;
 
   // What the roadmap needs from here: the planner model, and a way to ask you.
   const roadmapDeps = (): FlowDeps => ({
@@ -4755,7 +4760,7 @@ async function main(): Promise<void> {
     const nxt = rm ? nextUnits(rm, 1)[0] : undefined;
     if (!rm || !nxt) return;
     const pr = roadmapProgress(rm);
-    let go = autoContinueConfirmed;
+    let go = roadmapAutoContinue;
     if (!go) {
       const answer = (
         await askAnywhere(
@@ -4769,12 +4774,14 @@ async function main(): Promise<void> {
           },
           `Roadmap ${pr.done}/${pr.total} done — next: ${nxt.id} "${nxt.title}". [yes next / yes to all / no] `
         )
-      )
-        .trim()
-        .toLowerCase();
-      if (answer === "yes next" || answer === "yes to all") {
-        autoContinueConfirmed = answer === "yes to all";
+      );
+      const understood = parseContinueAnswer(answer);
+      if (understood !== "no") {
+        roadmapAutoContinue = understood === "all";
         go = true;
+        console.log(understood === "all" ? "[ROADMAP] Understood: yes to all. I will not ask again for this roadmap; a failed unit or a \"no\" stops it." : "[ROADMAP] Understood: yes, just the next one.");
+      } else {
+        roadmapAutoContinue = false;
       }
     }
     if (go && !(await confirmRoadmapSpend())) go = false;
@@ -4874,6 +4881,7 @@ async function main(): Promise<void> {
         if (notes.length > 0) console.log(`\nNeeds attention:\n${notes.map((n) => `  - ${n}`).join("\n")}`);
       }
     } else if (cmd.kind === "new" || cmd.kind === "port") {
+      roadmapAutoContinue = false;
       console.log(`[ROADMAP] Planning the whole job from ${cmd.kind === "port" ? "the reference folder" : "your request"}. This can take a minute...`);
       // A brief or notes the request names, or that the classifier judged it means, are given in full.
       const docs = renderUserDocuments(mergeUnique(userNamedFiles(cmd.goal, repoRoot), turnDocuments), repoRoot);
@@ -4898,6 +4906,7 @@ async function main(): Promise<void> {
       const n = drift ? absorbUncovered(repoRoot, drift.uncovered) : 0;
       console.log(n > 0 ? `Added ${n} unit(s) for reference files that appeared since the roadmap was made.` : "Nothing new to add: every reference file already belongs to a unit.");
     } else if (cmd.kind === "reset") {
+      roadmapAutoContinue = false;
       const sure = await askChoice({
         id: `roadmap_reset_${Date.now()}`,
         kind: "blocking",
@@ -5107,7 +5116,79 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
     }
     remote = await connectRemote(config, repoRoot, runId, remote, (p: string) => { pendingAttachments.push(p); }, taskRunning);
   });
+  // Models can be changed while a task runs: the change waits until that role next starts (see modelQueue.ts), the models in
+  // use stay on a pinned row, and /model opens a small picker in the pinned area while the stream keeps scrolling above it.
+  const modelQueue = new ModelQueue(config.models as Record<string, any>, PERSONAS.map((p) => p.key));
+  const STRIP_ROLES = ["discovery", "planner", "editor", "repair", "verifier"];
+  const refreshModelStrip = () => setModelStrip(renderModelStrip(modelQueue, PERSONAS, STRIP_ROLES));
+  const roleLabel = (role: string) => PERSONAS.find((p) => p.key === role)?.label ?? role;
+  modelQueue.onChange((c) => {
+    refreshModelStrip();
+    const to = c.chain?.join("  →  ") ?? "unset";
+    console.log(
+      c.when === "queued"
+        ? `[MODELS] ${roleLabel(c.role)} → ${to} is queued: it applies when the ${roleLabel(c.role)} next starts, so the one working now finishes on its current model.`
+        : `[MODELS] ${roleLabel(c.role)} now uses ${to}.`
+    );
+  });
+  events.onEmit((event) => {
+    if (event.type === "agent.start") modelQueue.agentStarted(event.agent);
+    else if (event.type === "agent.end") modelQueue.agentEnded(event.agent);
+  });
+  refreshModelStrip();
+  let modelCatalog: CatalogModel[] | undefined;
+  const queueModelFromPanel = (role: string, chain: string[] | undefined) => {
+    const persona = PERSONAS.find((p) => p.key === role);
+    if (!persona) return;
+    if (chain && chain.length) {
+      const problem = chainProblem(persona, chain);
+      if (problem) {
+        console.log(`[MODELS] Not changed: ${problem}`);
+        return;
+      }
+    } else if (!persona.optional) {
+      console.log(`[MODELS] ${persona.label} can't be left unset.`);
+      return;
+    }
+    const target = locateConfigFile(repoRoot) ?? globalConfigPath();
+    try {
+      if (chain && chain.length) writeSetting(target, `models.${role}`, chain);
+      else clearSetting(target, `models.${role}`);
+    } catch (err: any) {
+      console.log(`[MODELS] Not changed: ${err.message}`);
+      return;
+    }
+    modelQueue.queue(role, chain && chain.length ? chain : undefined);
+  };
+  const stopModelCommand = registerLiveCommands(
+    ["/model", "/models"],
+    () => {
+      let close: () => void = () => {};
+      const panel = new ModelPanel({
+        personas: PERSONAS,
+        current: (role) => modelQueue.current(role),
+        pending: (role) => modelQueue.pendingFor(role),
+        candidates: async (persona) => {
+          const { key: apiKey } = loadApiKey();
+          if (!apiKey) throw new Error("no API key available (run yimpim setup)");
+          modelCatalog ??= await fetchCatalog(apiKey);
+          return candidatesFor(modelCatalog, persona);
+        },
+        format: formatModel,
+        choose: queueModelFromPanel,
+        onUpdate: () => refreshPanel(),
+        maxRows: Math.max(3, Math.min(8, (process.stdout.rows || 24) - 12)),
+      });
+      close = openPanel({
+        rows: () => panel.rows(),
+        key: (str, key) => panel.key(str, key),
+      });
+      void close;
+    },
+    () => taskRunning
+  );
   const stopInputListener = () => {
+    stopModelCommand();
     stopLiveCommands();
     stopPersistentInput();
   };
@@ -6723,9 +6804,9 @@ The user wants you to decide, not ask: ${d.choice}`);
             },
             `${queued.length} more task(s) queued — next: "${next}". [yes next / yes to all / no] `
           );
-          const choice = answer.trim().toLowerCase();
-          if (choice === "yes next" || choice === "yes to all") {
-            autoContinueConfirmed = choice === "yes to all";
+          const choice = parseContinueAnswer(answer);
+          if (choice !== "no") {
+            autoContinueConfirmed = choice === "all";
             queuedInstructions = next;
             saveTaskQueue(repoRoot, queued.slice(1));
           } else {
@@ -6792,6 +6873,7 @@ The user wants you to decide, not ask: ${d.choice}`);
         }
         activeUnitId = undefined;
         autoContinueConfirmed = false;
+        roadmapAutoContinue = false;
       }
       const taskUsage = events.usageDelta(currentTaskUsageStart);
       events.emit({
