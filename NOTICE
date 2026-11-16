@@ -1,0 +1,20 @@
+YIMPIM
+Copyright 2026 YIMPIM
+
+This product is the free, open harness: the command-line coding agent, its planning, verification and
+security tooling, the remote-control client, and a small self-hosted relay. It is licensed under the
+Apache License, Version 2.0 (see LICENSE).
+
+The following are NOT part of this product and are not licensed by it:
+  - the hosted YIMPIM service (the hosted relay, the cloud tunnel, device linking, accounts, push
+    notifications and usage metrics), which is run under its own terms of service;
+  - the YIMPIM Android and iOS apps, which are distributed through their app stores under their own terms.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM THE USE OF THE SOFTWARE.
+
+The security checks in this product (threat models, reviews, scans and audits) are automated and AI-assisted
+tools, not a guarantee, a penetration test, a security audit or professional advice. See README.md.
+
+Third-party fonts and interface assets bundled under assets/ keep their own licences and notices.

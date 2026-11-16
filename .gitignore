@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Agent runtime state (per-target-repo)
+.agent/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Scratch
+*.log
+src/combined_typescript.txt
+
+# Deploy script state on the VM
+.deploy-failed-commit
+.deploy-broker-fingerprint

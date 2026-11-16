@@ -1,0 +1,306 @@
+import fs from "node:fs";
+import path from "node:path";
+import yaml from "yaml";
+import { z } from "zod";
+
+/**
+ * Every section has defaults so the harness runs against an arbitrary repo with
+ * no agent.config.yaml at all. Only the model chains are worth overriding for
+ * most projects; everything else exists to be tightened, not to be required.
+ */
+
+const DEFAULT_MODELS = ["google/gemini-3.8-flash"];
+
+export const ConfigSchema = z.object({
+  models: z
+    .object({
+      discovery: z.array(z.string()).min(1).default(DEFAULT_MODELS),
+      planner: z.array(z.string()).min(1).default(DEFAULT_MODELS),
+      editor: z.array(z.string()).min(1).default(DEFAULT_MODELS),
+      verifier: z.array(z.string()).min(1).default(DEFAULT_MODELS),
+      // Dedicated vision-capable chains, used ONLY for the specific calls
+      // that actually carry an image — discoveryVision when Discovery's own
+      // exploration attaches a user image, editorVision for the WHOLE Editor/
+      // Repair phase whenever the task has one (every round of that phase
+      // reuses whichever chain is picked, so this deliberately stays a
+      // separate opt-in list rather than silently promoting an entry out of
+      // the normal, cost-optimized chain). verifierVision covers the
+      // screenshot-driven navigation/audit calls; plain "verifier" still
+      // covers its text-only checks. Undefined (not configured) means: warn
+      // and fall back to the normal chain rather than silently guessing.
+      discoveryVision: z.array(z.string()).min(1).optional(),
+      editorVision: z.array(z.string()).min(1).optional(),
+      verifierVision: z.array(z.string()).min(1).optional(),
+      // Repair fixes defects QA found after Editor's own diff — real work,
+      // but a different difficulty profile than Editor's (diagnosing someone
+      // else's failure from error text alone vs. executing an already-clear
+      // plan), so it's worth letting it run a different, often stronger,
+      // model while Editor itself stays cheap. Undefined (not configured)
+      // means: reuse models.editor/editorVision exactly, so existing configs
+      // behave identically to before this role existed.
+      repair: z.array(z.string()).min(1).optional(),
+      repairVision: z.array(z.string()).min(1).optional(),
+      // The Designer (logos, icons, brand marks). Unlike the other roles this
+      // is a SET to rotate through, not a fallback chain: different models
+      // propose and draw different concepts, because one model alone settles
+      // into one style. Several models from different providers works best.
+      // Unset: the planner's models are used. designerVision looks at the
+      // renders; unset falls back to verifierVision, then editorVision.
+      designer: z.array(z.string()).min(1).optional(),
+      designerVision: z.array(z.string()).min(1).optional(),
+      // Security work: the threat model for a sensitive task, the attacker-style review of risky changes, and /pentest.
+      // It runs rarely, so a frontier model is worth its cost here: unset it falls back to the verifier's models, then
+      // the planner's. A [primary, backup] chain like the other roles.
+      security: z.array(z.string()).min(1).optional(),
+    })
+    .prefault({}),
+  designer: z
+    .object({
+      candidates: z.number().int().min(2).max(12).default(6),
+      rounds: z.number().int().min(0).max(4).default(2),
+      maxCalls: z.number().int().min(8).max(200).default(60),
+      outputDir: z.string().default("brand"),
+      // Also set the name beside the symbol in a real font (wordmark and lockups).
+      typography: z.boolean().default(true),
+      // Read the competitors' public home pages (colours and fonts) before drawing, so the mark can stand apart.
+      competitors: z.boolean().default(true),
+      // Write the brand guidelines document (PDF) with the kit.
+      guidelines: z.boolean().default(true),
+    })
+    .prefault({}),
+  existence: z
+    .object({
+      // Before planning a feature request or a spec, check what the code already has (quotes verified against the files)
+      // and plan only what is partial or missing; if everything is there, build nothing.
+      enabled: z.boolean().default(true),
+      maxRequirements: z.number().int().min(1).max(30).default(12),
+    })
+    .prefault({}),
+  roadmap: z
+    .object({
+      // A request too big for one task (a task holds at most 12 phases) is planned as a roadmap without asking when it is
+      // clearly big: at least autoMinRequirements things it asks for are still partial or missing. Unattended runs, which
+      // have nobody to ask, use a roadmap rather than cutting the work off. Off = always ask, and run one task when unattended.
+      autoRoute: z.boolean().default(true),
+      autoMinRequirements: z.number().int().min(2).max(30).default(6),
+    })
+    .prefault({}),
+  security: z
+    .object({
+      // Threat-model risky tasks before planning, give agents the security rules, and check what they write.
+      enabled: z.boolean().default(true),
+      // The attacker-style review of risky changes (an extra model pass for them only).
+      review: z.boolean().default(true),
+      // /pentest looks up installed package versions in the public OSV vulnerability database (names and versions only are sent).
+      dependencyLookup: z.boolean().default(true),
+      // The attacker-style review runs on the (expensive) security model; this caps how many times one task may use it.
+      reviewsPerTask: z.number().int().min(1).max(20).default(3),
+    })
+    .prefault({}),
+  uiDesign: z
+    .object({
+      // Write a design system (design-system/) before building a new or restyled UI, and check UI code against it.
+      enabled: z.boolean().default(true),
+    })
+    .prefault({}),
+  prompts: z
+    .object({
+      systemPersona: z
+        .string()
+        .default(
+          "You are an elite, pragmatic principal software engineer working inside a codebase. " +
+            "Adapt automatically to whatever tech stack, language, frameworks and conventions exist in this repository. " +
+            "Inspect the existing project structure, configuration and code style before making changes. " +
+            "Write clean, idiomatic, production-ready code with robust error handling and minimal diffs."
+        ),
+      verifierPersona: z
+        .string()
+        .default(
+          "You are an autonomous Principal QA Verification Engineer. You verify software against stated " +
+            "requirements and report defects with evidence. You never write or propose code."
+        ),
+    })
+    .prefault({}),
+  limits: z
+    .object({
+      maxDiscoveryQuestions: z.number().default(4),
+      maxToolRounds: z.number().default(40),
+      // A real, well-diagnosed defect routinely needs more than 3 tries,
+      // especially once a phase bundles several unrelated bugs — a phase
+      // that aborts at attempt 4 over a genuine fix still in progress reads
+      // to the user as the whole task mysteriously giving up, not as a
+      // considered stop. 10 repair attempts, split 5/5 between the primary
+      // and backup editor model (see the repair loop's own comment in
+      // index.ts), gives a second model a real shot before the phase gives
+      // up — without raising this, a model stuck on the same blind spot
+      // would just get nudged the same way 10 times instead of 3.
+      maxRepairAttemptsPerPhase: z.number().default(10),
+      /** Separately trackable since vision is this pipeline's least reliable
+       *  evidence tier — deliberately NOT raised alongside
+       *  maxRepairAttemptsPerPhase above: a hallucinated "looks wrong" is a
+       *  different risk than a real compile/semantic defect, and burning 10
+       *  attempts chasing one is exactly the failure mode this cap exists
+       *  to prevent. Still can't exceed maxRepairAttemptsPerPhase in
+       *  practice, since the overall repair loop is bounded by that too. */
+      maxVisualOnlyRepairAttempts: z.number().default(3),
+      // No fixed cap is ever truly "enough" — some file will always be
+      // bigger than whatever number is picked here (real files well past
+      // this have shown up in practice). The actual fix is read_file's
+      // startLine/endLine range, which lets a model walk a file of ANY
+      // size across a few calls instead of only ever seeing a truncated
+      // first chunk; this cap is just the per-call ceiling under that —
+      // raised from 120k since 187k real files were landing well past the
+      // old default on a single whole-file read.
+      maxFileBytes: z.number().default(60_000),
+      maxSearchResults: z.number().default(100),
+      maxFilesPerPhase: z.number().default(20),
+      apiMaxAttempts: z.number().default(4),
+      apiBaseDelayMs: z.number().default(1000),
+      checkpointEveryToolCall: z.boolean().default(true),
+    })
+    .prefault({}),
+  git: z
+    .object({
+      autoCommit: z.boolean().default(true),
+      createPhaseCheckpoint: z.boolean().default(true),
+      commitPrefix: z.string().default("yimpim"),
+      /**
+       * Resolved at runtime from .agent/push.json, NOT from this YAML file —
+       * deliberately absent from any starter config so it never round-trips
+       * through `yimpim init`/`yimpim config set`. agent.config.yaml is typically
+       * committed and shared with a whole team; whether THIS machine pushes
+       * to GitHub is a personal, per-checkout choice, not a team default. See
+       * gitRemote.ts.
+       */
+      autoPush: z.boolean().default(false),
+    })
+    .prefault({}),
+  planning: z
+    .object({
+      /** essential: ask only the few things worth a person's time, however many; autonomous: never wait; all: ask everything. */
+      questions: z.enum(["autonomous", "essential", "all"]).default("essential"),
+    })
+    .prefault({}),
+  execution: z
+    .object({
+      allowedCommands: z
+        .array(z.string())
+        .default(["git", "npm", "pnpm", "yarn", "npx", "node", "python", "pytest", "cargo", "go", "make"]),
+    })
+    .prefault({}),
+  safety: z
+    .object({
+      allowedPaths: z.array(z.string()).default([]),
+      blockedDirectories: z
+        .array(z.string())
+        .default([".git", "node_modules", ".venv", "venv", "__pycache__", ".agent", "dist", "build", ".gradle", ".idea"]),
+      blockedFilePatterns: z
+        .array(z.string())
+        .default(["*.keystore", "*.jks", "*.p12", "*.pem", "*.key", "*.pfx", ".env", "*.env.*", "id_rsa", "id_ed25519"]),
+    })
+    .prefault({}),
+  recovery: z
+    .object({
+      stateDirectory: z.string().default(".agent"),
+      keepBackups: z.boolean().default(true),
+      maxBackups: z.number().default(10),
+      autoResume: z.boolean().default(false),
+      dirtyTreePolicy: z.enum(["inspect", "refuse", "fail"]).default("inspect"),
+    })
+    .prefault({}),
+  interaction: z
+    .object({
+      /**
+       * When true, sign-off points that would otherwise pause for a human at
+       * the keyboard (a QA visual advisory on an otherwise-passing phase, a
+       * deferred styling/copy decision) instead auto-accept the agent's own
+       * fallback and log it to QA_REVIEW.md for later review. Defaults to
+       * true because a harness built to run unattended shouldn't stall on a
+       * judgment call nobody's there to make — set to false to get the old
+       * interactive sign-off prompts back.
+       */
+      autonomous: z.boolean().default(true),
+    })
+    .prefault({}),
+  remote: z
+    .object({
+      brokerUrl: z.string().default(""),
+      redactLogs: z.boolean().default(false),
+    })
+    .prefault({}),
+  /**
+   * Optional per-project overrides for verification. Everything here is
+   * auto-detected when omitted; these exist for the cases detection gets wrong.
+   */
+  verification: z
+    .object({
+      androidApplicationId: z.string().optional(),
+      androidModule: z.string().optional(),
+      devServerUrl: z.string().optional(),
+      /** Pins which device/simulator gets verified when more than one is
+       *  attached (e.g. a physical device plus an emulator) — otherwise
+       *  whichever the OS happens to list first is used, silently, which may
+       *  not be the one you meant. `adb devices` / `xcrun simctl list
+       *  devices booted` shows the exact id to use. */
+      androidDeviceSerial: z.string().optional(),
+      iosSimulatorUdid: z.string().optional(),
+      /** Extra commands to run as build/test gates, as full argv arrays. */
+      extraCommands: z.array(z.array(z.string())).default([]),
+      /** Skip probes by name, e.g. ["android", "desktop"]. */
+      skipProbes: z.array(z.string()).default([]),
+    })
+    .prefault({}),
+  memory: z
+    .object({
+      // How many components the repo map REMEMBERS (it is a file on disk, so this scales
+      // with the project). What is put in front of a model is limited separately below.
+      maxEntries: z.number().int().min(10).max(5000).default(1000),
+      // How many of them are pasted into every agent's prompt, most recently updated first.
+      // Every model call pays for these, so this stays small however large the project is.
+      maxPromptEntries: z.number().int().min(10).max(200).default(50),
+      summaryWordLimit: z.number().default(15),
+      stateFile: z.string().default(".agent/repo_map.json"),
+    })
+    .prefault({}),
+  provider: z
+    .object({
+      /**
+       * How OpenRouter picks a backend for each call. "default" is price-first
+       * and can land on a stalled/degraded provider for a full request timeout
+       * before falling back — "throughput" reorders candidates by measured
+       * speed instead, which naturally deprioritizes whoever is currently slow.
+       */
+      sort: z.enum(["default", "throughput", "price", "latency"]).default("default"),
+    })
+    .prefault({}),
+});
+
+export type Config = z.infer<typeof ConfigSchema>;
+export type AgentConfig = Config;
+
+export function loadConfig(targetRepoRoot?: string, customConfigPath?: string): Config {
+  const possiblePaths = [
+    customConfigPath,
+    targetRepoRoot ? path.join(targetRepoRoot, "agent.config.yaml") : undefined,
+    targetRepoRoot ? path.join(targetRepoRoot, ".agent", "config.yaml") : undefined,
+    path.resolve(process.cwd(), "agent.config.yaml"),
+  ].filter(Boolean) as string[];
+
+  for (const p of possiblePaths) {
+    if (!fs.existsSync(p)) continue;
+    const raw = yaml.parse(fs.readFileSync(p, "utf-8")) ?? {};
+    const parsed = ConfigSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new Error(
+        `Invalid config at ${p}:\n` +
+          parsed.error.issues.map((i) => `  ${i.path.join(".") || "(root)"}: ${i.message}`).join("\n")
+      );
+    }
+    console.log(`[CONFIG] Loaded ${p}`);
+    return parsed.data;
+  }
+
+  // No config anywhere: run on defaults rather than refusing to start.
+  console.log(`[CONFIG] No agent.config.yaml found; using built-in defaults.`);
+  return ConfigSchema.parse({});
+}

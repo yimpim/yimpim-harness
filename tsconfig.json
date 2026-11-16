@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    // Source (src/**) keeps every comment, forever — that's what we and any
+    // future AI-assisted session actually read and maintain. dist/ is a
+    // derived build artifact nobody reads for understanding, so it's the
+    // right (and only) place to strip them: customers installing the
+    // package never see the reasoning behind a design decision, without a
+    // separate prod-only build config that npm's own publish lifecycle
+    // (prepack -> prepare) would silently re-clobber with a commented
+    // rebuild anyway.
+    "removeComments": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", ".agent"]
+}

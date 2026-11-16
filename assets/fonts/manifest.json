@@ -1,0 +1,19 @@
+{
+  "license": "Every font here is licensed under the SIL Open Font License 1.1 (see the OFL.txt in each folder). Text set in them and converted to outlines may be used in a logo.",
+  "fonts": [
+    { "id": "poppins", "family": "Poppins", "voice": "geometric sans", "feel": "friendly, modern, clean; near-circular round letters", "files": { "regular": "Poppins-Regular.ttf", "bold": "Poppins-Bold.ttf" } },
+    { "id": "barlow", "family": "Barlow", "voice": "neutral grotesque", "feel": "technical, calm, slightly narrow; works for almost anything", "body": true, "files": { "regular": "Barlow-Regular.ttf", "bold": "Barlow-Bold.ttf" } },
+    { "id": "bevietnampro", "family": "Be Vietnam Pro", "voice": "modern humanist sans", "feel": "warm, contemporary, approachable", "body": true, "files": { "regular": "BeVietnamPro-Regular.ttf", "bold": "BeVietnamPro-Bold.ttf" } },
+    { "id": "varelaround", "family": "Varela Round", "voice": "rounded sans", "feel": "soft, friendly, safe, gentle", "files": { "regular": "VarelaRound-Regular.ttf" } },
+    { "id": "titanone", "family": "Titan One", "voice": "rounded heavy display", "feel": "playful, bold, chunky; games, kids, snacks", "files": { "regular": "TitanOne-Regular.ttf" } },
+    { "id": "arvo", "family": "Arvo", "voice": "geometric slab serif", "feel": "sturdy, practical, craft, dependable", "files": { "regular": "Arvo-Regular.ttf", "bold": "Arvo-Bold.ttf" } },
+    { "id": "alfaslabone", "family": "Alfa Slab One", "voice": "heavy slab display", "feel": "loud, confident, retro, poster-like", "files": { "regular": "AlfaSlabOne-Regular.ttf" } },
+    { "id": "crimsontext", "family": "Crimson Text", "voice": "old-style serif", "feel": "classic, editorial, literary, trustworthy", "body": true, "files": { "regular": "CrimsonText-Regular.ttf", "bold": "CrimsonText-Bold.ttf" } },
+    { "id": "dmserifdisplay", "family": "DM Serif Display", "voice": "high-contrast display serif", "feel": "elegant, fashion, premium, editorial", "files": { "regular": "DMSerifDisplay-Regular.ttf" } },
+    { "id": "bebasneue", "family": "Bebas Neue", "voice": "condensed capitals display", "feel": "tall, punchy, sport, poster; capitals only", "caps": true, "files": { "regular": "BebasNeue-Regular.ttf" } },
+    { "id": "anton", "family": "Anton", "voice": "condensed heavy", "feel": "impact, headline, urgent, strong", "files": { "regular": "Anton-Regular.ttf" } },
+    { "id": "archivoblack", "family": "Archivo Black", "voice": "heavy grotesque", "feel": "strong, modern, bold statement", "files": { "regular": "ArchivoBlack-Regular.ttf" } },
+    { "id": "spacemono", "family": "Space Mono", "voice": "monospace", "feel": "technical, developer, retro-futurist", "mono": true, "files": { "regular": "SpaceMono-Regular.ttf", "bold": "SpaceMono-Bold.ttf" } },
+    { "id": "sacramento", "family": "Sacramento", "voice": "monoline script", "feel": "personal, elegant, handwritten, light", "files": { "regular": "Sacramento-Regular.ttf" } }
+  ]
+}
