@@ -1,0 +1,299 @@
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  EXTRACT_SYSTEM, JUDGE_SYSTEM, checkExistence, checkRequirements, existencePlannerSection, findCandidates, parseRequirements, parseVerdicts, renderExistence, settle, validQuotes, windows, wordsOf, type Msg, type Requirement,
+} from "../src/existence.js";
+import { createRoadmap } from "../src/roadmapFlow.js";
+import { loadRoadmap } from "../src/roadmap.js";
+
+const repo = (files: Record<string, string> = {}) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ex-"));
+  for (const [f, c] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+    fs.writeFileSync(path.join(dir, f), c);
+  }
+  return dir;
+};
+const LOGIN = "import { signInWithEmail } from '../auth/client';\nexport function LoginScreen() {\n  const [email, setEmail] = useState('');\n  const submit = () => signInWithEmail(email, password);\n  return <Form onSubmit={submit} />;\n}\n";
+const ORDERS = "export function OrderList({ orders }) {\n  return orders.map((o) => <OrderRow key={o.id} order={o} />);\n}\n";
+const PROJECT = { "src/screens/LoginScreen.tsx": LOGIN, "src/screens/OrderList.tsx": ORDERS, "src/utils/format.ts": "export const money = (n) => n.toFixed(2);\n", "src/a.test.ts": "signInWithEmail('x')", "docs/spec.ts": "export const LoginScreen = 1;" };
+const req = (id: string, text: string, terms: string[] = []): Requirement => ({ id, text, terms });
+
+describe("splitting a request into requirements", () => {
+  test("not a feature request means nothing is checked; junk is no answer; ids, caps and terms are tidied", () => {
+    assert.deepEqual(parseRequirements(JSON.stringify({ applies: false, requirements: [{ text: "x" }] })), { applies: false, requirements: [{ id: "R1", text: "x", terms: [] }] });
+    assert.equal(parseRequirements("not json"), null);
+    const r = parseRequirements(JSON.stringify({ applies: true, requirements: Array.from({ length: 20 }, (_, i) => ({ text: `req ${i}`, terms: ["LoginScreen", "ab", "x".repeat(80), "a", "b", "c", "d", "e", "f", "g"] })) }), 12)!;
+    assert.equal(r.requirements.length, 12);
+    assert.equal(r.requirements[0].id, "R1");
+    assert.deepEqual(r.requirements[0].terms.slice(0, 1), ["LoginScreen"]);
+    assert.ok(r.requirements[0].terms.length <= 6 && r.requirements[0].terms.every((t) => t.length >= 3 && t.length <= 40));
+    assert.equal(parseRequirements(JSON.stringify({ applies: true, requirements: [] }))!.applies, false, "applies with nothing to check is not applicable");
+  });
+  test("the extractor is told what is and is not a feature request", () => {
+    assert.match(EXTRACT_SYSTEM, /bug fix.*refactor/s);
+    assert.match(EXTRACT_SYSTEM, /search terms/);
+    assert.match(JUDGE_SYSTEM, /related code is not an implementation/i);
+    assert.match(JUDGE_SYSTEM, /copied EXACTLY/);
+  });
+  test("words are split from camelCase, short and filler words dropped", () => {
+    assert.deepEqual(wordsOf("The user can reset passwordHash for orders"), ["reset", "password", "hash", "orders"]);
+  });
+});
+
+describe("finding the code that would implement a requirement", () => {
+  const files = Object.entries(PROJECT).map(([rel, text]) => ({ rel, text }));
+  const lower = new Map(files.map((f) => [f.rel, f.text.toLowerCase()]));
+  test("the file with the terms ranks first; tests and docs are never candidates", () => {
+    const c = findCandidates(req("R1", "Users can sign in with email", ["LoginScreen", "signInWithEmail"]), files, lower);
+    assert.equal(c[0].file, "src/screens/LoginScreen.tsx");
+    assert.ok(!c.some((x) => /test|docs/.test(x.file)));
+    assert.match(c[0].snippet, /\d+: .*signInWithEmail\(email, password\)/);
+  });
+  test("a shortlisted file is searched first, and a requirement matching nothing has no candidates", () => {
+    const boosted = findCandidates(req("R2", "orders listing"), files, lower, new Set(["src/utils/format.ts"]));
+    assert.ok(boosted.some((x) => x.file === "src/utils/format.ts"));
+    assert.deepEqual(findCandidates(req("R3", "push notifications", ["fcmToken"]), files, lower), []);
+  });
+  test("a window is numbered lines around the best matches", () => {
+    const w = windows("a\nb\nneedle here\nc\nd", ["needle"], 1);
+    assert.equal(w, "2: b\n3: needle here\n4: c");
+    assert.match(windows("x\ny", ["nothing"]), /^1: x/);
+  });
+});
+
+describe("a quote is only worth something if it is real", () => {
+  const by = new Map(Object.entries(PROJECT));
+  test("a verbatim quote, with different whitespace, is real; an invented, short, test-file or unknown-file one is not", () => {
+    assert.equal(validQuotes([{ file: "src/screens/LoginScreen.tsx", quote: "const submit =   () => signInWithEmail(email, password);" }], by).length, 1);
+    assert.equal(validQuotes([{ file: "src/screens/LoginScreen.tsx", quote: "const submit = () => signUpWithMagicLink(email);" }], by).length, 0, "invented");
+    assert.equal(validQuotes([{ file: "src/screens/LoginScreen.tsx", quote: "useState" }], by).length, 0, "too short to mean anything");
+    assert.equal(validQuotes([{ file: "src/a.test.ts", quote: "signInWithEmail('x')" }], by).length, 0, "a test is not the feature");
+    assert.equal(validQuotes([{ file: "src/missing.ts", quote: "export function whatever() {}" }], by).length, 0);
+  });
+  test("built or partial with no real quote becomes unclear; missing and partial keep what they should", () => {
+    const r = req("R1", "login");
+    const real = { file: "src/screens/LoginScreen.tsx", quote: "export function LoginScreen() {" };
+    assert.equal(settle({ id: "R1", verdict: "built", evidence: [real], missing: "", note: "" }, r, by).verdict, "built");
+    const faked = settle({ id: "R1", verdict: "built", evidence: [{ file: "src/screens/LoginScreen.tsx", quote: "this is not in the file at all" }], missing: "", note: "looks done" }, r, by);
+    assert.equal(faked.verdict, "unclear");
+    assert.match(faked.note, /Claimed built but gave no quote that exists/);
+    assert.equal(settle({ id: "R1", verdict: "partial", evidence: [], missing: "x", note: "" }, r, by).verdict, "unclear");
+    const partial = settle({ id: "R1", verdict: "partial", evidence: [real], missing: "password reset", note: "" }, r, by);
+    assert.deepEqual([partial.verdict, partial.missing], ["partial", "password reset"]);
+    assert.equal(settle({ id: "R1", verdict: "missing", evidence: [], missing: "ignored", note: "" }, r, by).missing, "");
+  });
+  test("verdicts are read strictly: an unknown verdict is unclear, a result with no id is dropped", () => {
+    const v = parseVerdicts(JSON.stringify({ results: [{ id: "R1", verdict: "done!" }, { verdict: "built" }, { id: "R2", verdict: "built", evidence: [{ file: "./src/a.ts", quote: "q" }] }] }));
+    assert.deepEqual(v.map((x) => [x.id, x.verdict]), [["R1", "unclear"], ["R2", "built"]]);
+    assert.equal(v[1].evidence[0].file, "src/a.ts");
+  });
+});
+
+describe("checking requirements against the code", () => {
+  const judgeAs = (fn: (user: string) => object | string, seen: string[] = []) => async (m: Msg[]) => {
+    seen.push(m[1].content);
+    const r = fn(m[1].content);
+    return typeof r === "string" ? r : JSON.stringify(r);
+  };
+  test("a real implementation is built, an invented claim is unclear, and a requirement matching no code never costs a model call", async () => {
+    const dir = repo(PROJECT);
+    const seen: string[] = [];
+    const call = judgeAs(() => ({ results: [
+      { id: "R1", verdict: "built", evidence: [{ file: "src/screens/LoginScreen.tsx", quote: "export function LoginScreen() {" }], note: "present" },
+      { id: "R2", verdict: "built", evidence: [{ file: "src/screens/OrderList.tsx", quote: "an invented line of code here" }], note: "looks done" },
+    ] }), seen);
+    const out = await checkRequirements({ call, repoRoot: dir, requirements: [req("R1", "Users can sign in with email", ["LoginScreen"]), req("R2", "Orders are listed", ["OrderList"]), req("R3", "Push notifications arrive", ["fcmToken"])] });
+    assert.deepEqual(out.map((o) => o.verdict), ["built", "unclear", "missing"]);
+    assert.equal(seen.length, 1, "one call for the two that had code");
+    assert.ok(!seen[0].includes("R3"), "the one with no code was not even asked about");
+    assert.match(out[2].note, /No code in the project matched it/);
+  });
+  test("requirements go to the model four at a time", async () => {
+    const dir = repo(PROJECT);
+    const seen: string[] = [];
+    const reqs = Array.from({ length: 9 }, (_, i) => req(`R${i + 1}`, "login screen", ["LoginScreen"]));
+    await checkRequirements({ call: judgeAs(() => ({ results: [] }), seen), repoRoot: dir, requirements: reqs });
+    assert.equal(seen.length, 3);
+  });
+  test("a model that fails or skips a requirement leaves it unclear, never built, and never throws", async () => {
+    const dir = repo(PROJECT);
+    const failing = await checkRequirements({ call: async () => { throw new Error("down"); }, repoRoot: dir, requirements: [req("R1", "login", ["LoginScreen"])] });
+    assert.equal(failing[0].verdict, "unclear");
+    const skipped = await checkRequirements({ call: judgeAs(() => ({ results: [] })), repoRoot: dir, requirements: [req("R1", "login", ["LoginScreen"])] });
+    assert.match(skipped[0].note, /could not be completed/);
+  });
+  test("a 'missing' verdict where closely matching code exists is flagged, so it is checked before it is rebuilt", async () => {
+    const dir = repo(PROJECT);
+    const out = await checkRequirements({ call: judgeAs(() => ({ results: [{ id: "R1", verdict: "missing", note: "not there" }] })), repoRoot: dir, requirements: [req("R1", "sign in with email", ["LoginScreen", "signInWithEmail", "email"])] });
+    assert.equal(out[0].verdict, "missing");
+    assert.match(out[0].note, /code that matched closely was found in src\/screens\/LoginScreen\.tsx/);
+  });
+});
+
+describe("the whole check", () => {
+  const model = (extract: object | Error, verdicts: object = { results: [] }, seen: Msg[][] = []) => async (m: Msg[]) => {
+    seen.push(m);
+    if (/decide whether a software request is about FEATURES/.test(m[0].content)) {
+      if (extract instanceof Error) throw extract;
+      return JSON.stringify(extract);
+    }
+    return JSON.stringify(verdicts);
+  };
+  test("a bug fix is not a feature request: one cheap call, nothing searched", async () => {
+    const seen: Msg[][] = [];
+    const r = await checkExistence({ call: model({ applies: false, requirements: [] }, {}, seen), repoRoot: repo(PROJECT), request: "fix the crash on login" });
+    assert.deepEqual([r.applies, r.items.length, r.allBuilt], [false, 0, false]);
+    assert.equal(seen.length, 1);
+  });
+  test("the named spec reaches the extractor, and everything built means allBuilt", async () => {
+    const seen: Msg[][] = [];
+    const call = model(
+      { applies: true, requirements: [{ text: "Users can sign in with email", terms: ["LoginScreen"] }] },
+      { results: [{ id: "R1", verdict: "built", evidence: [{ file: "src/screens/LoginScreen.tsx", quote: "export function LoginScreen() {" }], note: "" }] },
+      seen
+    );
+    const r = await checkExistence({ call, repoRoot: repo(PROJECT), request: "build login per the spec", docs: "SPEC: users sign in with an email address" });
+    assert.match(seen[0][1].content, /A document the request names \(the spec\):\nSPEC: users sign in/);
+    assert.equal(r.allBuilt, true);
+  });
+  test("one requirement not built means not allBuilt; an extraction failure says nothing was checked", async () => {
+    const call = model({ applies: true, requirements: [{ text: "login", terms: ["LoginScreen"] }, { text: "push notifications", terms: ["fcmToken"] }] }, { results: [{ id: "R1", verdict: "built", evidence: [{ file: "src/screens/LoginScreen.tsx", quote: "export function LoginScreen() {" }] }] });
+    assert.equal((await checkExistence({ call, repoRoot: repo(PROJECT), request: "r" })).allBuilt, false);
+    const failed = await checkExistence({ call: model(new Error("down")), repoRoot: repo(PROJECT), request: "r" });
+    assert.equal(failed.applies, false);
+    assert.match(failed.note, /nothing was checked against the code/);
+  });
+  test("the report shows what is built with its evidence, what is partial and missing; the planner is told to reuse and plan only the rest", () => {
+    const r = {
+      applies: true, allBuilt: false, note: "",
+      items: [
+        { req: req("R1", "Users can sign in"), verdict: "built" as const, evidence: [{ file: "src/a.ts", quote: "export function LoginScreen() {" }], missing: "", note: "" },
+        { req: req("R2", "Orders listed with filters"), verdict: "partial" as const, evidence: [{ file: "src/o.ts", quote: "orders.map((o) => <OrderRow />)" }], missing: "the filters", note: "" },
+        { req: req("R3", "Push notifications"), verdict: "missing" as const, evidence: [], missing: "", note: "" },
+        { req: req("R4", "Something vague"), verdict: "unclear" as const, evidence: [], missing: "", note: "too vague" },
+      ],
+    };
+    const text = renderExistence(r);
+    for (const re of [/Already built \(1\):[\s\S]*Users can sign in[\s\S]*src\/a\.ts: `export function LoginScreen/, /Partly built \(1\):[\s\S]*still missing: the filters/, /Not built \(1\):[\s\S]*Push notifications/, /Could not tell \(1\):[\s\S]*too vague/]) assert.match(text, re);
+    const section = existencePlannerSection(r);
+    assert.match(section, /Do NOT rebuild or rewrite it: reuse it, and plan only what is partial or missing/);
+    assert.match(section, /Already built:\n- Users can sign in -> src\/a\.ts/);
+    assert.match(section, /Partly built \(extend the existing code in place\):\n- Orders listed with filters -> exists in src\/o\.ts.*still missing: the filters/);
+    assert.match(section, /these are the work\):\n- Push notifications\n- Something vague/);
+    assert.equal(existencePlannerSection({ ...r, items: [r.items[2], r.items[3]] }), "", "nothing built, nothing to tell the planner");
+  });
+});
+
+describe("the roadmap does not plan what already exists", () => {
+  const IDEA = { conventions: [], assumptions: [], questions: [], units: [
+    { title: "Login screen", area: "Auth", summary: "Sign in with email", acceptance: ["a user can sign in"] },
+    { title: "Order history", area: "Orders", summary: "List a user's orders with filters", acceptance: ["orders are listed"] },
+    { title: "Push notifications", area: "Alerts", summary: "Notify about new orders", acceptance: ["a push arrives"] },
+  ] };
+  const complete = (calls: string[] = []) => async (m: Msg[]) => {
+    calls.push(m[0].content.slice(0, 40));
+    if (/ALREADY implemented/.test(m[0].content)) {
+      return JSON.stringify({ results: [
+        { id: "R1", verdict: "built", evidence: [{ file: "src/screens/LoginScreen.tsx", quote: "export function LoginScreen() {" }], note: "" },
+        { id: "R2", verdict: "partial", evidence: [{ file: "src/screens/OrderList.tsx", quote: "orders.map((o) => <OrderRow key={o.id} order={o} />);" }], missing: "the filters", note: "" },
+      ] });
+    }
+    return JSON.stringify(IDEA);
+  };
+  test("an unit the code already has is marked done with its file, a partly built one says what is missing, and a missing one is left to do", async () => {
+    const dir = repo(PROJECT);
+    const out = await createRoadmap({ repoRoot: dir, complete: complete() as any }, { goal: "bring the app up to the spec" });
+    assert.equal(out.ok, true);
+    const rm = loadRoadmap(dir)!;
+    const by = (t: string) => rm.units.find((u) => u.title === t)!;
+    assert.equal(by("Login screen").status, "done");
+    assert.deepEqual(by("Login screen").done!.files, ["src/screens/LoginScreen.tsx"]);
+    assert.match(by("Login screen").done!.summary!, /Already built, verified in the code: src\/screens\/LoginScreen\.tsx/);
+    assert.equal(by("Order history").status, "todo");
+    assert.match(by("Order history").summary, /Already in place: src\/screens\/OrderList\.tsx\. Still missing: the filters\./);
+    assert.equal(by("Push notifications").status, "todo");
+    assert.match(out.text, /1 unit\(s\) are already built \(marked done, with the file as evidence\) and 1 are partly built/);
+  });
+  test("it can be turned off, and an empty project asks the model nothing extra", async () => {
+    const off: string[] = [];
+    await createRoadmap({ repoRoot: repo(PROJECT), complete: complete(off) as any }, { goal: "g", verifyExisting: false });
+    assert.ok(!off.some((c) => /ALREADY implemented/.test(c)));
+    const empty: string[] = [];
+    const dir = repo();
+    await createRoadmap({ repoRoot: dir, complete: complete(empty) as any }, { goal: "g" });
+    assert.ok(!empty.some((c) => /judge whether requirements/i.test(c)));
+    assert.deepEqual(loadRoadmap(dir)!.units.map((u) => u.status), ["todo", "todo", "todo"]);
+  });
+});
+
+describe("how it reaches a task", () => {
+  test("a request is checked before it is planned; everything built stops there; only the rest reaches the Planner", () => {
+    const idx = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
+    assert.match(idx, /async function checkWhatExists\(/);
+    assert.match(idx, /if \(!config\.existence\.enabled\) return "task";/);
+    assert.match(idx, /if \(found\.allBuilt\) \{[\s\S]*?return "handled";/);
+    assert.match(idx, /existenceSection = existencePlannerSection\(found\);/);
+    assert.match(idx, /\$\{lastFailureSection\}\$\{securitySection\}\$\{existenceSection\}/);
+    const cfg = fs.readFileSync(new URL("../src/config.ts", import.meta.url), "utf-8");
+    assert.match(cfg, /existence: z\s*\.object\(\{[\s\S]*?enabled: z\.boolean\(\)\.default\(true\)[\s\S]*?maxRequirements: z\.number\(\)\.int\(\)\.min\(1\)\.max\(30\)\.default\(12\)/);
+  });
+});
+
+describe("a big request run as one task is checked too", () => {
+  test("the plain task path, the interactive 'single task' choice and the unattended program path all check first", () => {
+    const idx = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
+    assert.equal((idx.match(/await checkWhatExists\(/g) ?? []).length, 4, "plain task, the program question, single chosen, and the unattended program path");
+    assert.match(idx, /programResult === "single" \? \(\(await checkWhatExists\(trimmed, client, config, repoRoot\)\) === "handled" \? "handled" : "task"\)/);
+    assert.match(idx, /if \(said !== "single"\) return;\s*if \(\(await checkWhatExists\(instructions\.trim\(\), client, config, repoRoot\)\) === "handled"\) return;/);
+  });
+});
+
+describe("a request too big for one task goes to a roadmap by itself", () => {
+  const idx = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
+  test("the settings default to on, with a threshold of 6 things still missing", () => {
+    const cfg = fs.readFileSync(new URL("../src/config.ts", import.meta.url), "utf-8");
+    assert.match(cfg, /roadmap: z\s*\.object\(\{[\s\S]*?autoRoute: z\.boolean\(\)\.default\(true\),\s*autoMinRequirements: z\.number\(\)\.int\(\)\.min\(2\)\.max\(30\)\.default\(6\)/);
+  });
+  test("it is decided from what is still missing; unattended with nothing to measure, a roadmap; borderline still asks", () => {
+    assert.match(idx, /const clearlyBig = left === null \? !canAsk : left >= min;/);
+    assert.match(idx, /if \(clearlyBig && !roadmapExists\) \{[\s\S]*?return await planRoadmap\(\);/);
+    assert.match(idx, /if \(!canAsk\) return "single";[\s\S]*?This looks bigger than one task/);
+    assert.match(idx, /if \(!offer \|\| !canAsk\) \{[\s\S]*?\/roadmap run/);
+  });
+  test("the check is paid once per request, and the unattended path uses the same decision", () => {
+    assert.match(idx, /if \(existenceChecked\?\.text === text\) return "task";/);
+    assert.match(idx, /const said = await handleProgram\(instructions\.trim\(\), programReferenceHint, false\);\s*if \(said !== "single"\) return;/);
+  });
+});
+
+describe("a comment is not the feature", () => {
+  const by = new Map([["src/a.ts", "/**\n * Sends the reminder email to the user.\n */\nexport function sendReminder(user) {\n  return mailer.send(user.email, 'reminder');\n}\n"], ["src/b.py", "# handles the export\ndef export_csv(rows):\n    return write(rows)\n"]]);
+  test("a quote of only comment lines is rejected; one with a line of code is accepted", async () => {
+    const { hasCode } = await import("../src/existence.js");
+    assert.equal(validQuotes([{ file: "src/a.ts", quote: " * Sends the reminder email to the user." }], by).length, 0);
+    assert.equal(validQuotes([{ file: "src/a.ts", quote: "/**\n * Sends the reminder email to the user.\n */" }], by).length, 0);
+    assert.equal(validQuotes([{ file: "src/a.ts", quote: "export function sendReminder(user) {" }], by).length, 1);
+    assert.equal(validQuotes([{ file: "src/b.py", quote: "# handles the export" }], by).length, 0);
+    assert.equal(validQuotes([{ file: "src/b.py", quote: "def export_csv(rows):" }], by).length, 1);
+    assert.equal(hasCode("// only a comment"), false);
+    assert.equal(hasCode("// note\nconst a = 1;"), true);
+    assert.equal(hasCode("#include <stdio.h>"), false, "a preprocessor line is not counted as code by itself, which is the safe side");
+  });
+  test("a built verdict backed only by a comment becomes unclear", () => {
+    const r = settle({ id: "R1", verdict: "built", evidence: [{ file: "src/a.ts", quote: " * Sends the reminder email to the user." }], missing: "", note: "" }, req("R1", "reminder emails"), by);
+    assert.equal(r.verdict, "unclear");
+  });
+  test("a comment mentioning the feature does not pull the window away from the code that does it", () => {
+    const text = ["// reminder reminder reminder email", "x", "y", "z", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "mailer.send(reminder)"].join("\n");
+    assert.match(windows(text, ["reminder", "email"], 2), /27: mailer\.send\(reminder\)/);
+  });
+  test("the judge is told a comment is not evidence; big central files are searched", () => {
+    assert.match(JUDGE_SYSTEM, /never a comment, docstring or documentation/);
+    const src = fs.readFileSync(new URL("../src/existence.ts", import.meta.url), "utf-8");
+    assert.match(src, /collectFiles\(o\.repoRoot, 4000, 1_500_000\)/);
+  });
+});

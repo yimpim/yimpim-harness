@@ -1,0 +1,113 @@
+models:
+  discovery:
+    - google/gemini-3.8-flash
+    - deepseek/deepseek-v4-pro-0813
+  planner:
+    - google/gemini-3.8-flash
+    - deepseek/deepseek-v4-pro-0813
+  editor:
+    - deepseek/deepseek-v4.1-flash
+    - google/gemini-3.8-flash
+  verifier:
+    - google/gemini-3.8-flash
+    - anthropic/claude-3.5-sonnet
+    - openai/gpt-4o-mini
+
+prompts:
+  systemPersona: >
+    You are an elite, pragmatic principal software engineer working inside a
+    codebase. Adapt automatically to whatever tech stack, programming language,
+    frameworks, and conventions exist in this repository. Inspect the existing
+    project structure, configuration files, and code style before making
+    changes. Write clean, idiomatic, production-ready code with robust error
+    handling and minimal diffs.
+  verifierPersona: >
+    You are an autonomous Principal QA and Security Verification Engineer. You
+    have access to a shell executor, mock patching tools, android/iOS emulator,
+    and a real headless browser with visual vision audits. You verify
+    implementations thoroughly across the full scope by: 1. Running test suites
+    and linters. 2. Starting dev servers and injecting mock fixtures or fake
+    data if endpoints or databases aren't running live. 3. Navigating web UIs,
+    clicking buttons, submitting forms, and inspecting the rendered state across
+    multi-step flows using visual screenshots. 4. Asserting that the feature
+    satisfies all functional, UI, and edge-case requirements before passing.
+
+limits:
+  maxDiscoveryQuestions: 6
+  maxToolRounds: 80
+  maxRepairAttemptsPerPhase: 2
+  # Hard cap on distinct files one phase may modify. This is the guard against a
+  # confused repair pass rewriting unrelated parts of the project.
+  maxFilesPerPhase: 15
+  maxFileBytes: 120000
+  maxSearchResults: 100
+  apiMaxAttempts: 4
+  apiBaseDelayMs: 1000
+  checkpointEveryToolCall: true
+
+git:
+  autoCommit: true
+  createPhaseCheckpoint: true
+  commitPrefix: "yimpim"
+
+# Binary executables the agent and autonomous verifier are authorized to invoke
+execution:
+  allowedCommands:
+    - "git"
+    - "npm"
+    - "pnpm"
+    - "yarn"
+    - "npx"
+    - "node"
+    - "python"
+    - "pytest"
+    - "poetry"
+    - "pip"
+    - "wrangler"
+    - "cargo"
+    - "go"
+    - "make"
+    - "bash"
+    - "sh"
+
+safety:
+  allowedPaths: []
+  blockedDirectories:
+    - ".git"
+    - "node_modules"
+    - ".venv"
+    - "venv"
+    - "__pycache__"
+    - ".agent"
+    - "dist"
+    - "build"
+    - ".wrangler"
+    - ".idea"
+  blockedFilePatterns:
+    - "*.keystore"
+    - "*.jks"
+    - "*.p12"
+    - "*.pem"
+    - "*.key"
+    - ".env"
+    - "*.env.*"
+
+recovery:
+  stateDirectory: ".agent"
+  keepBackups: true
+  maxBackups: 10
+  autoResume: false
+  dirtyTreePolicy: "inspect"
+
+# QA sign-off points that would otherwise pause for a human (visual advisories on
+# a pass, deferred styling decisions) instead auto-accept and log to QA_REVIEW.md.
+# Set to false to get the old interactive prompts back.
+interaction:
+  autonomous: true
+
+memory:
+  maxEntries: 50
+  summaryWordLimit: 15
+  stateFile: ".agent/repo_map.json"
+remote:
+  brokerUrl: ""

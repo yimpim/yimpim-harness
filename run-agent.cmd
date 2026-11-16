@@ -1,0 +1,2 @@
+@echo off
+node --env-file-if-exists=.env dist\index.js %*

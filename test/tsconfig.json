@@ -1,0 +1,18 @@
+{
+  // Purely for editor discovery: most editors' TS language servers walk up
+  // from the currently open file looking for the nearest "tsconfig.json" by
+  // that exact filename. The root tsconfig.json's own `include` is
+  // ["src/**/*"] only, so a file under test/ never matched it and the editor
+  // fell back to no project at all — losing `types: ["node"]" and producing
+  // "Cannot find name 'node:assert/strict'" even though the actual build
+  // (tsconfig.test.json, via `npm run check:test`) has always covered these
+  // files correctly. This file changes nothing about the command-line
+  // check — that still runs against ../tsconfig.test.json — it just gives
+  // editors something to find in the one place they actually look.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true
+  },
+  "include": ["**/*", "../src/**/*"]
+}
