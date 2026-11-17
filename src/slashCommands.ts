@@ -9,6 +9,13 @@
 export interface SlashCommand {
   cmd: string;
   desc: string;
+  /** A sub-command: listed only once the line already starts with its parent, so "/r" stays a short list. */
+  parent?: string;
+}
+
+/** Whether an entry belongs in the list for what has been typed so far. */
+export function matchesTyped(c: SlashCommand, line: string): boolean {
+  return c.cmd.startsWith(line) && (!c.parent || line.startsWith(c.parent));
 }
 
 export const DESKTOP_SLASH_COMMANDS: SlashCommand[] = [
@@ -24,6 +31,19 @@ export const DESKTOP_SLASH_COMMANDS: SlashCommand[] = [
   { cmd: "/usage", desc: "Lifetime tokens and cost — by worker, model and phase" },
   { cmd: "/approvals", desc: "Commands approved for this project — list or revoke" },
   { cmd: "/plan", desc: "The current plan" },
+  { cmd: "/roadmap", desc: "A big job split into units, tracked until it is done" },
+  { cmd: "/roadmap new", desc: "Plan a whole job from an idea", parent: "/roadmap" },
+  { cmd: "/roadmap port", desc: "Plan a rebuild from a reference folder", parent: "/roadmap" },
+  { cmd: "/roadmap run", desc: "Start the next unit", parent: "/roadmap" },
+  { cmd: "/roadmap add", desc: "Add to the roadmap (or say what to drop)", parent: "/roadmap" },
+  { cmd: "/roadmap drop", desc: "Leave a unit out: /roadmap drop U003", parent: "/roadmap" },
+  { cmd: "/roadmap reopen", desc: "Put a blocked or failed unit back", parent: "/roadmap" },
+  { cmd: "/roadmap done", desc: "Mark a unit done by hand", parent: "/roadmap" },
+  { cmd: "/roadmap open", desc: "Note what a done unit left open", parent: "/roadmap" },
+  { cmd: "/roadmap sync", desc: "Add reference files that appeared since", parent: "/roadmap" },
+  { cmd: "/roadmap reset", desc: "Throw the roadmap away (a copy of finished units is kept)", parent: "/roadmap" },
+  { cmd: "/design", desc: "Make a logo, favicon and app icons" },
+  { cmd: "/pentest", desc: "Security audit of this project (read-only)" },
   { cmd: "/push-repo", desc: "Connect to a GitHub remote and push now" },
   { cmd: "/push-local", desc: "Commit pending work, turn auto-push OFF" },
   { cmd: "/branch", desc: "Create or switch to a branch" },

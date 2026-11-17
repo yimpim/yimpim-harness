@@ -1216,6 +1216,10 @@ is added, dropped or reopened, on `/roadmap reset`, after a reconnect and for `g
 - `task.start` carries optional `roadmapId` and `roadmapUnitId` only for a roadmap unit. An ordinary task has neither.
 - No cost fields on roadmap events by design. When a roadmap is first started, the desktop asks a `question`
   (choices exactly `I understand, start` / `Cancel`) with the spending notice, once per roadmap. Unattended, it only logs it.
+  When the roadmap was just chosen in the "bigger than one task" question, that question carries the same notice in its text and
+  its first choice is now `Plan a roadmap (many model calls, may cost money)` (the other is unchanged: `Run it as a single task`);
+  choosing it counts as the confirmation, so the separate spending question is not asked for that roadmap. Match choices by
+  position or by the prefix `Plan`, not by the exact label.
 - `/design` and `/pentest` now send `task.start`/`task.end` (with `tokensUsed`/`costUsd`) and a `worker.start`/`worker.end`
   per model call (`DESIGNER`, `SECURITY`), and are counted in `usage.totals`.
 
