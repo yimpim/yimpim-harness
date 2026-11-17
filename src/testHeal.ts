@@ -195,7 +195,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   const sourceText = sources
     .map((s) => {
       try {
-        return `--- ${s}\n${fs.readFileSync(path.join(repoRoot, s), "utf-8").slice(0, 60_000)}`;
+        return `--- ${s}\n${fs.readFileSync(path.join(repoRoot, s), "utf-8")}`;
       } catch {
         return "";
       }
@@ -268,7 +268,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       for (const p of fresh) provided.add(p);
       messages.push({
         role: "user",
-        content: fresh.map((p) => `--- ${p}\n${fs.readFileSync(path.join(repoRoot, p), "utf-8").slice(0, 60_000)}`).join("\n\n"),
+        content: fresh.map((p) => `--- ${p}\n${fs.readFileSync(path.join(repoRoot, p), "utf-8")}`).join("\n\n"),
       });
     }
     const verdict = String(parsed?.verdict ?? "");
@@ -314,7 +314,7 @@ export function failureSignature(output: string): string {
     .replace(ANSI, "")
     .split(/\r?\n/)
     .map((l) => l.trim())
-    .find((l) => /(Error|Cannot find|is null|is undefined|not a function|Invariant|NativeModule|Unable to resolve)/.test(l));
+    .find((l) => !/^ats/.test(l) && /(Error|Cannot find|is null|is undefined|not a function|Invariant|NativeModule|Unable to resolve)/.test(l));
   return (line ?? "").replace(/\d+/g, "#").replace(/(['"`])[^'"`]{40,}\1/g, "$1…$1").slice(0, 140);
 }
 

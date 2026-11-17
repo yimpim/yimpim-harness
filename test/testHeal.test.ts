@@ -242,3 +242,28 @@ describe("a reply that is not the JSON asked for", () => {
     assert.match(report.results[0].note, /did not return usable JSON/);
   });
 });
+
+describe("signatures and whole files", () => {
+  test("a stack frame is never the signature", () => {
+    const a = "FAIL a\n  ● x\n    TypeError: undefined is not a function\n      at defaultOnUncaughtError (node_modules/r/r.js:1:2)";
+    assert.match(failureSignature(a), /TypeError/);
+    assert.ok(!/defaultOnUncaught/.test(failureSignature(a)));
+  });
+  test("a big source file reaches the model whole", async () => {
+    write("src/Big.tsx", "// start\n" + "x".repeat(200_000) + "\n// the-end\n");
+    write("__tests__/b.test.ts", `import "../src/Big";\nexpect(1).toBe('OLD');\n`);
+    let seen = "";
+    await healTests({
+      repoRoot: dir,
+      run: async (root) => {
+        const bad = fs.readFileSync(path.join(root, "__tests__/b.test.ts"), "utf8").includes("OLD");
+        return { ok: !bad, output: bad ? "FAIL __tests__/b.test.ts\n  ● x" : "" };
+      },
+      call: async (m) => {
+        seen = m.map((x) => x.content).join("\n");
+        return JSON.stringify({ verdict: "code-bug", reason: "r" });
+      },
+    });
+    assert.ok(seen.includes("// the-end"));
+  });
+});
