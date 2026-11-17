@@ -968,6 +968,13 @@ export const INTENT_SYSTEM = `Classify what the user wants. Respond with ONLY th
   message describes a new feature or a concrete change to make regardless of
   what's found ("add X", "change Y to Z"), that is "task" instead, even if it
   also asks you to verify the result afterward.
+  NOT "verify": checking WORK AGAINST A DOCUMENT. "We finished the brief in
+  docs/X.md, check that everything in it is done", "see what of this spec is
+  built and do the rest", "compare the code to the requirements". That is not
+  running the app to see if it behaves; it is reading the code against a list
+  of requirements, finding what is built and what is missing, and doing the
+  missing part. Classify it "task" (a very large document is "program"): the
+  work already in the code is found first and only what is missing is planned.
 
 "program" — a request for a WHOLE body of work that cannot be one task: building a complete product, app, site or
   system from an idea ("build me something like X", "an app for Y with accounts, listings, messaging and payments");

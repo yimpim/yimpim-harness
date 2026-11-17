@@ -20,7 +20,8 @@ describe("the roadmap is wired into the run loop", () => {
     const record = src.indexOf("finishUnit(repoRoot, activeUnitId");
     const offer = src.indexOf("await offerNextUnit()", record);
     assert.ok(record > 0 && offer > record);
-    assert.match(src, /finishUnit\(repoRoot, activeUnitId, \{ commit, files: \[\.\.\.taskTouchedFiles\]/);
+    assert.match(src, /finishUnit\(repoRoot, activeUnitId, \{ commit, files, summary/);
+    assert.match(src, /diff-tree.{0,40}--name-only/);
   });
 
   test("answering 'no' to the next unit leaves the roadmap alone", () => {

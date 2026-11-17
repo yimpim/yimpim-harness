@@ -39,6 +39,7 @@ import { runDesign } from "./designer.js";
 import { openRenderer } from "./svgRender.js";
 import { ensureDesignSystem } from "./uiDesign.js";
 import { stageDesignImage } from "./designDelivery.js";
+import { parseLenient } from "./jsonRepair.js";
 import { checkExistence, existencePlannerSection, renderExistence } from "./existence.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { runSecurityAudit } from "./securityAudit.js";
@@ -46,7 +47,7 @@ import { existingDirOnly, existingFilesOnly, projectLayout, renderLayout } from 
 import { loadRepoMap, recordConfirmedFindings } from "./repoMap.js";
 import { describeSync, syncRepoMap } from "./repoMapSync.js";
 import { buildPhaseProgress, renderProgressNote, PhaseProgress } from "./progressNote.js";
-import { attachTaskToUnit, loadRoadmap, nextUnits, onRoadmapChanged, progress as roadmapProgress, renderRoadmap, roadmapWire, saveRoadmap } from "./roadmap.js";
+import { archiveFinishedRoadmap, attachTaskToUnit, loadRoadmap, nextUnits, onRoadmapChanged, progress as roadmapProgress, renderRoadmap, roadmapWire, saveRoadmap } from "./roadmap.js";
 import {
   FlowDeps,
   MAX_UNIT_ATTEMPTS,
@@ -3179,7 +3180,15 @@ ${instructions}`;
     // cause decides: the Planner either has the Editor add a small dev-only way
     // to reach it (handled as a repair-style retry, then QA looks again) or
     // accepts the gap, records it, and moves on. Once per phase.
-    if (result.passed && !testabilityTried && result.unreachableStates && result.unreachableStates.length > 0) {
+    // A verify-only task changes nothing: a state QA could not reach is reported as unverified, never built a hook for.
+    if (result.passed && verifyOnly && !testabilityTried && result.unreachableStates && result.unreachableStates.length > 0) {
+      testabilityTried = true;
+      const note = `Could not verify (a verify-only task adds no code to reach it): ${result.unreachableStates.join("; ")}.`;
+      console.log(`\n🧪 [QA] ${note}`);
+      appendQaReviewLog(repoRoot, phaseName, "Could not verify (verify-only)", [note]);
+      result.visualAdvisories = [...(result.visualAdvisories ?? []), note];
+    }
+    if (result.passed && !verifyOnly && !testabilityTried && result.unreachableStates && result.unreachableStates.length > 0) {
       testabilityTried = true;
       const states = result.unreachableStates;
       console.log(`\n🧪 [QA] Could not reach ${states.length} state(s) the requirement needs:`);
@@ -4846,6 +4855,7 @@ async function main(): Promise<void> {
         askedAt: new Date().toISOString(),
       });
     const SINGLE = "Run it as a single task";
+    archiveFinishedRoadmap(repoRoot);
     const existing = loadRoadmap(repoRoot);
     if (existing) {
       const pr = roadmapProgress(existing);
@@ -5775,7 +5785,10 @@ You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DI
     }
     for (const jsonBlock of jsonBlocks) {
       try {
-        const parsed = JSON.parse(jsonBlock);
+        const lenient = parseLenient(jsonBlock);
+        if (!lenient) throw new Error(`not JSON, and not repairable (${jsonBlock.length} characters)`);
+        const parsed = lenient.value;
+        if (lenient.repaired) console.log("[MEMORY] 🔧 Discovery's notes had a small JSON slip; repaired and kept them.");
         if (parsed.shortDescription) memory.shortDescription = parsed.shortDescription;
         if (Array.isArray(parsed.techStack)) {
           memory.techStack = mergeTechStack(memory.techStack, parsed.techStack);
@@ -6740,7 +6753,19 @@ The user wants you to decide, not ask: ${d.choice}`);
           } catch {
             // no commit to point at
           }
-          finishUnit(repoRoot, activeUnitId, { commit, files: [...taskTouchedFiles], summary: activePlan?.goal });
+          // What the unit produced: the files in the commit it made, when that commit is new (not one an earlier unit already
+          // recorded). Otherwise what this task touched. Logs, review notes and tool caches are left out either way.
+          let files = [...taskTouchedFiles];
+          const usedBefore = new Set((loadRoadmap(repoRoot)?.units ?? []).map((u) => u.done?.commit).filter(Boolean));
+          if (commit && !usedBefore.has(commit.slice(0, 40))) {
+            try {
+              const names = (await repo.git(["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit])).split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+              if (names.length > 0) files = names;
+            } catch {
+              // keep what the task touched
+            }
+          }
+          finishUnit(repoRoot, activeUnitId, { commit, files, summary: activePlan?.goal });
           const rm = loadRoadmap(repoRoot);
           if (rm) {
             const pr = roadmapProgress(rm);

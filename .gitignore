@@ -27,3 +27,8 @@ src/combined_typescript.txt
 # Deploy script state on the VM
 .deploy-failed-commit
 .deploy-broker-fingerprint
+
+# Local notes and logs that must never be committed to the public repo
+docs/remote_history/
+QA_REVIEW.md
+verify-tmp.txt
