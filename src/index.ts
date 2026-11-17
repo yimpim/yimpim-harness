@@ -597,6 +597,7 @@ async function checkWhatExists(text: string, client: OpenRouterClient, config: A
       shortlist,
       maxRequirements: config.existence.maxRequirements,
       built: builtByUnits(repoRoot),
+      exclude: [loadRoadmap(repoRoot)?.reference?.dir ?? ""],
     });
     if (found.applies) {
       console.log("\n🔎 [EXISTS] Checked what this asks for against the code (each quote below was verified in the file):\n" + renderExistence(found));

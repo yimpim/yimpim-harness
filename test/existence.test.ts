@@ -430,3 +430,34 @@ describe("an audit that only asks for findings", () => {
     assert.match(t, /Nothing was planned or changed, as you asked/);
   });
 });
+
+describe("a folder being ported from is never proof that the project has it", () => {
+  const KT = "fun roadmaps() { if (event.state.equals(\"reset\", true)) roadmaps.remove(event.roadmapId) }\n";
+  const files = {
+    "reference/android-ui/timeline/TimelineReducer.kt": KT,
+    "reference/timeline-port/expo_reference/timeline.ts": "export function workerTypeOf() { return 'EDITOR'; }\n",
+    "src/preferences/theme.ts": "export const roadmapsEnabled = true;\n",
+    "src/models/timeline.ts": "export function reduce() { return 1; }\n",
+  };
+  test("reference copies and the roadmap's own reference folder are not candidates; a folder that merely contains the word is", () => {
+    const dir = repo(files);
+    const seen: string[] = [];
+    const call = async (m: Msg[]) => { seen.push(m[1].content); return JSON.stringify({ results: [] }); };
+    return checkRequirements({ call, repoRoot: dir, requirements: [req("R1", "roadmaps reset removes the roadmap", ["roadmaps", "reset"])], exclude: [] }).then(() => {
+      const text = seen.join("\n");
+      assert.ok(!text.includes("reference/android-ui") && !text.includes("expo_reference"), text);
+      assert.ok(text.includes("src/preferences/theme.ts"), "preferences/ is not a reference folder");
+    });
+  });
+  test("a quote from a reference copy no longer counts as evidence", () => {
+    const byRel = new Map([["reference/android-ui/timeline/TimelineReducer.kt", KT]]);
+    assert.deepEqual(validQuotes([{ file: "reference/android-ui/timeline/TimelineReducer.kt", quote: "roadmaps.remove(event.roadmapId)" }], byRel), []);
+  });
+  test("an explicitly named reference folder is left out too", async () => {
+    const dir = repo({ "legacy_app/Reducer.kt": KT, "src/models/timeline.ts": "export const x = 'roadmaps reset';\n" });
+    const seen: string[] = [];
+    const call = async (m: Msg[]) => { seen.push(m[1].content); return JSON.stringify({ results: [] }); };
+    await checkRequirements({ call, repoRoot: dir, requirements: [req("R1", "roadmaps reset", ["roadmaps", "reset"])], exclude: ["legacy_app/"] });
+    assert.ok(!seen.join("\n").includes("legacy_app"));
+  });
+});

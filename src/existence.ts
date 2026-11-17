@@ -47,7 +47,9 @@ export interface ExistenceResult {
 
 const clip = (v: unknown, n: number) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
-const NOT_EVIDENCE = /(^|\/)(__tests__|tests?|spec|e2e|fixtures?|mocks?|examples?|samples?|docs?|node_modules|dist|build)\/|\.(test|spec|stories|min)\.[a-z]+$/i;
+// "reference" folders hold the other app being ported from (an Android copy, a design export), which is the SOURCE of a
+// requirement, never proof that this project has it. Matched by whole folder name: "preferences/" is not one.
+const NOT_EVIDENCE = /(^|\/)(__tests__|tests?|spec|e2e|fixtures?|mocks?|examples?|samples?|docs?|node_modules|dist|build|references?|[\w-]+_reference|android-ui)\/|\.(test|spec|stories|min)\.[a-z]+$/i;
 
 // ---------------------------------------------------------------------------
 // 1. the requirements
@@ -248,6 +250,8 @@ export interface CheckOptions {
   call: Call;
   /** What earlier roadmaps recorded as done: searched first, and told to the judge as a lead. */
   built?: BuiltUnit[];
+  /** Folders (relative) that hold material being ported from, never evidence: the roadmap's reference folder. */
+  exclude?: string[];
   repoRoot: string;
   requirements: Requirement[];
   /** Files the project's own map ranks for this request: they are searched first. */
@@ -258,7 +262,11 @@ export interface CheckOptions {
 /** Checks each requirement against the code. Never throws: a requirement the model could not judge is "unclear". */
 export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
   // Big central files (an index or a main) are where wiring lives, so they are searched too.
-  const files = o.files ?? collectFiles(o.repoRoot, 4000, 1_500_000);
+  const skip = (o.exclude ?? []).map((d) => d.replace(/\\/g, "/").replace(/^\.?\//, "").replace(/\/+$/, "").toLowerCase()).filter(Boolean);
+  const files = (o.files ?? collectFiles(o.repoRoot, 4000, 1_500_000)).filter((f) => {
+    const rel = f.rel.toLowerCase();
+    return !skip.some((d) => rel === d || rel.startsWith(d + "/"));
+  });
   const byRel = new Map(files.map((f) => [f.rel, f.text]));
   const lower = new Map(files.map((f) => [f.rel, f.text.toLowerCase()]));
   const boost = new Set((o.shortlist ?? []).map((p) => p.replace(/\\/g, "/")));
@@ -339,6 +347,7 @@ export interface ExistenceArgs {
   shortlist?: string[];
   maxRequirements?: number;
   built?: BuiltUnit[];
+  exclude?: string[];
 }
 
 export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult> {
@@ -356,7 +365,7 @@ export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult>
     return { ...none, note: "The requirements could not be extracted, so nothing was checked against the code." };
   }
   if (!parsed || !parsed.applies) return none;
-  const items = await checkRequirements({ call: a.call, repoRoot: a.repoRoot, requirements: parsed.requirements, shortlist: a.shortlist, built: a.built });
+  const items = await checkRequirements({ call: a.call, repoRoot: a.repoRoot, requirements: parsed.requirements, shortlist: a.shortlist, built: a.built, exclude: a.exclude });
   return { applies: true, items, allBuilt: items.length > 0 && items.every((i) => i.verdict === "built"), note: "" };
 }
 
