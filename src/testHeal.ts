@@ -16,8 +16,12 @@ import fs from "fs";
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { focusedTestCommand, isTestPath } from "./focusTests.js";
+import { isTestPath } from "./focusTests.js";
 import { parseLenient } from "./jsonRepair.js";
+import { runSuite, type SuiteRun } from "./testRun.js";
+import { reachableFiles } from "./testGraph.js";
+
+export { runSuite, type SuiteRun };
 
 const execFileAsync = promisify(execFile);
 
@@ -28,6 +32,8 @@ export interface HealResult {
   status: HealStatus;
   /** One line: what was wrong and what was done. */
   note: string;
+  /** The last output of this file's failing run (set when it was not healed). */
+  failure?: string;
   attempts: number;
 }
 
@@ -41,11 +47,6 @@ export interface HealOptions {
   files?: string[];
   /** Replaces the real test runner (tests). */
   run?: (repoRoot: string, files: string[]) => Promise<SuiteRun>;
-}
-
-export interface SuiteRun {
-  ok: boolean;
-  output: string;
 }
 
 const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
@@ -63,22 +64,25 @@ export function failingTestFiles(output: string): string[] {
   return [...found];
 }
 
-/** Runs the project's own test command, narrowed to `files` (the whole suite when empty). */
-export async function runSuite(repoRoot: string, files: string[]): Promise<SuiteRun> {
-  const cmd = focusedTestCommand(repoRoot, files);
-  if (!cmd) return { ok: false, output: "No test script (package.json `test`) or pytest config to run." };
-  try {
-    const { stdout, stderr } = await execFileAsync(cmd.bin, cmd.args, {
-      cwd: repoRoot,
-      timeout: 900_000,
-      maxBuffer: 256 * 1024 * 1024,
-      env: { ...process.env, CI: "true", FORCE_COLOR: "0" },
-      shell: process.platform === "win32",
-    });
-    return { ok: true, output: `${stdout}\n${stderr}` };
-  } catch (err: any) {
-    return { ok: false, output: `${err?.stdout ?? ""}\n${err?.stderr ?? ""}` };
+/** Files a test names by path in a string (source-pinning tests read them with fs), that exist in the repo. */
+export function referencedFiles(repoRoot: string, testRel: string, content: string): string[] {
+  const out = new Set<string>();
+  const dir = path.posix.dirname(testRel.replace(/\\/g, "/"));
+  const re = /['"`]([\w@./-]+\.(?:tsx?|jsx?|mjs|json|py))['"`]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content))) {
+    for (const cand of [m[1], path.posix.normalize(path.posix.join(dir, m[1]))]) {
+      const rel = cand.replace(/^\.\//, "");
+      if (rel.startsWith("..") || /(^|\/)(node_modules|\.git|\.agent)\//.test(rel) || rel === testRel) continue;
+      try {
+        if (fs.statSync(path.join(repoRoot, rel)).isFile()) {
+          out.add(rel);
+          break;
+        }
+      } catch {}
+    }
   }
+  return [...out];
 }
 
 /** Relative imports of a test file that resolve to real files in the repo. */
@@ -130,11 +134,12 @@ export function gutted(before: string, after: string): string | undefined {
 
 const SYSTEM = `You repair a failing test file. A project's tests went red because the code changed and the tests were not updated with it.
 You decide WHO is wrong:
-- "stale-test": the code's new behaviour is intended and the test still asserts the old one (renamed export, changed output, new argument, moved file, changed text). Return the whole corrected test file.
-- "code-bug": the test asserts something sensible and the code now breaks it (a regression). Do NOT change the test. Say what is broken in the code and where.
-- "unclear": you cannot tell from what you were given.
+- "stale-test": the code's new behaviour is intended and the test still asserts the old one (renamed export, changed output, new argument, moved file, changed text). It ALSO covers a broken test ENVIRONMENT: a native module that needs a mock in Jest (AsyncStorage, expo modules, react-native internals), a missing jest.mock, a provider or wrapper the component now needs. Fix those inside the test file (jest.mock(...) at the top, a wrapper in render). A module that fails to load under Jest is NOT a code bug. Return the whole corrected test file.
+- "code-bug": ONLY when the code's behaviour is wrong: the test asserts something sensible and the code now does something else that is a regression. Do NOT change the test. Say what is broken in the code and where.
+- "need": you cannot decide without more files. Ask for them: {"need":["path/one","path/two"]}. Any file in the repo can be asked for, including components, config and setup files. Ask instead of guessing.
+- "unclear": only after you have asked for what you need and it still does not settle it.
 Rules for a stale test: keep every case that is still meaningful, update expected values and calls to match the code you were shown, never delete assertions or skip tests to make it pass, never loosen an assertion into one that cannot fail. Mock only what the test already mocked.
-Answer with JSON only: {"verdict":"stale-test|code-bug|unclear","reason":"one sentence","test":"the complete new test file (stale-test only)"}`;
+Answer with JSON only: {"verdict":"stale-test|code-bug|unclear","reason":"one sentence","test":"the complete new test file (stale-test only)"} or {"need":[...]}.`;
 
 function matchEol(original: string, next: string): string {
   const crlf = original.includes("\r\n");
@@ -151,6 +156,13 @@ const failureKey = (out: string) =>
     .slice(0, 4000);
 
 async function healOne(opts: HealOptions, file: string): Promise<HealResult> {
+  const trace = { output: "" };
+  const r = await healOneInner(opts, file, trace);
+  if (r.status !== "healed" && r.status !== "already-green") r.failure = trace.output;
+  return r;
+}
+
+async function healOneInner(opts: HealOptions, file: string, trace: { output: string }): Promise<HealResult> {
   const { repoRoot } = opts;
   const run = opts.run ?? runSuite;
   const abs = path.join(repoRoot, file);
@@ -163,9 +175,23 @@ async function healOne(opts: HealOptions, file: string): Promise<HealResult> {
   if (!isTestPath(file)) return { file, status: "unclear", note: "not a test file, so it is left alone", attempts: 0 };
 
   let first = await run(repoRoot, [file]);
+  trace.output = first.output;
   if (first.ok) return { file, status: "already-green", note: "passes when run on its own", attempts: 0 };
+  if (/must contain at least one test/i.test(first.output)) {
+    return {
+      file,
+      status: "unclear",
+      note: "this is a shared helper that sits where Jest looks for tests but has no tests in it. Add it to testPathIgnorePatterns in the Jest config, or move it out of the tests folder",
+      attempts: 0,
+    };
+  }
 
-  const sources = importedSources(repoRoot, file, original);
+  const sources = [...new Set([...importedSources(repoRoot, file, original), ...referencedFiles(repoRoot, file, original)])];
+  const provided = new Set<string>([file, ...sources]);
+  let others: string[] = [];
+  try {
+    others = reachableFiles(repoRoot, file).filter((f) => !provided.has(f) && !/(^|\/)node_modules\//.test(f));
+  } catch {}
   const sourceText = sources
     .map((s) => {
       try {
@@ -188,7 +214,8 @@ async function healOne(opts: HealOptions, file: string): Promise<HealResult> {
       role: "user",
       content:
         `TEST FILE ${file}\n${original}\n\nFAILURE (this file run on its own)\n${current.output.replace(ANSI, "").slice(-14_000)}\n\n` +
-        `SOURCE IT IMPORTS\n${sourceText || "(none could be resolved)"}\n\nRECENT GIT HISTORY\n${history || "(none)"}`,
+        `SOURCE IT IMPORTS OR NAMES\n${sourceText || "(none could be resolved)"}\n\n` +
+        `OTHER FILES IT REACHES (ask for any you need)\n${others.length ? others.join("\n") : "(none)"}\n\nRECENT GIT HISTORY\n${history || "(none)"}`,
     },
   ];
 
@@ -202,13 +229,35 @@ async function healOne(opts: HealOptions, file: string): Promise<HealResult> {
     attempts++;
 
     let reply = "";
-    try {
-      reply = await opts.call(messages, `Heal ${file}`, true);
-    } catch (err: any) {
-      fs.writeFileSync(abs, original);
-      return { file, status: "unhealed", note: `the model call failed: ${err?.message ?? err}`, attempts };
+    let parsed: any;
+    for (let dry = 0; ; ) {
+      try {
+        reply = await opts.call(messages, `Heal ${file}`, true);
+      } catch (err: any) {
+        fs.writeFileSync(abs, original);
+        return { file, status: "unhealed", note: `the model call failed: ${err?.message ?? err}`, attempts };
+      }
+      parsed = parseLenient(reply)?.value;
+      if (!Array.isArray(parsed?.need)) break;
+      messages.push({ role: "assistant", content: reply });
+      const fresh = (parsed.need as unknown[])
+        .map((p) => String(p).replace(/\\/g, "/").replace(/^\.\//, ""))
+        .filter((p) => !provided.has(p) && !p.startsWith("..") && !/(^|\/)(\.git|\.agent)\//.test(p) && fs.existsSync(path.join(repoRoot, p)) && fs.statSync(path.join(repoRoot, p)).isFile());
+      if (fresh.length === 0) {
+        dry++;
+        if (dry >= 2) {
+          parsed = { verdict: "unclear", reason: "it needed files that are not available" };
+          break;
+        }
+        messages.push({ role: "user", content: "Those files are already provided or do not exist. Decide with what you have." });
+        continue;
+      }
+      for (const p of fresh) provided.add(p);
+      messages.push({
+        role: "user",
+        content: fresh.map((p) => `--- ${p}\n${fs.readFileSync(path.join(repoRoot, p), "utf-8").slice(0, 60_000)}`).join("\n\n"),
+      });
     }
-    const parsed = parseLenient(reply)?.value;
     const verdict = String(parsed?.verdict ?? "");
     const reason = String(parsed?.reason ?? "").trim() || "no reason given";
     if (verdict === "code-bug") {
@@ -234,12 +283,161 @@ async function healOne(opts: HealOptions, file: string): Promise<HealResult> {
     fs.writeFileSync(abs, next);
     last = next;
     current = await run(repoRoot, [file]);
+    trace.output = current.output;
     if (current.ok) return { file, status: "healed", note: reason, attempts };
     messages.push(
       { role: "assistant", content: reply },
       { role: "user", content: `That file still fails:\n${current.output.replace(ANSI, "").slice(-12_000)}\n\nReturn the corrected JSON again.` }
     );
     void last;
+  }
+}
+
+// ------------------------------------------------------------ shared causes
+
+/** The first error-looking line of a failure, with the details that differ between files taken out. */
+export function failureSignature(output: string): string {
+  const line = output
+    .replace(ANSI, "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => /(Error|Cannot find|is null|is undefined|not a function|Invariant|NativeModule|Unable to resolve)/.test(l));
+  return (line ?? "").replace(/\d+/g, "#").replace(/(['"`])[^'"`]{40,}\1/g, "$1…$1").slice(0, 140);
+}
+
+const SETUP_NAME = /^(jest|vitest)[.-]setup\.[\w]+$/i;
+
+/** Config files a shared fix may touch: jest config, the setup files it lists, package.json (its jest key only). */
+function configFiles(repoRoot: string): string[] {
+  const out = new Set<string>();
+  for (const f of fs.readdirSync(repoRoot)) {
+    if (/^(jest|vitest)\.config\.[\w]+$/.test(f) || SETUP_NAME.test(f) || /^setupTests?\.[\w]+$/.test(f)) out.add(f);
+  }
+  if (fs.existsSync(path.join(repoRoot, "package.json"))) out.add("package.json");
+  const text = [...out].map((f) => {
+    try {
+      return fs.readFileSync(path.join(repoRoot, f), "utf-8");
+    } catch {
+      return "";
+    }
+  }).join("\n");
+  for (const m of text.matchAll(/<rootDir>\/([^'"`\s,\]]+)/g)) {
+    const rel = m[1].replace(/\\/g, "/");
+    if (fs.existsSync(path.join(repoRoot, rel))) out.add(rel);
+  }
+  return [...out];
+}
+
+const ROOT_SYSTEM = `Several test files fail with the same error. That usually means ONE shared cause in the test setup, not many separate test problems: a native module with no Jest mock (AsyncStorage, expo modules), a missing global, a missing transform or preset entry.
+You may change only the Jest/test-setup files you are shown (and create a root-level jest.setup.js if none exists, registering it under "jest" in package.json). Do not change application code and do not change any test. Add the smallest fix that makes the shared error go away, for example a jest.mock(...) of the native module in the setup file.
+If this is not a setup problem (the application code is really wrong), return no edits.
+Answer with JSON only: {"cause":"one sentence","edits":[{"file":"path","content":"the complete new content of that file"}]}`;
+
+/** package.json may change only under its "jest" key. */
+function onlyJestKeyChanged(before: string, after: string): boolean {
+  try {
+    const a = JSON.parse(before);
+    const b = JSON.parse(after);
+    delete a.jest;
+    delete b.jest;
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Failures with the same error across several files get ONE worker that looks at the test setup. If its edit makes at
+ * least one of those files pass it is kept; otherwise every file it touched is put back.
+ */
+async function sharedCauses(opts: HealOptions, results: HealResult[], log: (l: string) => void): Promise<void> {
+  const { repoRoot } = opts;
+  const run = opts.run ?? runSuite;
+  const open = results.filter((r) => (r.status === "code-bug" || r.status === "unclear" || r.status === "unhealed") && r.failure);
+  const groups = new Map<string, HealResult[]>();
+  for (const r of open) {
+    const sig = failureSignature(r.failure!);
+    if (!sig) continue;
+    groups.set(sig, [...(groups.get(sig) ?? []), r]);
+  }
+  const shared = [...groups.entries()].filter(([, g]) => g.length >= 2);
+  if (shared.length === 0) return;
+  const editable = new Set(configFiles(repoRoot));
+
+  // Groups touch the same few setup files, so they take turns; each one is still all of its files in parallel.
+  for (const [sig, group] of shared) {
+    log(`${group.length} files fail the same way (${sig}). Looking at the shared test setup…`);
+    const shown = [...editable]
+      .map((f) => {
+        try {
+          return `--- ${f}\n${fs.readFileSync(path.join(repoRoot, f), "utf-8").slice(0, 30_000)}`;
+        } catch {
+          return "";
+        }
+      })
+      .filter(Boolean)
+      .join("\n\n");
+    let reply = "";
+    try {
+      reply = await opts.call(
+        [
+          { role: "system", content: ROOT_SYSTEM },
+          {
+            role: "user",
+            content:
+              `SAME ERROR IN ${group.length} FILES: ${group.map((g) => g.file).join(", ")}\n\nONE FAILURE\n${group[0].failure!.replace(ANSI, "").slice(-8000)}\n\n` +
+              `SETUP FILES YOU MAY CHANGE\n${shown || "(none exist; you may create jest.setup.js)"}`,
+          },
+        ],
+        `Shared test setup: ${sig.slice(0, 60)}`,
+        true
+      );
+    } catch {
+      continue;
+    }
+    const parsed = parseLenient(reply)?.value;
+    const edits: { file: string; content: string }[] = Array.isArray(parsed?.edits)
+      ? parsed.edits.filter((e: any) => typeof e?.file === "string" && typeof e?.content === "string")
+      : [];
+    if (edits.length === 0) continue;
+    const backups = new Map<string, string | undefined>();
+    let ok = true;
+    for (const e of edits) {
+      const rel = e.file.replace(/\\/g, "/").replace(/^\.\//, "");
+      const creating = !fs.existsSync(path.join(repoRoot, rel));
+      if (!(editable.has(rel) || (creating && SETUP_NAME.test(rel)))) ok = false;
+      if (rel === "package.json" && !onlyJestKeyChanged(fs.readFileSync(path.join(repoRoot, rel), "utf-8"), e.content)) ok = false;
+      if (!ok) break;
+      backups.set(rel, creating ? undefined : fs.readFileSync(path.join(repoRoot, rel), "utf-8"));
+    }
+    if (!ok) {
+      log("  The proposed setup change touched something it may not, so it was dropped.");
+      continue;
+    }
+    for (const e of edits) {
+      const rel = e.file.replace(/\\/g, "/").replace(/^\.\//, "");
+      const old = backups.get(rel);
+      fs.writeFileSync(path.join(repoRoot, rel), old && old.includes("\r\n") ? e.content.replace(/\r?\n/g, "\r\n") : e.content);
+    }
+    const reran = await Promise.all(group.map(async (g) => ({ g, r: await run(repoRoot, [g.file]) })));
+    const fixed = reran.filter((x) => x.r.ok);
+    if (fixed.length === 0) {
+      for (const [rel, old] of backups) {
+        if (old === undefined) fs.rmSync(path.join(repoRoot, rel), { force: true });
+        else fs.writeFileSync(path.join(repoRoot, rel), old);
+      }
+      log("  That did not make any of them pass, so the setup was put back.");
+      continue;
+    }
+    const cause = String(parsed?.cause ?? "shared test setup").trim();
+    for (const x of fixed) {
+      x.g.status = "healed";
+      x.g.note = `shared fix in ${[...backups.keys()].join(", ")}: ${cause}`;
+      x.g.failure = undefined;
+    }
+    for (const x of reran.filter((y) => !y.r.ok)) x.g.failure = x.r.output;
+    log(`  ✓ ${fixed.length} of ${group.length} fixed by changing ${[...backups.keys()].join(", ")}: ${cause}`);
+    for (const rel of backups.keys()) editable.add(rel);
   }
 }
 
@@ -269,6 +467,7 @@ export async function healTests(opts: HealOptions): Promise<HealReport> {
       return r;
     })
   );
+  await sharedCauses(opts, results, log);
   if (scoped) return { before, failing, results };
   log("Running the full suite again…");
   const after = await run(opts.repoRoot, []);

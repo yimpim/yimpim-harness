@@ -16,7 +16,7 @@ import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { listTestFiles } from "./focusTests.js";
-import { runSuite, type SuiteRun } from "./testHeal.js";
+import { runSuite, type SuiteRun } from "./testRun.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -156,6 +156,11 @@ class Graph {
     }
     return { files, unresolved };
   }
+}
+
+/** Every file a test reaches (itself included), through imports and aliases. */
+export function reachableFiles(repoRoot: string, testRel: string): string[] {
+  return [...new Graph(repoRoot).reach(posix(testRel)).files];
 }
 
 /** The tests a change can affect. `changed` is every file the phase touched (modified, added, deleted, renamed). */
