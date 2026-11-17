@@ -41,6 +41,7 @@ import { ensureDesignSystem } from "./uiDesign.js";
 import { stageDesignImage } from "./designDelivery.js";
 import { parseLenient } from "./jsonRepair.js";
 import { splitJobs, unplannedJobs } from "./jobsList.js";
+import { healTests, renderHealReport, runSuite, failingTestFiles } from "./testHeal.js";
 import { checkExistence, existencePlannerSection, renderExistence, wantsReportOnly, isAuditFollowUp } from "./existence.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { runSecurityAudit } from "./securityAudit.js";
@@ -325,6 +326,8 @@ Press Tab after typing a command's start (e.g. "/mo") to complete it.
   /approvals        Commands you approved for this project, with /approvals
                     revoke <n|all> to forget them
   /plan             The current plan
+  /tests heal       Bring a red test suite back to green: one worker per failing test file, all at once; tests that are out of date are
+                    updated, tests that expose a real code bug are left alone and reported
   /pentest          Security audit of this project: code, git history and packages (read-only; nothing is attacked)
   /design <what>    Make a logo, favicon and app icons: several models propose
                     and draw concepts, the best are shown, you pick one
@@ -5029,6 +5032,24 @@ async function main(): Promise<void> {
     }
   });
 
+  // /tests heal: brings a red test suite back to green, one worker per failing test file, all at once.
+  const runTestHealJob = (): Promise<void> => asOwnTask("/tests heal", async () => {
+    const healModels = config.models.repair ?? config.models.editor;
+    console.log(`🧪 [TESTS] Healing the test suite with ${healModels.join(", ")}. Every failing test file gets its own worker, started together.`);
+    try {
+      const report = await healTests({
+        repoRoot,
+        call: (messages, label, json) => runLabeledCompletion({ client, models: healModels, messages: messages as any, agentName: "REPAIR", jsonMode: json, reason: label }),
+        log: (line) => console.log("🧪 [TESTS] " + line),
+      });
+      console.log("\n🧪 [TESTS] " + renderHealReport(report));
+      return report.after ? report.after.ok : report.before.ok;
+    } catch (err: any) {
+      console.error("[TESTS] That did not complete: " + err.message);
+      return false;
+    }
+  });
+
   const runDesignJob = (request: string): Promise<void> => asOwnTask(("/design " + request).trim(), async () => {
     const models = config.models.designer ?? config.models.planner;
     const visionModels = config.models.designerVision ?? config.models.verifierVision ?? config.models.editorVision ?? config.models.verifier;
@@ -5527,6 +5548,10 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
             continueRequested = true;
             continue taskLoop;
           }
+        } else if (trimmed === "/tests" || trimmed.startsWith("/tests ")) {
+          const sub = trimmed.slice("/tests".length).trim();
+          if (sub === "" || sub === "heal") await runTestHealJob();
+          else console.log("[TESTS] Use /tests heal to bring a red test suite back to green.");
         } else if (trimmed === "/pentest" || trimmed.startsWith("/pentest ")) {
           await runPentestJob(trimmed.slice("/pentest".length).trim());
         } else if (trimmed === "/design" || trimmed.startsWith("/design ")) {
@@ -6833,6 +6858,17 @@ The user wants you to decide, not ask: ${d.choice}`);
           if (rm) {
             const pr = roadmapProgress(rm);
             console.log(`\n🗺️ [ROADMAP] ${activeUnitId} done: ${pr.done}/${pr.total} (${pr.percent}%).`);
+            // Phases only run the tests their change can reach. When the whole roadmap is done, the whole suite runs once, so
+            // anything that selection could not see still comes to light.
+            if (pr.total > 0 && pr.done === pr.total) {
+              console.log("🧪 [TESTS] The roadmap is complete. Running the full test suite once…");
+              const full = await runSuite(repoRoot, []);
+              if (full.ok) console.log("🧪 [TESTS] Full suite: green.");
+              else {
+                const red = failingTestFiles(full.output);
+                console.log(`🧪 [TESTS] Full suite: ${red.length} test file(s) red${red.length ? ": " + red.slice(0, 12).join(", ") + (red.length > 12 ? ", …" : "") : ""}. Run /tests heal to bring them back to green.`);
+              }
+            }
           }
         } catch {
           // the roadmap is a record; it never fails a task that passed
