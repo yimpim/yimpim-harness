@@ -11,19 +11,22 @@ export interface SlashCommand {
   desc: string;
   /** A sub-command: listed only once the line already starts with its parent, so "/r" stays a short list. */
   parent?: string;
+  /** Another spelling of a command: it still works when typed, but is never suggested or completed from a prefix. */
+  alias?: boolean;
 }
 
 /** Whether an entry belongs in the list for what has been typed so far. */
 export function matchesTyped(c: SlashCommand, line: string): boolean {
+  if (c.alias) return c.cmd === line;
   return c.cmd.startsWith(line) && (!c.parent || line.startsWith(c.parent));
 }
 
 export const DESKTOP_SLASH_COMMANDS: SlashCommand[] = [
   { cmd: "/remote-control", desc: "Pair your phone — QR code, sets up everything" },
-  { cmd: "/rc", desc: "Alias for /remote-control" },
+  { cmd: "/rc", desc: "Alias for /remote-control", alias: true },
   { cmd: "/link", desc: "Link this machine to YIMPIM Pro (cloud-tunnel lease)" },
   { cmd: "/model", desc: "Change the model for one role" },
-  { cmd: "/models", desc: "Alias for /model" },
+  { cmd: "/models", desc: "Alias for /model", alias: true },
   { cmd: "/model-sort", desc: "How OpenRouter picks a backend per call" },
   { cmd: "/api-key", desc: "Rotate your OpenRouter key" },
   { cmd: "/ask", desc: "Ask a question, read-only — nothing gets changed" },
@@ -54,7 +57,7 @@ export const DESKTOP_SLASH_COMMANDS: SlashCommand[] = [
   { cmd: "/memory", desc: "What YIMPIM has learned about this repo" },
   { cmd: "/stop", desc: "Stop safely at the next boundary — works any time" },
   { cmd: "/continue", desc: "Resume the last plan a Stop interrupted" },
-  { cmd: "/resume", desc: "Alias for /continue" },
+  { cmd: "/resume", desc: "Alias for /continue", alias: true },
   { cmd: "/help", desc: "Full command list" },
   { cmd: "/exit", desc: "Quit" },
 ];

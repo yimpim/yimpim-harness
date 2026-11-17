@@ -17,7 +17,7 @@ describe("slashCompleter", () => {
   test("an ambiguous prefix lists every match, untouched (no trailing spaces)", () => {
     const [hits] = slashCompleter("/model");
     assert.ok(hits.includes("/model"), "must include the exact command itself");
-    assert.ok(hits.includes("/models"), "must include the alias");
+    assert.ok(!hits.includes("/models"), "aliases are not suggested from a prefix");
     assert.ok(hits.includes("/model-sort"), "must include the other command sharing this prefix");
     assert.ok(hits.every((h) => !h.endsWith(" ")), "a multi-match list must not carry trailing spaces");
   });
@@ -57,7 +57,7 @@ describe("computeSuggestions", () => {
     const hits = computeSuggestions("/model");
     const cmds = hits.map((h) => h.cmd);
     assert.ok(cmds.includes("/model"));
-    assert.ok(cmds.includes("/models"));
+    assert.ok(!cmds.includes("/models"), "an alias is not listed");
     assert.ok(cmds.includes("/model-sort"));
     assert.ok(hits.every((h) => h.desc.length > 0), "every suggestion must carry a description");
   });
@@ -69,11 +69,10 @@ describe("computeSuggestions", () => {
   });
 
   test("stays visible on an exact match that is still ambiguous with another command", () => {
-    // "/model" is itself a valid, complete command, but "/models" and
-    // "/model-sort" both still share the prefix — the panel must not vanish
+    // "/model" is itself a valid, complete command, but "/model-sort" still shares the prefix — the panel must not vanish
     // just because what's typed so far happens to also be a real command.
     const hits = computeSuggestions("/model");
-    assert.ok(hits.some((h) => h.cmd === "/models"));
+    assert.ok(hits.some((h) => h.cmd === "/model-sort"));
   });
 
   test("returns nothing for a prefix that matches no real command", () => {

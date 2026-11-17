@@ -230,7 +230,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
 
     let reply = "";
     let parsed: any;
-    for (let dry = 0; ; ) {
+    for (let dry = 0, malformed = 0; ; ) {
       try {
         reply = await opts.call(messages, `Heal ${file}`, true);
       } catch (err: any) {
@@ -238,7 +238,20 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         return { file, status: "unhealed", note: `the model call failed: ${err?.message ?? err}`, attempts };
       }
       parsed = parseLenient(reply)?.value;
-      if (!Array.isArray(parsed?.need)) break;
+      if (!Array.isArray(parsed?.need)) {
+        if (typeof parsed?.verdict === "string" && parsed.verdict) break;
+        // Not the JSON asked for (empty, cut off, or prose): say so and ask again instead of giving up on the file.
+        malformed++;
+        if (malformed >= 3) {
+          parsed = { verdict: "unclear", reason: `the model did not return usable JSON (it said: ${reply.replace(/\s+/g, " ").slice(0, 160) || "nothing"})` };
+          break;
+        }
+        messages.push(
+          { role: "assistant", content: reply || "(empty)" },
+          { role: "user", content: 'That was not the JSON object asked for. Reply with ONLY {"verdict":...,"reason":...,"test":...} or {"need":[...]}.' }
+        );
+        continue;
+      }
       messages.push({ role: "assistant", content: reply });
       const fresh = (parsed.need as unknown[])
         .map((p) => String(p).replace(/\\/g, "/").replace(/^\.\//, ""))

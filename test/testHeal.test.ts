@@ -218,3 +218,27 @@ describe("shared causes, missing files and helpers", () => {
     assert.match(report.results[0].note, /testPathIgnorePatterns/);
   });
 });
+
+describe("a reply that is not the JSON asked for", () => {
+  const badRun = async (root: string) => {
+    const bad = fs.readFileSync(path.join(root, "__tests__/m.test.ts"), "utf8").includes("OLD");
+    return { ok: !bad, output: bad ? "FAIL __tests__/m.test.ts\n  ● x\n    Expected: NEW\n    Received: OLD" : "" };
+  };
+  test("is answered with a request to try again, then used", async () => {
+    write("__tests__/m.test.ts", "expect(x).toBe('OLD');\n");
+    let n = 0;
+    const report = await healTests({
+      repoRoot: dir,
+      run: badRun,
+      call: async () => (++n === 1 ? "Sure! Here is my analysis of the problem…" : JSON.stringify({ verdict: "stale-test", reason: "r", test: "expect(x).toBe('NEW');\n" })),
+    });
+    assert.equal(report.results[0].status, "healed");
+    assert.equal(n, 2);
+  });
+  test("three in a row end as unclear and say what came back", async () => {
+    write("__tests__/m.test.ts", "expect(x).toBe('OLD');\n");
+    const report = await healTests({ repoRoot: dir, run: badRun, call: async () => "" });
+    assert.equal(report.results[0].status, "unclear");
+    assert.match(report.results[0].note, /did not return usable JSON/);
+  });
+});
