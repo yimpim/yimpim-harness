@@ -27,6 +27,8 @@ import { BrowserQaResult, QaJudgeContext, runQaAgent } from "./qaBrowserAgent.js
 import { ProjectToolHooks, projectBackend } from "./qaProjectBackend.js";
 import { createSerialHooks } from "./qaFirmware.js";
 import { extractTestFailureReport } from "./testReport.js";
+import { selectTests, failsBefore } from "./testGraph.js";
+import { runSuite, failingTestFiles, healTests, type HealCall } from "./testHeal.js";
 import { NavHint, NavStepDecision, ProbeResult, probeAndroid, probeIOS, probeDesktopApp, probeExpoWeb, probePythonWeb, probeWeb } from "./visualProbes.js";
 import { NavFlowReplayer, nearestHintLabel } from "./uiFlows.js";
 import {
@@ -984,6 +986,7 @@ export class AutonomousVerifier {
       // this change, then whether the permanent suite moved with the code.
       if (!ledger.hasBlockingFailure()) await this.focusedTestGate(ledger);
       if (!ledger.hasBlockingFailure() && hasRealChange) this.mainSuiteGate(phaseGoal, change!, ledger);
+      if (!ledger.hasBlockingFailure() && hasRealChange) await this.selectedTestGate(change!, ledger);
 
       // Tier 2 — semantic: does the diff plausibly implement the stated goal.
       // Needs an actual diff to review — skipped entirely for a verify-only
@@ -1448,11 +1451,14 @@ export class AutonomousVerifier {
       }
     }
 
-    // Discovered test/lint commands act as an extra build-tier signal.
+    // Discovered lint/typecheck commands act as an extra build-tier signal. A TEST SUITE does not: running every test on
+    // every pass is what made a one-line change wait on (and be blamed for) the whole project's tests. The tests a change
+    // can reach are chosen and run by selectedTestGate instead.
     for (const cmd of profile.testCommands) {
       const label = cmd.join(" ");
       if (cmds.some((c) => c.label === label)) continue; // already covered above
       const [bin, ...args] = cmd;
+      if (looksLikeTestRunner(bin, args)) continue;
       cmds.push({
         label,
         bin: process.platform === "win32" && bin === "npm" ? "npm.cmd" : bin,
@@ -2556,6 +2562,79 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
         blocking: false,
         detail: `could not run them (${run.status}): ${run.detail}`,
       });
+    }
+  }
+
+  /**
+   * Runs the permanent tests the change can reach (their import graph meets a changed file), not the whole suite. A
+   * failure is checked against the last commit: one that was already red there is not this phase's doing; it is healed
+   * (the stale test updated) and, if it stays red, reported without blocking. Only a failure the phase introduced blocks.
+   */
+  private async selectedTestGate(change: ChangeSet, ledger: EvidenceLedger): Promise<void> {
+    let sel: ReturnType<typeof selectTests>;
+    try {
+      const touched = [...change.modified, ...change.added, ...change.deleted, ...change.renamed.flatMap((r) => [r.from, r.to])];
+      sel = selectTests(this.repoRoot, touched);
+    } catch {
+      return;
+    }
+    const total = sel.selected.length + sel.skipped.length;
+    if (total === 0) return;
+    const gate = `tests the change can reach (${sel.selected.length} of ${total})`;
+    const scope =
+      sel.everything
+        ? "project-wide config changed, so every test runs"
+        : `${sel.skipped.length} skipped: they do not reach any changed file${sel.uncertain.length ? `; ${sel.uncertain.length} run because their imports could not all be resolved` : ""}`;
+    if (sel.selected.length === 0) {
+      ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: false, detail: `no test reaches the changed files (${scope})` });
+      return;
+    }
+    const run = await runSuite(this.repoRoot, sel.selected);
+    if (run.ok) {
+      ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: true, detail: `all passed (${scope})` });
+      return;
+    }
+    const failing = failingTestFiles(run.output);
+    if (failing.length === 0) {
+      ledger.add({
+        tier: "build", gate, method: "executed", status: "inconclusive", blocking: false,
+        detail: `the test command failed without naming a failing test file, so nothing was proven: ${run.output.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").split(/\r?\n/).filter((l) => l.trim()).slice(-12).join("\n").slice(0, 1500)}`,
+      });
+      return;
+    }
+    const before = await failsBefore({ repoRoot: this.repoRoot, files: failing });
+    const already = before ? failing.filter((f) => before.has(f)) : [];
+    const caused = failing.filter((f) => !already.includes(f));
+
+    let stillRed: string[] = [];
+    if (already.length > 0) {
+      const models = this.config.models.repair ?? this.config.models.editor;
+      const call: HealCall = async (messages, _label, _json) => {
+        const m = await this.client.complete(models, messages, { temperature: 0, agent: "REPAIR", jsonMode: true });
+        return m?.content ?? m?.choices?.[0]?.message?.content ?? "";
+      };
+      try {
+        const healed = await healTests({ repoRoot: this.repoRoot, files: already, call, log: (l) => console.log(`[TESTS] ${l}`) });
+        stillRed = healed.results.filter((r) => r.status !== "healed" && r.status !== "already-green").map((r) => `${r.file} (${r.status}: ${r.note})`);
+        const fixed = healed.results.filter((r) => r.status === "healed").length;
+        if (fixed > 0) {
+          ledger.add({ tier: "build", gate: "red tests in this area healed", method: "executed", status: "pass", blocking: false, detail: `${fixed} test file(s) were already failing before this phase and were out of date; they were updated to match the code` });
+        }
+      } catch {
+        stillRed = already;
+      }
+    }
+    if (stillRed.length > 0) {
+      ledger.add({ tier: "build", gate: "red tests already failing before this phase", method: "executed", status: "inconclusive", blocking: false, detail: `${stillRed.join("; ")}. Not caused by this phase.` });
+    }
+    if (caused.length > 0) {
+      const report = extractTestFailureReport(run.output, 8000) ?? run.output.split(/\r?\n/).slice(-40).join("\n").slice(0, 4000);
+      ledger.add({
+        tier: "build", gate, method: "executed", status: "fail", blocking: true,
+        detail: `${caused.length} test file(s) passed before this phase and fail now (${scope}): ${caused.join(", ")}${before ? "" : " (the earlier state could not be checked, so every failure is assumed to be this phase's)"}\n${report}`,
+      });
+    } else if (already.length > 0) {
+      ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: true, detail: `nothing this phase changed broke a test (${scope})` });
     }
   }
 

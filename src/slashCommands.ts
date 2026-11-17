@@ -43,6 +43,8 @@ export const DESKTOP_SLASH_COMMANDS: SlashCommand[] = [
   { cmd: "/roadmap sync", desc: "Add reference files that appeared since", parent: "/roadmap" },
   { cmd: "/roadmap reset", desc: "Throw the roadmap away (a copy of finished units is kept)", parent: "/roadmap" },
   { cmd: "/design", desc: "Make a logo, favicon and app icons" },
+  { cmd: "/tests", desc: "Fix a red test suite: update stale tests, report real code bugs" },
+  { cmd: "/tests heal", desc: "One worker per failing test file, all at once", parent: "/tests" },
   { cmd: "/pentest", desc: "Security audit of this project (read-only)" },
   { cmd: "/push-repo", desc: "Connect to a GitHub remote and push now" },
   { cmd: "/push-local", desc: "Commit pending work, turn auto-push OFF" },
