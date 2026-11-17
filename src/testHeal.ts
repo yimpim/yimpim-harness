@@ -20,12 +20,13 @@ import { isTestPath } from "./focusTests.js";
 import { parseLenient } from "./jsonRepair.js";
 import { runSuite, type SuiteRun } from "./testRun.js";
 import { reachableFiles } from "./testGraph.js";
+import { removeTest, renderRemoval, recordRemoved } from "./testSettle.js";
 
 export { runSuite, type SuiteRun };
 
 const execFileAsync = promisify(execFile);
 
-export type HealStatus = "healed" | "already-green" | "code-bug" | "unclear" | "unhealed";
+export type HealStatus = "healed" | "already-green" | "code-bug" | "unclear" | "unhealed" | "rewritten" | "removed";
 
 export interface HealResult {
   file: string;
@@ -45,6 +46,8 @@ export interface HealOptions {
   log?: (line: string) => void;
   /** Heal only these test files; default is every failing file in the full run. */
   files?: string[];
+  /** Decide every file that could not be healed (rewrite it from scratch, or remove it). Default: on, except when `files` is given. */
+  settle?: boolean;
   /** Replaces the real test runner (tests). */
   run?: (repoRoot: string, files: string[]) => Promise<SuiteRun>;
 }
@@ -454,6 +457,85 @@ async function sharedCauses(opts: HealOptions, results: HealResult[], log: (l: s
   }
 }
 
+// ------------------------------------------------------------------ settling
+
+const SETTLE_SYSTEM = `A test file could not be brought back to green by updating it. It must not stay red: a red test blocks every later change. Decide:
+- "rewrite": the feature it covers still exists. Write a NEW, smaller test file from scratch that checks what the code does NOW for the main behaviour that file was about. Prefer this when the feature is real and testable.
+- "delete": the test is obsolete, tied to implementation details that no longer exist, or cannot be made reliable. Deleting is fine: a later change that needs this behaviour covered will get a new test.
+Answer with JSON only: {"decision":"rewrite|delete","reason":"one sentence","test":"the complete new test file (rewrite only)"}`;
+
+/**
+ * Files still red after healing that are not a code defect: each gets a decision. A rewrite must pass or the file is
+ * removed; a removal takes the snapshot and every reference with it. A model that cannot be reached never causes a removal.
+ */
+async function settleUnresolved(opts: HealOptions, results: HealResult[], log: (l: string) => void): Promise<void> {
+  const { repoRoot } = opts;
+  const run = opts.run ?? runSuite;
+  const open = results.filter((r) => r.status === "unclear" || r.status === "unhealed");
+  await Promise.all(
+    open.map(async (r) => {
+      const abs = path.join(repoRoot, r.file);
+      let original = "";
+      try {
+        original = fs.readFileSync(abs, "utf-8");
+      } catch {
+        return;
+      }
+      const helper = /shared helper that sits where Jest looks/.test(r.note);
+      if (helper) return; // not a test: the config fix is named in the report
+      const sources = [...new Set([...importedSources(repoRoot, r.file, original), ...referencedFiles(repoRoot, r.file, original)])];
+      const srcText = sources
+        .map((s) => {
+          try {
+            return `--- ${s}\n${fs.readFileSync(path.join(repoRoot, s), "utf-8")}`;
+          } catch {
+            return "";
+          }
+        })
+        .filter(Boolean)
+        .join("\n\n");
+      const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
+        { role: "system", content: SETTLE_SYSTEM },
+        {
+          role: "user",
+          content: `TEST FILE ${r.file}\n${original}\n\nWHY IT COULD NOT BE HEALED\n${r.note}\n\nLAST FAILURE\n${(r.failure ?? "").replace(ANSI, "").slice(-8000)}\n\nSOURCE\n${srcText || "(none resolved)"}`,
+        },
+      ];
+      let parsed: any;
+      for (let bad = 0; ; bad++) {
+        let reply = "";
+        try {
+          reply = await opts.call(messages, `Settle ${r.file}`, true);
+        } catch {
+          return; // unreachable model: leave it as it was
+        }
+        parsed = parseLenient(reply)?.value;
+        if (parsed?.decision === "rewrite" || parsed?.decision === "delete") break;
+        if (bad >= 2) return;
+        messages.push({ role: "assistant", content: reply || "(empty)" }, { role: "user", content: 'Reply with ONLY {"decision":"rewrite|delete","reason":...,"test":...}.' });
+      }
+      const reason = String(parsed.reason ?? "").trim() || r.note;
+      if (parsed.decision === "rewrite" && typeof parsed.test === "string" && countAssertions(parsed.test) >= 1) {
+        fs.writeFileSync(abs, matchEol(original, parsed.test));
+        const again = await run(repoRoot, [r.file]);
+        if (again.ok) {
+          r.status = "rewritten";
+          r.note = `rewritten from scratch against the current code: ${reason}`;
+          r.failure = undefined;
+          log(`  ↻ ${r.file}: ${r.note}`);
+          return;
+        }
+      }
+      const removal = removeTest(repoRoot, r.file);
+      recordRemoved(repoRoot, r.file, reason);
+      r.status = "removed";
+      r.note = `${reason} (${renderRemoval(removal)})`;
+      r.failure = undefined;
+      log(`  ✂ ${r.file}: ${r.note}`);
+    })
+  );
+}
+
 export interface HealReport {
   before: SuiteRun;
   failing: string[];
@@ -481,6 +563,7 @@ export async function healTests(opts: HealOptions): Promise<HealReport> {
     })
   );
   await sharedCauses(opts, results, log);
+  if (opts.settle ?? !scoped) await settleUnresolved(opts, results, log);
   if (scoped) return { before, failing, results };
   log("Running the full suite again…");
   const after = await run(opts.repoRoot, []);
@@ -488,19 +571,23 @@ export async function healTests(opts: HealOptions): Promise<HealReport> {
 }
 
 const icon = (s: HealStatus) =>
-  s === "healed" ? "✓" : s === "already-green" ? "·" : s === "code-bug" ? "🐞" : s === "unclear" ? "?" : "✗";
+  s === "healed" || s === "rewritten" ? "✓" : s === "removed" ? "✂" : s === "already-green" ? "·" : s === "code-bug" ? "🐞" : s === "unclear" ? "?" : "✗";
 
 export function renderHealReport(r: HealReport): string {
   if (r.failing.length === 0 && r.before.ok) return "The test suite is already green. Nothing to heal.";
   if (r.failing.length === 0) return "The suite fails but no failing test file could be read from its output, so nothing was changed.";
   const by = (s: HealStatus) => r.results.filter((x) => x.status === s);
   const lines = [
-    `Test healing: ${r.failing.length} red file(s) before. ${by("healed").length} healed, ${by("already-green").length} already passing alone, ${by("code-bug").length} look like code bugs, ${by("unclear").length + by("unhealed").length} left for a person.`,
+    `Test healing: ${r.failing.length} red file(s) before. ${by("healed").length} healed, ${by("already-green").length} already passing alone, ${by("code-bug").length} are code bugs, ${by("rewritten").length} rewritten, ${by("removed").length} removed, ${by("unclear").length + by("unhealed").length} left alone.`,
   ];
   const bugs = by("code-bug");
-  if (bugs.length) lines.push("", "Looks like the CODE is wrong (tests left untouched):", ...bugs.map((b) => `  - ${b.file}: ${b.note}`));
+  if (bugs.length) lines.push("", "The CODE is wrong here (tests left untouched; a fix is queued, and a test that still fails afterwards is removed):", ...bugs.map((b) => `  - ${b.file}: ${b.note}`));
+  const rewritten = by("rewritten");
+  if (rewritten.length) lines.push("", "Rewritten from scratch:", ...rewritten.map((b) => `  - ${b.file}: ${b.note}`));
+  const gone = by("removed");
+  if (gone.length) lines.push("", "Removed (a later change that needs this covered gets a new test):", ...gone.map((b) => `  - ${b.file}: ${b.note}`));
   const rest = [...by("unclear"), ...by("unhealed")];
-  if (rest.length) lines.push("", "Not healed:", ...rest.map((b) => `  - ${b.file}: ${b.note}`));
+  if (rest.length) lines.push("", "Left alone:", ...rest.map((b) => `  - ${b.file}: ${b.note}`));
   if (r.after) lines.push("", r.after.ok ? "Full suite after: green." : `Full suite after: still red in ${failingTestFiles(r.after.output).length} file(s).`);
   return lines.join("\n");
 }
