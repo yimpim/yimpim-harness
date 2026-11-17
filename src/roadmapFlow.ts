@@ -10,7 +10,9 @@ import path from "path";
 import {
   Roadmap,
   RoadmapUnit,
+  addOpenItem,
   addUnits,
+  archiveFinishedRoadmap,
   coverage,
   emptyRoadmap,
   loadRoadmap,
@@ -92,6 +94,8 @@ export async function createRoadmap(
   deps: FlowDeps,
   args: { goal: string; referenceDir?: string; docs?: string; replace?: boolean; verifyExisting?: boolean }
 ): Promise<CreateResult> {
+  // A roadmap that is all done is put away first, so the new job starts clean instead of being told to "add to" a finished one.
+  archiveFinishedRoadmap(deps.repoRoot);
   const existing = loadRoadmap(deps.repoRoot);
   if (existing && !args.replace) {
     const p = progress(existing);
@@ -248,7 +252,7 @@ export function startNext(repoRoot: string): { started?: Started; reason?: strin
 }
 
 /** What a finished unit leaves behind, so the units after it build on it. */
-export function finishUnit(repoRoot: string, id: string, evidence: { commit?: string; files?: string[]; summary?: string }): void {
+export function finishUnit(repoRoot: string, id: string, evidence: { commit?: string; files?: string[]; summary?: string; openItems?: string[] }): void {
   const rm = loadRoadmap(repoRoot);
   if (!rm) return;
   markDone(rm, id, evidence);
@@ -273,10 +277,20 @@ export function failUnit(repoRoot: string, id: string, reason: string): { parked
  * progress (or the one already running), and the rest follow it in order.
  * Returns the id of the unit the current task is.
  */
+/** A title cut at a word, with an ellipsis, instead of in the middle of one. The full text stays in the unit's summary. */
+export function shortTitle(text: string, max = 90): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max);
+  const at = cut.lastIndexOf(" ");
+  return (at > max * 0.6 ? cut.slice(0, at) : cut).replace(/[\s,;:.-]+$/, "") + "…";
+}
+
 export function absorbOverflow(
   repoRoot: string,
   args: { goal: string; planGoal: string; followUps: string[]; currentUnitId?: string }
 ): { currentUnitId: string; added: number } {
+  archiveFinishedRoadmap(repoRoot);
   const rm = loadRoadmap(repoRoot) ?? emptyRoadmap(args.goal, "overflow");
   let current = args.currentUnitId ? rm.units.find((u) => u.id === args.currentUnitId) : undefined;
   if (!current) {
@@ -287,7 +301,7 @@ export function absorbOverflow(
   let prev = current?.title;
   let added = 0;
   for (const f of args.followUps) {
-    const title = f.replace(/\s+/g, " ").trim().slice(0, 100);
+    const title = shortTitle(f);
     if (!title) continue;
     const r = addUnits(rm, [{ title, area: "Follow-up", summary: f.trim().slice(0, 600), deps: prev ? [prev] : [] }], "overflow");
     if (r.added.length > 0) added++;
@@ -303,8 +317,9 @@ export function absorbOverflow(
  * The same follow-up twice is one unit. Returns the unit's id, or undefined when there was nothing to record.
  */
 export function recordFollowUp(repoRoot: string, followUp: string, goal: string): string | undefined {
-  const title = followUp.replace(/\s+/g, " ").trim().slice(0, 100);
+  const title = shortTitle(followUp);
   if (!title) return undefined;
+  archiveFinishedRoadmap(repoRoot);
   const rm = loadRoadmap(repoRoot) ?? emptyRoadmap(goal, "overflow");
   const r = addUnits(rm, [{ title, area: "Follow-up", summary: followUp.trim().slice(0, 600) }], "overflow");
   saveRoadmap(repoRoot, rm);
@@ -372,6 +387,7 @@ export type RoadmapCommand =
   | { kind: "drop"; id: string; reason: string }
   | { kind: "reopen"; id: string }
   | { kind: "done"; id: string }
+  | { kind: "open"; id: string; note: string }
   | { kind: "sync" }
   | { kind: "reset" }
   | { kind: "help" };
@@ -410,6 +426,11 @@ export function parseRoadmapCommand(args: string): RoadmapCommand {
       return rest[0] && /^U\d+$/i.test(rest[0]) ? { kind: "reopen", id: rest[0].toUpperCase() } : { kind: "help" };
     case "done":
       return rest[0] && /^U\d+$/i.test(rest[0]) ? { kind: "done", id: rest[0].toUpperCase() } : { kind: "help" };
+    case "open":
+    case "note": {
+      const [id, ...note] = rest;
+      return id && /^U\d+$/i.test(id) && note.length > 0 ? { kind: "open", id: id.toUpperCase(), note: note.join(" ") } : { kind: "help" };
+    }
     case "sync":
       return { kind: "sync" };
     case "reset":
@@ -429,6 +450,7 @@ export const ROADMAP_HELP = [
   "  /roadmap drop <id> [reason]   leave a unit out",
   "  /roadmap reopen <id>          put a blocked or failed unit back",
   "  /roadmap done <id>            mark a unit done by hand",
+  "  /roadmap open <id> <note>     record something a done unit left open",
   "  /roadmap sync                 add reference files that appeared since",
   "  /roadmap reset                throw the roadmap away",
 ].join("\n");
@@ -446,8 +468,11 @@ export function manualUpdate(repoRoot: string, cmd: RoadmapCommand): string {
     if (!reopen(rm, cmd.id)) return `No unit ${cmd.id}.`;
   } else if (cmd.kind === "done") {
     if (!markDone(rm, cmd.id, { summary: "Marked done by hand." })) return `No unit ${cmd.id}.`;
+  } else if (cmd.kind === "open") {
+    if (!addOpenItem(rm, cmd.id, cmd.note)) return `${cmd.id} is not a finished unit.`;
   } else return "";
   saveRoadmap(repoRoot, rm);
+  if (cmd.kind === "open") return `Noted on ${cmd.id}.`;
   return `${cmd.kind === "drop" ? "Dropped" : cmd.kind === "reopen" ? "Reopened" : "Marked done"} ${cmd.id}.`;
 }
 

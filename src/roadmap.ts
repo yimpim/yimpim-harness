@@ -23,6 +23,8 @@ export interface UnitDone {
   /** What this unit actually produced, so later units build on it instead of redoing it. */
   files: string[];
   summary?: string;
+  /** Things this unit could not finish or verify (a server-side half, a check it could not run). The unit still counts as done. */
+  openItems?: string[];
 }
 
 export interface RoadmapUnit {
@@ -48,6 +50,8 @@ export interface RoadmapUnit {
 export interface Roadmap {
   version: 1;
   goal: string;
+  /** The full request the roadmap was planned from, when it was longer than the one-line goal. */
+  brief?: string;
   kind: "idea" | "port" | "mixed" | "overflow";
   reference?: { dir: string; fileCount: number; scannedAt: string };
   /** Decisions every unit follows, so the pieces fit (naming, structure, libraries). */
@@ -55,6 +59,8 @@ export interface Roadmap {
   units: RoadmapUnit[];
   /** Set once the person has confirmed that a roadmap spends money on its own (asked once per roadmap). */
   costNoticeAckedAt?: string;
+  /** Set when the last unit is done. */
+  completedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -73,6 +79,14 @@ export interface UnitDraft {
 
 export const MAX_UNITS = 500;
 const MAX_CONVENTIONS = 12;
+const MAX_BRIEF = 20000;
+const MAX_OPEN_ITEMS = 8;
+
+/** Files that are by-products of working (logs, review notes, tool caches), not something a unit built. */
+const NOISE_PATH = /(^|\/)(\.expo|\.agent|\.git|node_modules|\.gradle|build|dist|coverage)\/|(^|\/)(QA_REVIEW\.md|verify-tmp\.txt)$|\.log$/i;
+export function isEvidenceNoise(p: string): boolean {
+  return NOISE_PATH.test(p.replace(/\\/g, "/"));
+}
 
 const clip = (s: unknown, n: number) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 const key = (title: string, area: string) => `${area}|${title}`.toLowerCase().replace(/[^a-z0-9|]+/g, "");
@@ -85,7 +99,17 @@ export function roadmapPath(repoRoot: string): string {
 
 export function emptyRoadmap(goal: string, kind: Roadmap["kind"]): Roadmap {
   const t = nowIso();
-  return { version: 1, goal: clip(goal, 500), kind, conventions: [], units: [], createdAt: t, updatedAt: t };
+  const full = String(goal ?? "").trim();
+  return {
+    version: 1,
+    goal: clip(goal, 500),
+    ...(full.length > 500 ? { brief: full.slice(0, MAX_BRIEF) } : {}),
+    kind,
+    conventions: [],
+    units: [],
+    createdAt: t,
+    updatedAt: t,
+  };
 }
 
 export function loadRoadmap(repoRoot: string): Roadmap | undefined {
@@ -138,7 +162,7 @@ export interface RoadmapWire {
     addedBy: RoadmapUnit["addedBy"];
     taskId?: string;
     blockedReason?: string;
-    result?: { summary: string; fileCount: number; commit?: string };
+    result?: { summary: string; fileCount: number; commit?: string; openItems?: string[] };
   }[];
 }
 
@@ -166,7 +190,7 @@ export function roadmapWire(rm: Roadmap | undefined): RoadmapWire | null {
       addedBy: u.addedBy,
       ...(u.taskId ? { taskId: u.taskId } : {}),
       ...(u.blockedReason ? { blockedReason: clip(u.blockedReason, 200) } : {}),
-      ...(u.status === "done" && u.done ? { result: { summary: clip(u.done.summary ?? "", 200), fileCount: u.done.files.length, ...(u.done.commit ? { commit: u.done.commit } : {}) } } : {}),
+      ...(u.status === "done" && u.done ? { result: { summary: clip(u.done.summary ?? "", 200), fileCount: u.done.files.length, ...(u.done.commit ? { commit: u.done.commit } : {}), ...(u.done.openItems?.length ? { openItems: u.done.openItems.map((x) => clip(x, 200)) } : {}) } } : {}),
     })),
   };
 }
@@ -174,12 +198,31 @@ export function roadmapWire(rm: Roadmap | undefined): RoadmapWire | null {
 /** Written whole, atomically, so a crash never leaves half a roadmap. */
 export function saveRoadmap(repoRoot: string, rm: Roadmap): void {
   rm.updatedAt = nowIso();
+  stampCompleted(rm);
   const file = roadmapPath(repoRoot);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(rm, null, 2), "utf-8");
   fs.renameSync(tmp, file);
   notifyRoadmapChanged(repoRoot);
+}
+
+/**
+ * A finished roadmap is copied to .agent/roadmaps/ (named by when it began) and the active file is removed, so the next big
+ * request starts clean instead of being offered "add to a roadmap that is 12/12 done". Returns the archive path, or undefined
+ * when the roadmap is not finished.
+ */
+export function archiveFinishedRoadmap(repoRoot: string): string | undefined {
+  const rm = loadRoadmap(repoRoot);
+  if (!rm || !isFinished(rm)) return undefined;
+  rm.completedAt ??= nowIso();
+  const dir = path.join(repoRoot, ".agent", "roadmaps");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${rm.createdAt.replace(/[^0-9A-Za-z]+/g, "-")}.json`);
+  fs.writeFileSync(file, JSON.stringify(rm, null, 2), "utf-8");
+  fs.rmSync(roadmapPath(repoRoot), { force: true });
+  notifyRoadmapChanged(repoRoot);
+  return file;
 }
 
 export function setConventions(rm: Roadmap, conventions: string[]): void {
@@ -367,7 +410,31 @@ export function markStarted(rm: Roadmap, id: string): RoadmapUnit | undefined {
   return u;
 }
 
-export function markDone(rm: Roadmap, id: string, evidence: { commit?: string; files?: string[]; summary?: string }): RoadmapUnit | undefined {
+/** True once every unit that is not dropped is done. */
+export function isFinished(rm: Roadmap): boolean {
+  const live = rm.units.filter((u) => u.status !== "dropped");
+  return live.length > 0 && live.every((u) => u.status === "done");
+}
+
+function stampCompleted(rm: Roadmap): void {
+  if (isFinished(rm)) rm.completedAt ??= nowIso();
+  else delete rm.completedAt;
+}
+
+/** Everything that was left open across the roadmap, for the person to see after a run. */
+export function openItems(rm: Roadmap): { id: string; title: string; item: string }[] {
+  return rm.units.flatMap((u) => (u.done?.openItems ?? []).map((item) => ({ id: u.id, title: u.title, item })));
+}
+
+/** Adds a note to a unit that is done, without reopening it. */
+export function addOpenItem(rm: Roadmap, id: string, text: string): boolean {
+  const u = unitOf(rm, id);
+  if (!u?.done) return false;
+  u.done.openItems = [...(u.done.openItems ?? []), clip(text, 240)].slice(0, MAX_OPEN_ITEMS);
+  return true;
+}
+
+export function markDone(rm: Roadmap, id: string, evidence: { commit?: string; files?: string[]; summary?: string; openItems?: string[] }): RoadmapUnit | undefined {
   const u = unitOf(rm, id);
   if (!u) return undefined;
   u.status = "done";
@@ -375,9 +442,11 @@ export function markDone(rm: Roadmap, id: string, evidence: { commit?: string; f
   u.done = {
     at: nowIso(),
     ...(evidence.commit ? { commit: evidence.commit.slice(0, 40) } : {}),
-    files: [...new Set((evidence.files ?? []).map(norm))].slice(0, 40),
+    files: [...new Set((evidence.files ?? []).map(norm).filter((f) => f && !isEvidenceNoise(f)))].slice(0, 40),
     ...(evidence.summary ? { summary: clip(evidence.summary, 300) } : {}),
+    ...(evidence.openItems?.length ? { openItems: evidence.openItems.map((x) => clip(x, 240)).filter(Boolean).slice(0, MAX_OPEN_ITEMS) } : {}),
   };
+  stampCompleted(rm);
   return u;
 }
 
@@ -447,6 +516,9 @@ export function renderRoadmap(rm: Roadmap, opts: { maxUnits?: number } = {}): st
   if (next.length > 0) lines.push("", "Next up:", ...next.map((u) => `  ${u.id}  ${u.title}${u.status === "in_progress" ? "  (in progress)" : ""}`));
   const blocked = rm.units.filter((u) => u.status === "blocked");
   if (blocked.length > 0) lines.push("", "Blocked:", ...blocked.slice(0, 6).map((u) => `  ${u.id}  ${u.title}: ${u.blockedReason ?? "no reason recorded"}`));
+  const left = openItems(rm);
+  if (left.length > 0) lines.push("", "Done, with open items:", ...left.slice(0, 8).map((o) => `  ${o.id}  ${o.item}`));
+  if (rm.completedAt) lines.push("", `Finished ${rm.completedAt.slice(0, 10)}.`);
   const cycles = findCycles(rm);
   if (cycles.length > 0) lines.push("", `Needs attention: circular dependency among ${cycles[0].join(", ")}`);
 
@@ -483,6 +555,7 @@ export function unitTaskPrompt(rm: Roadmap, unit: RoadmapUnit): string {
   const lines: string[] = [
     `ROADMAP UNIT ${unit.id}: ${unit.title}  (area: ${unit.area}; unit ${position} of ${p.total}; ${p.done} already done)`,
     `Overall goal: ${rm.goal}`,
+    ...(rm.brief ? [``, `The full request this roadmap came from:`, rm.brief.slice(0, 6000)] : []),
     ``,
     `Build this unit:`,
     unit.summary || unit.title,
@@ -501,6 +574,7 @@ export function unitTaskPrompt(rm: Roadmap, unit: RoadmapUnit): string {
     for (const u of [...direct, ...others]) {
       const files = u.done!.files.slice(0, 6).join(", ");
       lines.push(`- ${u.id} ${u.title}${direct.includes(u) ? " (this unit depends on it)" : ""}${files ? `: ${files}` : ""}`);
+      for (const item of (u.done!.openItems ?? []).slice(0, 3)) lines.push(`    left open: ${item}`);
     }
   }
   if (rm.conventions.length > 0) lines.push(``, `Conventions every unit follows, so the pieces fit:`, ...rm.conventions.map((c) => `- ${c}`));

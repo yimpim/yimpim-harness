@@ -1,3 +1,5 @@
+import { parseLenient } from "./jsonRepair.js";
+
 /**
  * Parses the Discovery agent's final JSON answer (its `taskFindings` object)
  * out of free-form model output. Pulled out of src/index.ts as a standalone,
@@ -13,6 +15,9 @@
  * warning (with a snippet of what Discovery actually returned) exactly once
  * when NOTHING parses, so an empty Planner allowlist is traceable to its
  * cause instead of looking like Discovery silently found nothing.
+ *
+ * One slip in an otherwise good answer (an unescaped quote inside a code snippet, a missing comma) no longer throws
+ * the whole answer away: each candidate that does not parse is repaired (see jsonRepair.ts) before the next is tried.
  */
 export function parseDiscoveryJson(discoveryOutput: string): any | undefined {
   const fenced = discoveryOutput.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
@@ -25,6 +30,13 @@ export function parseDiscoveryJson(discoveryOutput: string): any | undefined {
       return JSON.parse(candidate);
     } catch {
       // Try the next, looser candidate.
+    }
+  }
+  for (const candidate of candidates) {
+    const fixed = parseLenient(candidate);
+    if (fixed && fixed.value && typeof fixed.value === "object") {
+      console.warn("[DISCOVERY] ⚠️ Discovery's JSON had a slip (a quote or comma); read it anyway after repairing it.");
+      return fixed.value;
     }
   }
   console.warn(
@@ -80,12 +92,9 @@ export function recoverDiscoveryOutput(discoveryOutput: string, filesRead: strin
   const spans = [...fenced.map((f) => f.replace(/^```(?:json)?\s*|\s*```$/g, "")), (discoveryOutput.match(/(\{[\s\S]*\})/) ?? [])[1]];
   for (const c of spans) {
     if (!c) continue;
-    try {
-      const files = JSON.parse(c)?.taskFindings?.existingFiles;
-      if (Array.isArray(files) && files.some((f: any) => typeof f?.path === "string" && f.path)) return discoveryOutput;
-    } catch {
-      // not JSON; keep looking
-    }
+    // A usable list that only needs a repair counts: the parser repairs it the same way, so nothing is thrown away.
+    const files = parseLenient(c)?.value?.taskFindings?.existingFiles;
+    if (Array.isArray(files) && files.some((f: any) => typeof f?.path === "string" && f.path)) return discoveryOutput;
   }
   if (filesRead.length === 0) return discoveryOutput;
   const recovered = {

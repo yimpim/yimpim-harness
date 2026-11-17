@@ -1218,3 +1218,10 @@ is added, dropped or reopened, on `/roadmap reset`, after a reconnect and for `g
   (choices exactly `I understand, start` / `Cancel`) with the spending notice, once per roadmap. Unattended, it only logs it.
 - `/design` and `/pentest` now send `task.start`/`task.end` (with `tokensUsed`/`costUsd`) and a `worker.start`/`worker.end`
   per model call (`DESIGNER`, `SECURITY`), and are counted in `usage.totals`.
+
+## Roadmap: open items on a finished unit (additive)
+
+A unit that is `done` may now carry `result.openItems: string[]` in the legacy `roadmap` object (things it could not finish or
+verify, each clipped to 200 characters). The unit still counts as done; a phone can show a small "open items" badge.
+Absent means none. Nothing else in the roadmap messages changed. A finished roadmap is archived on the desktop when the
+next large job starts, which a phone sees as the existing `reset` state.
