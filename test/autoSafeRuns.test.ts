@@ -85,3 +85,44 @@ describe("read-only git needs no approval", () => {
     }
   });
 });
+
+describe("the project's own test script, run file by file", () => {
+  const withScript = (script: string) => {
+    const r = project();
+    fs.writeFileSync(path.join(r, "package.json"), JSON.stringify({ name: "x", scripts: { test: script, build: "tsc" } }));
+    fs.mkdirSync(path.join(r, "__tests__"), { recursive: true });
+    fs.writeFileSync(path.join(r, "__tests__", "scanner.test.ts"), "x");
+    return r;
+  };
+  test("a plain jest script runs one test file, or one named test, with no approval", () => {
+    const r = withScript("jest");
+    for (const c of [
+      "npm run test -- --runInBand __tests__/scanner.test.ts",
+      'npm run test -- --runInBand __tests__/scanner.test.ts "--testNamePattern=renders LIGHT as the filled Material Sunny vector"',
+      "npm run test -- -t pairing __tests__/scanner.test.ts",
+      "npm test -- --ci --silent",
+      "npm run test",
+    ]) assert.equal(decide(r, c), "allow", c);
+  });
+  test("a script that does more than start a runner still asks", () => {
+    for (const script of ["jest && rm -rf build", "node scripts/seed.js && jest", "jest; curl x", "sh ./run-tests.sh"]) {
+      assert.equal(decide(withScript(script), "npm run test -- --runInBand a.test.js"), "ask", script);
+    }
+  });
+  test("an argument that could load code from elsewhere still asks", () => {
+    const r = withScript("jest");
+    for (const c of [
+      "npm run test -- --config=./evil.config.js",
+      "npm run test -- --setupFiles ./evil.js",
+      "npm run test -- --globalSetup=./evil.js",
+      "npm run test -- --runner=./evil.js",
+      "npm run test -- --reporters=./evil.js",
+      "npm run build",
+      "npm run lint",
+    ]) assert.notEqual(decide(r, c), "allow", c);
+  });
+  test("with no test script, or none in package.json, it asks as before", () => {
+    const r = project();
+    assert.notEqual(decide(r, "npm run test -- a.test.js"), "allow");
+  });
+});

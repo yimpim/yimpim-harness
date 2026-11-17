@@ -461,3 +461,27 @@ describe("a folder being ported from is never proof that the project has it", ()
     assert.ok(!seen.join("\n").includes("legacy_app"));
   });
 });
+
+import { isAuditFollowUp } from "../src/existence.js";
+
+describe("a build request is not mistaken for an audit, and a follow-up to an audit carries its findings", () => {
+  test("rules about what NOT to touch inside a build request do not make it report-only", () => {
+    for (const t of [
+      "Do these jobs in order. Do not touch files outside the job. Do not add dependencies.",
+      "add a login screen but don't change the header",
+      "Before we start, read the spec. Then build the cards.",
+      "build X, without changing the public API",
+    ]) assert.ok(!wantsReportOnly(t), t);
+    for (const t of ["see what's done and let me know what is left before we work on anything", "compare to the spec, do not change anything", "just check it, we are not building anything yet"]) assert.ok(wantsReportOnly(t), t);
+  });
+  test("short pointers back at a report are follow-ups; new requests and report requests are not", () => {
+    for (const t of ["lets work on what existence found", "do the rest", "finish what is left", "go ahead", "fix those", "build what the check found"]) assert.ok(isAuditFollowUp(t), t);
+    for (const t of ["add a settings screen", "tell me what is left before we work on anything", "x".repeat(400)]) assert.ok(!isAuditFollowUp(t), t);
+  });
+  test("the next prompt after a report-only audit gets the request and the findings as context", () => {
+    const src = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
+    assert.match(src, /lastAudit = \{ request: text\.slice\(0, 3000\), report: renderExistence\(found\)/);
+    assert.match(src, /const audit = !advice && lastAudit && isAuditFollowUp\(trimmed\)/);
+    assert.match(src, /Do only what it found missing or not determined/);
+  });
+});

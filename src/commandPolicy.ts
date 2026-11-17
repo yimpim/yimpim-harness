@@ -686,6 +686,50 @@ const TEST_FILE = /(^|[\/])(__tests__|tests?)[\/].+.[cm]?[jt]sx?$|[.-_](test|spe
 const PY_TEST_FILE = /(^|[\/])(test_[^\/]*|[^\/]*_test).py$/i;
 const VERSION_FLAGS = new Set(["--version", "-v", "-V", "--help", "-h"]);
 
+/** Test runners a project's `test` script may start with, with nothing else in the script that could run other things. */
+const TEST_SCRIPT = /^(jest|vitest|mocha|ava|jasmine|tap)((\s+(--?[A-Za-z][\w-]*(=[\w./:@-]+)?))*)$/;
+/** Flags a test run may be given: they select, report or limit tests, and none of them loads code from a path. */
+const SAFE_TEST_FLAGS = new Set([
+  "--runInBand", "-i", "--ci", "--silent", "--verbose", "--coverage", "--bail", "-b", "--forceExit", "--detectOpenHandles",
+  "--passWithNoTests", "--no-watchman", "--listTests", "--onlyChanged", "-o", "--findRelatedTests", "--maxWorkers", "-w",
+  "--testNamePattern", "-t", "--testPathPattern", "--no-cache", "--colors", "--no-colors", "--json", "--watch=false",
+]);
+/** Flags whose value is the next argument. */
+const TEST_FLAG_TAKES_VALUE = new Set(["--maxWorkers", "-w", "--testNamePattern", "-t", "--testPathPattern"]);
+
+/**
+ * `npm run test -- <files and safe flags>` when the project's own `test` script is just a known test runner. This is the
+ * run a repair or a check does a dozen times a task, once per test file. Asking each time protects nothing: the agent can
+ * already write a test file and run it. A script that does anything beyond starting the runner, or an argument that could load
+ * code from elsewhere (a config path, a setup file, a custom runner), still asks.
+ */
+function isPlainTestScript(rest: string[], cwd: string): boolean {
+  let tail: string[];
+  if (rest[0] === "test") tail = rest.slice(1);
+  else if ((rest[0] === "run" || rest[0] === "run-script") && rest[1] === "test") tail = rest.slice(2);
+  else return false;
+  if (tail.length > 0 && tail[0] !== "--") return false;
+  tail = tail.slice(1);
+  let script: unknown;
+  try {
+    script = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf-8"))?.scripts?.test;
+  } catch {
+    return false;
+  }
+  if (typeof script !== "string" || !TEST_SCRIPT.test(script.trim())) return false;
+  for (let i = 0; i < tail.length; i++) {
+    const a = tail[i];
+    if (a.startsWith("-")) {
+      const [name, inline] = [a.split("=")[0], a.includes("=")];
+      if (!SAFE_TEST_FLAGS.has(name)) return false;
+      if (TEST_FLAG_TAKES_VALUE.has(name) && !inline) i++; // its value is the next argument, whatever it says
+      continue;
+    }
+    if (/[;&|<>`$]/.test(a) && !/\s/.test(a)) return false; // a bare shell-looking argument
+  }
+  return true;
+}
+
 const READ_ONLY_GIT = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "shortlog", "describe", "diff-tree", "cat-file"]);
 /** Flags that make an otherwise read-only git command write a file, run a program, or open a pager/editor. */
 const GIT_UNSAFE_FLAG = /^(--output|--exec|--ext-diff|--textconv|--open-files-in-pager|--upload-pack|--receive-pack|-O|-o|--git-dir|--work-tree|--no-index)(=|$)/;
@@ -734,6 +778,8 @@ export function isAutoSafeRun(argv: string[], cwd: string, repoRoot: string): bo
   if (rest.length === 1 && VERSION_FLAGS.has(rest[0]) && !/[\/]/.test(argv[0])) return true;
 
   if (exe === "git") return isReadOnlyGit(rest);
+
+  if (["npm", "pnpm", "yarn", "bun"].includes(exe)) return isPlainTestScript(rest, cwd);
 
   if (exe === "node") {
     const files: string[] = [];
