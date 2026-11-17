@@ -374,12 +374,22 @@ export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult>
  * not a plan and not a build. Matched on plain wording, so it never depends on a model's reading of the request.
  */
 export function wantsReportOnly(request: string): boolean {
+  // "Do not touch files outside the job" is a rule for a build, not a request for a report: only wording that says NOTHING
+  // should be changed, or that nothing should start yet, counts.
   return [
-    /\b(before|until) (we|you|i)\b[^.]{0,30}\b(work|start|build|chang|edit|touch|cod|implement)/i,
-    /\b(don'?t|do not|no need to|without|not yet)\b[^.]{0,12}\b(chang|build|edit|touch|writ|modify|work on|implement)/i,
+    /\b(before|until) (we|you|i)\s+(work on|start|begin|build|change|touch|do|code|implement|edit)\s+(anything|any of it|it)\b/i,
+    /\b(don'?t|do not|without)\s+(chang|edit|touch|modify|writ|build|alter)\w*\s+(anything|any code|any files?|the code|the project|yet)\b/i,
+    /\bnot (building|changing|editing)\s+anything\b/i,
     /\b(let me know|tell me|show me|report|list)\b[^.]{0,60}\b(what('?s| is)? (left|remaining|missing|not done)|still (left|missing|to do)|what we (still )?(need|have) to)/i,
     /\bjust (check|audit|compare|report|tell)\b/i,
   ].some((re) => re.test(request));
+}
+
+/** A short follow-up that points back at a report just given ("lets work on what existence found", "do the rest"). */
+export function isAuditFollowUp(text: string): boolean {
+  const t = text.trim();
+  if (t.length === 0 || t.length > 300 || wantsReportOnly(t)) return false;
+  return /\b(existence|the check|the audit|the report)\b|\bwhat (it|you|they|that|existence|the check) (found|said|reported|listed|flagged)\b|\b(the rest|the remaining|what('?s| is) (left|missing)|the gaps|the missing)\b|\b(go ahead|proceed|do (it|those|them|that)|finish (it|that|those|them)|fix (it|those|them))\b/i.test(t);
 }
 
 const place = (e: Evidence) => `${e.file}: \`${e.quote.replace(/`/g, "'").slice(0, 110)}\``;

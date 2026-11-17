@@ -113,10 +113,13 @@ describe("the project's own test run is asked about once, not once per variant",
   const withTest = (script = "jest") => project({ "package.json": JSON.stringify({ scripts: { test: script, build: "tsc" } }) });
   const approvalsFor = (dir: string) => new CommandApprovals(path.join(dir, "..", "appr-" + path.basename(dir) + ".json"));
 
-  test("nothing is allowed before any form of the test run was approved", () => {
-    const dir = withTest();
-    assert.equal(evaluateCommand("npm test", { repoRoot: dir, approvals: approvalsFor(dir) }).verdict, "ask");
-    assert.equal(evaluateCommand("npm test -- --runInBand", { repoRoot: dir, approvals: approvalsFor(dir) }).verdict, "ask");
+  test("a plain test-runner script needs no approval; any other test script asks until one form is approved", () => {
+    const plain = withTest();
+    assert.equal(evaluateCommand("npm test", { repoRoot: plain, approvals: approvalsFor(plain) }).verdict, "allow");
+    assert.equal(evaluateCommand("npm test -- --runInBand", { repoRoot: plain, approvals: approvalsFor(plain) }).verdict, "allow");
+    const custom = withTest("node scripts/run-tests.js");
+    assert.equal(evaluateCommand("npm test", { repoRoot: custom, approvals: approvalsFor(custom) }).verdict, "ask");
+    assert.equal(evaluateCommand("npm test -- --runInBand", { repoRoot: custom, approvals: approvalsFor(custom) }).verdict, "ask");
   });
 
   test("once one form is approved, the other forms are allowed without asking", () => {

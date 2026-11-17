@@ -298,10 +298,6 @@ function redrawInputArea(): void {
     process.stdout.write(renderStatusLine(statusLine) + "\n");
     lastStatusRows++;
   }
-  if (modelStrip) {
-    process.stdout.write(renderStatusLine(modelStrip) + "\n");
-    lastStatusRows++;
-  }
   process.stdout.write(dividerLine() + "\n");
   const colWidth = currentSuggestions.reduce((w, c) => Math.max(w, c.cmd.length), 0) + 3;
   for (const entry of currentSuggestions) {
@@ -317,6 +313,24 @@ function redrawInputArea(): void {
   }
   rl.prompt(true); // preserveCursor: true — re-renders label+line, cursor from rl.cursor
   lastPromptRows = currentPromptRows();
+  drawModelStripBelow();
+}
+
+/**
+ * The models row sits UNDER the prompt, where it reads as part of the input box and never pushes the prompt around. It is
+ * written with relative moves only (down to the end of the prompt, one row below it, then back to where the cursor was), so a
+ * screen that scrolls because the row is at the very bottom still comes out right. clearInputArea erases it as part of
+ * "everything below the cursor".
+ */
+function drawModelStripBelow(): void {
+  if (!rl || !modelStrip) return;
+  const pos = (rl as any).getCursorPos?.() as { rows: number; cols: number } | undefined;
+  if (!pos) return;
+  const down = Math.max(0, lastPromptRows - 1 - pos.rows);
+  if (down > 0) readline.moveCursor(process.stdout, 0, down);
+  process.stdout.write("\n" + renderStatusLine(modelStrip));
+  readline.moveCursor(process.stdout, 0, -(down + 1));
+  readline.cursorTo(process.stdout, pos.cols);
 }
 
 /** Full refresh: recompute suggestions from the CURRENT line and redraw

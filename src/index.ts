@@ -40,7 +40,8 @@ import { openRenderer } from "./svgRender.js";
 import { ensureDesignSystem } from "./uiDesign.js";
 import { stageDesignImage } from "./designDelivery.js";
 import { parseLenient } from "./jsonRepair.js";
-import { checkExistence, existencePlannerSection, renderExistence, wantsReportOnly } from "./existence.js";
+import { unplannedJobs } from "./jobsList.js";
+import { checkExistence, existencePlannerSection, renderExistence, wantsReportOnly, isAuditFollowUp } from "./existence.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { runSecurityAudit } from "./securityAudit.js";
 import { existingDirOnly, existingFilesOnly, projectLayout, renderLayout } from "./projectLayout.js";
@@ -568,6 +569,9 @@ function roadmapStateLine(repoRoot: string): string {
   return `Roadmap: exists ("${rm.goal.slice(0, 120)}"), ${pr.done} of ${pr.total} units done.`;
 }
 
+// The last report-only audit: so "lets work on what existence found" on the next prompt knows what was found.
+let lastAudit: { request: string; report: string } | null = null;
+
 // The request last checked and how many of the things it asks for are not built yet (null: not known).
 let existenceChecked: { text: string; remaining: number | null } | null = null;
 
@@ -609,6 +613,7 @@ async function checkWhatExists(text: string, client: OpenRouterClient, config: A
         );
         existenceSection = existencePlannerSection(found);
         existenceChecked = { text, remaining: left };
+        lastAudit = { request: text.slice(0, 3000), report: renderExistence(found).slice(0, 8000) };
         return "handled";
       }
       if (found.allBuilt) {
@@ -4466,7 +4471,8 @@ async function main(): Promise<void> {
     });
   });
 
-  events.onEmit((event) => {
+  const runningAgentLabels: string[] = [];
+    events.onEmit((event) => {
     if (event.type === "phase.end" && taskRunning && currentTaskId) {
       usageLedger().endPhase(
         currentTaskId,
@@ -4484,7 +4490,16 @@ async function main(): Promise<void> {
       currentWorkerId = `w-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       lastWorkerId = currentWorkerId;
       const phase = currentPhaseForEvents ? `${currentPhaseForEvents.name} · ` : "";
-      setStatusLine(`${phase}${event.agent} running…`);
+      runningAgentLabels.push(`${phase}${event.agent}`);
+      setStatusLine(`${runningAgentLabels[runningAgentLabels.length - 1]} running…`);
+    }
+    // The line says what is running NOW. When an agent ends it goes, or shows the one still running; it used to stay until the
+    // whole task finished, so "DISCOVERY running…" sat there through the planner, the editor and the idle prompt.
+    if (event.type === "agent.end") {
+      const ended = runningAgentLabels.findIndex((l) => l.endsWith(`${event.agent}`));
+      if (ended >= 0) runningAgentLabels.splice(ended, 1);
+      const left = runningAgentLabels[runningAgentLabels.length - 1];
+      setStatusLine(left ? `${left} running…` : undefined);
     }
 
     if (remote?.connected) {
@@ -5572,9 +5587,14 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
             // silently inherit advice from two turns ago.
             const advice = advisorMemory.last;
             advisorMemory.last = undefined;
+            // The same for an audit that only reported: "lets work on what existence found" carries the request and the findings.
+            const audit = !advice && lastAudit && isAuditFollowUp(trimmed) ? lastAudit : null;
+            if (audit) lastAudit = null;
             instructions = advice
               ? `${trimmed}\n\n[Context: you previously answered "${advice.question}" with the following — use it if this request refers to it:\n${advice.answer}]`
-              : trimmed;
+              : audit
+                ? `${trimmed}\n\n[Context: this request was already checked against the code, and nothing was changed. The original request was:\n${audit.request}\n\nThe check found:\n${audit.report}\n\nDo only what it found missing or not determined (read the code to decide those); do not rebuild what it found built. Evidence for "already built" comes from the project's own source, never from reference folders.]`
+                : trimmed;
           }
         }
         } catch (err: any) {
@@ -6374,6 +6394,17 @@ The user wants you to decide, not ask: ${d.choice}`);
     // under this one), while draining an existing backlog APPENDS instead,
     // since replacing here would silently drop whatever of it this very
     // instruction hadn't gotten to yet.
+    // A request that lists numbered jobs must not shrink to the first one: any job the plan does not cover is queued, whatever
+    // the Planner wrote in its assumptions.
+    try {
+      const dropped = unplannedJobs(instructions, activePlan);
+      if (dropped.length > 0) {
+        activePlan.followUpTasks = [...(activePlan.followUpTasks ?? []), ...dropped];
+        console.log(`[PLANNER] The request listed several jobs and this plan covers only part of them. ${dropped.length} job(s) were queued after it so they are not lost.`);
+      }
+    } catch {
+      // a safety net; it never blocks a plan
+    }
     const freshFollowUps = activePlan.followUpTasks ?? [];
     if (freshFollowUps.length > 0) {
       // They go on the roadmap, where they are remembered, ordered and resumable,
@@ -6507,6 +6538,7 @@ The user wants you to decide, not ask: ${d.choice}`);
 
   const finish = (ok: boolean) => {
     setStatusLine(undefined);
+    runningAgentLabels.length = 0;
     // Scoped to just this task, not this whole (possibly multi-task, thanks
     // to looping back to the prompt) process — see currentTaskUsageStart above.
     const taskUsage = events.usageDelta(currentTaskUsageStart);
@@ -6871,6 +6903,7 @@ The user wants you to decide, not ask: ${d.choice}`);
     } catch (err: any) {
       if (!(err instanceof AbortedError) && !(err instanceof TaskFailedError)) throw err;
       setStatusLine(undefined);
+      runningAgentLabels.length = 0;
 
       // Both a Stop and a task not completing (phase exhausted its repair
       // budget, empty instructions, a bad attachment, ...) are expected
