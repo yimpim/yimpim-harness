@@ -108,8 +108,8 @@ describe("checking requirements against the code", () => {
     ] }), seen);
     const out = await checkRequirements({ call, repoRoot: dir, requirements: [req("R1", "Users can sign in with email", ["LoginScreen"]), req("R2", "Orders are listed", ["OrderList"]), req("R3", "Push notifications arrive", ["fcmToken"])] });
     assert.deepEqual(out.map((o) => o.verdict), ["built", "unclear", "missing"]);
-    assert.equal(seen.length, 1, "one call for the two that had code");
-    assert.ok(!seen[0].includes("R3"), "the one with no code was not even asked about");
+    assert.equal(seen.length, 2, "one call for the two that had code, then a second look at the one not clearly built");
+    assert.ok(seen.every((m) => !m.includes("R3")), "the one with no code was not even asked about");
     assert.match(out[2].note, /No code in the project matched it/);
   });
   test("requirements go to the model four at a time", async () => {
@@ -117,7 +117,8 @@ describe("checking requirements against the code", () => {
     const seen: string[] = [];
     const reqs = Array.from({ length: 9 }, (_, i) => req(`R${i + 1}`, "login screen", ["LoginScreen"]));
     await checkRequirements({ call: judgeAs(() => ({ results: [] }), seen), repoRoot: dir, requirements: reqs });
-    assert.equal(seen.length, 3);
+    // three batches of up to four, then every one that could not be judged gets a second look, two at a time
+    assert.equal(seen.length, 3 + 5);
   });
   test("a model that fails or skips a requirement leaves it unclear, never built, and never throws", async () => {
     const dir = repo(PROJECT);
@@ -183,8 +184,71 @@ describe("the whole check", () => {
     assert.match(section, /Do NOT rebuild or rewrite it: reuse it, and plan only what is partial or missing/);
     assert.match(section, /Already built:\n- Users can sign in -> src\/a\.ts/);
     assert.match(section, /Partly built \(extend the existing code in place\):\n- Orders listed with filters -> exists in src\/o\.ts.*still missing: the filters/);
-    assert.match(section, /these are the work\):\n- Push notifications\n- Something vague/);
+    assert.match(section, /Not built \(these are the work\):\n- Push notifications\n/);
+    assert.match(section, /Not determined \(.*do not rebuild them blindly\):\n- Something vague \(too vague\)/);
     assert.equal(existencePlannerSection({ ...r, items: [r.items[2], r.items[3]] }), "", "nothing built, nothing to tell the planner");
+  });
+});
+
+import { SHORT_EXCERPT } from "../src/existence.js";
+
+describe("a short excerpt is not evidence that something is missing", () => {
+  const judgeAs = (fn: (user: string) => object | string, seen: string[] = []) => async (m: Msg[]) => {
+    seen.push(m[1].content);
+    const r = fn(m[1].content);
+    return typeof r === "string" ? r : JSON.stringify(r);
+  };
+  test("the wording models use for it is recognised", () => {
+    for (const m of [
+      "The excerpt does not show the run being appended as a distinct worker.",
+      "The excerpts do not establish that the app rebuilds from the complete event list.",
+      "The excerpts do not show per-agent usage being applied from status.",
+      "The snippet provided does not include the unmatched-agent fallback.",
+    ]) assert.match(m, SHORT_EXCERPT, m);
+    for (const m of ["The filters are not implemented", "There is no retry on 401", "Only the Android half exists"]) assert.doesNotMatch(m, SHORT_EXCERPT, m);
+  });
+  test("such a partial becomes unclear, with the evidence kept and no 'missing' claim", () => {
+    const byRel = new Map([["src/screens/LoginScreen.tsx", LOGIN]]);
+    const c = settle(
+      { id: "R1", verdict: "partial", evidence: [{ file: "src/screens/LoginScreen.tsx", quote: "export function LoginScreen() {" }], missing: "The excerpt does not show the sign-in call.", note: "" },
+      req("R1", "sign in"), byRel
+    );
+    assert.equal(c.verdict, "unclear");
+    assert.equal(c.missing, "");
+    assert.equal(c.evidence.length, 1);
+    assert.match(c.note, /not shown to be absent/);
+  });
+  test("a real gap stays partial", () => {
+    const byRel = new Map([["src/screens/LoginScreen.tsx", LOGIN]]);
+    const c = settle(
+      { id: "R1", verdict: "partial", evidence: [{ file: "src/screens/LoginScreen.tsx", quote: "export function LoginScreen() {" }], missing: "There is no password reset link.", note: "" },
+      req("R1", "sign in"), byRel
+    );
+    assert.equal(c.verdict, "partial");
+    assert.equal(c.missing, "There is no password reset link.");
+  });
+  test("the judge is told a short excerpt is never a reason for partial", () => {
+    assert.match(JUDGE_SYSTEM, /excerpts are too short to see all of it/);
+    assert.match(JUDGE_SYSTEM, /never a reason for partial/);
+  });
+  test("a second, longer look settles what the first could not, and a better answer replaces the first", async () => {
+    const dir = repo(PROJECT);
+    const seen: string[] = [];
+    let n = 0;
+    const call = judgeAs(() => (n++ === 0
+      ? { results: [{ id: "R1", verdict: "unclear", note: "excerpt too short" }] }
+      : { results: [{ id: "R1", verdict: "built", evidence: [{ file: "src/screens/LoginScreen.tsx", quote: "export function LoginScreen() {" }], note: "seen in full" }] }), seen);
+    const out = await checkRequirements({ call, repoRoot: dir, requirements: [req("R1", "Users can sign in with email", ["LoginScreen"])] });
+    assert.equal(out[0].verdict, "built");
+    assert.equal(seen.length, 2);
+    assert.match(seen[1], /longer/);
+  });
+  test("a built one is not looked at twice", async () => {
+    const dir = repo(PROJECT);
+    const seen: string[] = [];
+    const call = judgeAs(() => ({ results: [{ id: "R1", verdict: "built", evidence: [{ file: "src/screens/LoginScreen.tsx", quote: "export function LoginScreen() {" }], note: "" }] }), seen);
+    await checkRequirements({ call, repoRoot: dir, requirements: [req("R1", "Users can sign in with email", ["LoginScreen"])] });
+    assert.equal(seen.length, 1);
   });
 });
 
@@ -295,5 +359,74 @@ describe("a comment is not the feature", () => {
     assert.match(JUDGE_SYSTEM, /never a comment, docstring or documentation/);
     const src = fs.readFileSync(new URL("../src/existence.ts", import.meta.url), "utf-8");
     assert.match(src, /collectFiles\(o\.repoRoot, 4000, 1_500_000\)/);
+  });
+});
+
+import { unitsFor } from "../src/existence.js";
+import { builtByUnits, emptyRoadmap, addUnits, markDone, saveRoadmap, archiveFinishedRoadmap } from "../src/roadmap.js";
+
+describe("the roadmap is read first, then the code confirms it", () => {
+  const built = [
+    { id: "U003", title: "Match Timeline Cards and Q&A", summary: "Adjust timeline card rendering and question-and-answer presentation", files: ["src/screens/LoginScreen.tsx"], commit: "c1a017c5b496", openItems: [] },
+    { id: "U009", title: "Port Post-Splash Routing", summary: "launch route", files: ["src/navigation/launchRoute.ts"], openItems: ["device test"] },
+  ];
+  test("a requirement is matched to the done units that cover it", () => {
+    const r = req("R1", "Timeline cards show question and answer presentation inside the worker", ["DashboardTimeline"]);
+    assert.deepEqual(unitsFor(r, built).map((u) => u.id), ["U003"]);
+    assert.deepEqual(unitsFor(req("R2", "Push notifications arrive", ["fcmToken"]), built), []);
+  });
+  test("the judge is told what the roadmap recorded, as a lead and not as proof", async () => {
+    const dir = repo(PROJECT);
+    const seen: string[] = [];
+    const call = async (m: Msg[]) => { seen.push(m[1].content); return JSON.stringify({ results: [{ id: "R1", verdict: "built", evidence: [{ file: "src/screens/LoginScreen.tsx", quote: "export function LoginScreen() {" }], note: "" }] }); };
+    const out = await checkRequirements({ call, repoRoot: dir, built, requirements: [req("R1", "Timeline cards show question and answer presentation", ["LoginScreen"])] });
+    assert.match(seen[0], /The roadmap recorded this as built by: U003 "Match Timeline Cards and Q&A" \(commit c1a017c5\)/);
+    assert.match(seen[0], /a lead, not proof/);
+    assert.equal(out[0].verdict, "built", "still needs a quote from the code");
+  });
+  test("a roadmap's claim alone never makes something built", async () => {
+    const dir = repo(PROJECT);
+    const call = async () => JSON.stringify({ results: [{ id: "R1", verdict: "built", evidence: [{ file: "src/x.ts", quote: "nothing like this exists in any file" }], note: "roadmap says so" }] });
+    const out = await checkRequirements({ call, repoRoot: dir, built, requirements: [req("R1", "Timeline cards show question and answer presentation", ["LoginScreen"])] });
+    assert.notEqual(out[0].verdict, "built");
+  });
+  test("done units are read from the active roadmap and from archived ones", () => {
+    const dir = repo();
+    const rm = emptyRoadmap("g", "idea");
+    addUnits(rm, [{ title: "One" }, { title: "Two" }]);
+    markDone(rm, "U001", { files: ["src/a.ts"], commit: "abc" });
+    saveRoadmap(dir, rm);
+    assert.deepEqual(builtByUnits(dir).map((u) => u.id), ["U001"]);
+    markDone(rm, "U002", {});
+    saveRoadmap(dir, rm);
+    archiveFinishedRoadmap(dir);
+    assert.deepEqual(builtByUnits(dir).map((u) => u.id), ["U001", "U002"]);
+  });
+});
+
+import { wantsReportOnly } from "../src/existence.js";
+import { userNamedFiles } from "../src/userFiles.js";
+
+describe("an audit that only asks for findings", () => {
+  test("the wording that means 'tell me, do not build' is recognised", () => {
+    for (const t of [
+      "check eference/timeline-port/EXPO_PORT_BRIEF.md and see if we complted it all already from our roadmap. if not let me know what is left before we work on anything",
+      "compare the code to the spec, don't change anything",
+      "just check what we have against the brief",
+      "tell me what is still missing",
+      "report what's left",
+    ]) assert.ok(wantsReportOnly(t), t);
+    for (const t of ["build the login screen", "add push notifications and then check they work", "fix the crash on launch"]) assert.ok(!wantsReportOnly(t), t);
+  });
+  test("a typo in the front of a path still finds the document", () => {
+    const dir = repo({ "reference/timeline-port/EXPO_PORT_BRIEF.md": "# brief", "reference/other/NOTES.md": "n" });
+    assert.deepEqual(userNamedFiles("check eference/timeline-port/EXPO_PORT_BRIEF.md and see", dir), ["reference/timeline-port/EXPO_PORT_BRIEF.md"]);
+    assert.deepEqual(userNamedFiles("see wrongdir/timeline-port/EXPO_PORT_BRIEF.md", dir), ["reference/timeline-port/EXPO_PORT_BRIEF.md"]);
+    assert.deepEqual(userNamedFiles("see nothing/at/MISSING_FILE.md", dir), []);
+  });
+  test("a report-only audit prints the findings and plans nothing", () => {
+    const t = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
+    assert.match(t, /reportOnly && !found\.allBuilt/);
+    assert.match(t, /Nothing was planned or changed, as you asked/);
   });
 });

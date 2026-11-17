@@ -369,6 +369,11 @@ export function printAbove(write: () => void): void {
 
 /** Same idea for a raw write that bypasses console entirely — the elapsed-
  *  time ticker in openrouter.ts, currently a bare process.stdout.write. */
+/** True while the pinned prompt is on screen, where a line written every second would scroll instead of updating in place. */
+export function hasPinnedInput(): boolean {
+  return !!rl;
+}
+
 export function writeRawAbove(s: string): void {
   printAbove(() => process.stdout.write(s));
 }

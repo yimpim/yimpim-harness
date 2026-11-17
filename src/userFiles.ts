@@ -116,6 +116,18 @@ export function userNamedFiles(request: string, repoRoot: string, max = 8): stri
     if (!token.includes("/")) {
       const hit = findByBasename(root, token)[0];
       if (hit && !out.includes(hit)) out.push(hit);
+    } else {
+      // A path with a typo or a wrong first folder ("eference/x/BRIEF.md"): the file name plus as much of the path as still
+      // matches, dropping the front of it one folder at a time.
+      const parts = token.split("/");
+      const candidates = findByBasename(root, parts[parts.length - 1]);
+      let found: string | undefined;
+      for (let k = 1; k < parts.length && !found; k++) {
+        const tail = parts.slice(k).join("/").toLowerCase();
+        found = candidates.find((c) => c.toLowerCase() === tail || c.toLowerCase().endsWith("/" + tail));
+      }
+      if (!found && candidates.length === 1) found = candidates[0]; // only one file of that name: it is the one meant
+      if (found && !out.includes(found)) out.push(found);
     }
     if (out.length >= max) break;
   }

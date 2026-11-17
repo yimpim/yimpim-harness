@@ -8,6 +8,7 @@
  * is worth. "Built" means the code is present, not that it works: QA is still the check for behaviour.
  */
 import { collectFiles, type FileText } from "./securityAudit.js";
+import type { BuiltUnit } from "./roadmap.js";
 
 export type Msg = { role: "system" | "user"; content: string };
 export type Call = (messages: Msg[]) => Promise<string>;
@@ -106,7 +107,7 @@ const count = (hay: string, needle: string, cap: number): number => {
 };
 
 /** The files most likely to implement a requirement, with the matching lines. Test, doc and generated files are not candidates. */
-export function findCandidates(req: Requirement, files: FileText[], lower: Map<string, string>, boost: Set<string> = new Set(), maxFiles = 4): Candidate[] {
+export function findCandidates(req: Requirement, files: FileText[], lower: Map<string, string>, boost: Set<string> = new Set(), maxFiles = 4, deep = false, strong: Set<string> = new Set()): Candidate[] {
   const terms = req.terms.map((t) => t.toLowerCase());
   const words = wordsOf(req.text);
   const scored: { f: FileText; score: number }[] = [];
@@ -124,14 +125,15 @@ export function findCandidates(req: Requirement, files: FileText[], lower: Map<s
       if (path.includes(w)) score += 2;
     }
     if (boost.has(f.rel)) score += 4;
+    if (strong.has(f.rel)) score += 15;
     if (score > 0) scored.push({ f, score });
   }
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, maxFiles).map(({ f, score }) => ({ file: f.rel, score, snippet: windows(f.text, [...terms, ...words]) }));
+  return scored.slice(0, maxFiles).map(({ f, score }) => ({ file: f.rel, score, snippet: deep ? windows(f.text, [...terms, ...words], 16, 7000, 5) : windows(f.text, [...terms, ...words]) }));
 }
 
 /** Up to two windows of numbered lines around the lines that match the most terms. */
-export function windows(text: string, terms: string[], radius = 12, maxChars = 2400): string {
+export function windows(text: string, terms: string[], radius = 12, maxChars = 2400, count = 2): string {
   const lines = text.split(/\r?\n/);
   const low = lines.map((l) => l.toLowerCase());
   // A comment that mentions the feature is a weaker lead than the code that does it.
@@ -139,7 +141,7 @@ export function windows(text: string, terms: string[], radius = 12, maxChars = 2
   const picked: number[] = [];
   for (const h of hits) {
     if (picked.every((p) => Math.abs(p - h.i) > radius * 2)) picked.push(h.i);
-    if (picked.length === 2) break;
+    if (picked.length === count) break;
   }
   if (picked.length === 0) picked.push(0);
   picked.sort((a, b) => a - b);
@@ -157,7 +159,8 @@ export function windows(text: string, terms: string[], radius = 12, maxChars = 2
 export const JUDGE_SYSTEM =
   "You judge whether requirements are ALREADY implemented in an existing app, using ONLY the code excerpts given for each (numbered lines from real files). " +
   "built: the code clearly implements the whole requirement (not just something related or similar). " +
-  "partial: some of it exists; say exactly what is missing. missing: no relevant code in the excerpts. unclear: the requirement is too vague to judge, or the excerpts are not enough. " +
+  "partial: some of it exists AND a specific piece is clearly absent from the code you can see; say exactly what that piece is. missing: no relevant code in the excerpts. " +
+  "unclear: the requirement is too vague to judge, OR the excerpts are too short to see all of it. An excerpt being short is never a reason for partial: if you simply cannot see whether a part exists, answer unclear and say which part to look for. Never write that 'the excerpt does not show' something in the missing field. " +
   "Be strict: related code is not an implementation. For built and partial you MUST give evidence: one to three quotes, each copied EXACTLY (one or two lines, no line numbers) from an excerpt, with its file. A quote must be executable code (a function, a route, a config key, a handler), never a comment, docstring or documentation: a comment describing a feature is not the feature. A quote that is not in the excerpts, or is only a comment, will be rejected and the verdict downgraded. " +
   'Respond ONLY with JSON: {"results": [{"id": "R1", "verdict": "built"|"partial"|"missing"|"unclear", "evidence": [{"file": "", "quote": ""}], "missing": "what is not there yet (partial)", "note": "one sentence"}]}';
 
@@ -211,16 +214,40 @@ export function validQuotes(evidence: Evidence[], byRel: Map<string, string>): E
 }
 
 /** What a verdict is worth after the quotes are checked: built and partial both need at least one real quote. */
+/** "Partial" whose only reason is that the excerpt was short: not evidence that anything is absent. */
+export const SHORT_EXCERPT = /\b(excerpts?|snippets?|shown|visible|supplied|provided)\b[^.]{0,60}\b(not|n't|no|never|without)\b[^.]{0,40}\b(show|establish|include|contain|confirm|demonstrate|reveal)|\b(does|do) not (show|establish|confirm|include)\b/i;
+
 export function settle(raw: Raw, req: Requirement, byRel: Map<string, string>): Checked {
   const evidence = validQuotes(raw.evidence, byRel);
+  if (raw.verdict === "partial" && SHORT_EXCERPT.test(raw.missing)) {
+    return { req, verdict: "unclear", evidence, missing: "", note: `Not seen in the code that was checked (not shown to be absent): ${raw.missing}`.slice(0, 240) };
+  }
   if ((raw.verdict === "built" || raw.verdict === "partial") && evidence.length === 0) {
     return { req, verdict: "unclear", evidence: [], missing: "", note: `Claimed ${raw.verdict} but gave no quote that exists in a source file, so it is not counted as built. ${raw.note}`.trim().slice(0, 240) };
   }
   return { req, verdict: raw.verdict, evidence, missing: raw.verdict === "partial" ? raw.missing : "", note: raw.note };
 }
 
+/** The done units whose title or summary overlaps a requirement most: what the roadmap says built it. */
+export function unitsFor(req: Requirement, built: BuiltUnit[], max = 2): BuiltUnit[] {
+  const want = new Set([...wordsOf(req.text), ...req.terms.flatMap((t) => wordsOf(t))]);
+  return built
+    .map((u) => ({ u, n: wordsOf(`${u.title} ${u.summary}`).filter((w) => want.has(w)).length }))
+    .filter((x) => x.n >= 3)
+    .sort((a, b) => b.n - a.n)
+    .slice(0, max)
+    .map((x) => x.u);
+}
+
+const roadmapNote = (units: BuiltUnit[]) =>
+  units.length === 0
+    ? ""
+    : `\nThe roadmap recorded this as built by: ${units.map((u) => `${u.id} "${u.title}"${u.commit ? ` (commit ${u.commit.slice(0, 8)})` : ""}, files: ${u.files.slice(0, 6).join(", ") || "none listed"}${u.openItems.length ? `; left open: ${u.openItems.join(" | ")}` : ""}`).join("; ")}. This is a lead, not proof: confirm it from the code, and quote the code.`;
+
 export interface CheckOptions {
   call: Call;
+  /** What earlier roadmaps recorded as done: searched first, and told to the judge as a lead. */
+  built?: BuiltUnit[];
   repoRoot: string;
   requirements: Requirement[];
   /** Files the project's own map ranks for this request: they are searched first. */
@@ -235,7 +262,9 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
   const byRel = new Map(files.map((f) => [f.rel, f.text]));
   const lower = new Map(files.map((f) => [f.rel, f.text.toLowerCase()]));
   const boost = new Set((o.shortlist ?? []).map((p) => p.replace(/\\/g, "/")));
-  const withCode = o.requirements.map((req) => ({ req, cands: findCandidates(req, files, lower, boost) }));
+  const leads = new Map(o.requirements.map((r) => [r.id, unitsFor(r, o.built ?? [])]));
+  const strongFor = (r: Requirement) => new Set(leads.get(r.id)!.flatMap((u) => u.files.map((f) => f.replace(/\\/g, "/"))));
+  const withCode = o.requirements.map((req) => ({ req, cands: findCandidates(req, files, lower, boost, 4, false, strongFor(req)) }));
   const out = new Map<string, Checked>();
   // A requirement that matches no code at all is missing: no model needs to be asked, and an empty project costs nothing.
   const asked = withCode.filter(({ req, cands }) => {
@@ -246,7 +275,7 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
   for (let i = 0; i < asked.length; i += 4) {
     const chunk = asked.slice(i, i + 4);
     const user = chunk
-      .map(({ req, cands }) => `### ${req.id}: ${req.text}\n${cands.map((c) => `--- ${c.file}\n${c.snippet}`).join("\n")}`)
+      .map(({ req, cands }) => `### ${req.id}: ${req.text}${roadmapNote(leads.get(req.id)!)}\n${cands.map((c) => `--- ${c.file}\n${c.snippet}`).join("\n")}`)
       .join("\n\n");
     let raws: Raw[] = [];
     try {
@@ -266,6 +295,34 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
       out.set(req.id, c);
     }
   }
+
+  // Anything not clearly built gets a second look at much more of the code (more files, longer excerpts) before it is called
+  // work: a first look that saw four short excerpts is not enough to say a requirement is only partly there.
+  const rank: Record<Verdict, number> = { built: 3, partial: 2, unclear: 1, missing: 0 };
+  const again = o.requirements.filter((r) => {
+    const c = out.get(r.id);
+    return c && (c.verdict === "partial" || c.verdict === "unclear") && c.note !== "No code in the project matched it.";
+  });
+  const deepFor = new Map(again.map((req) => [req.id, findCandidates(req, files, lower, boost, 8, true, strongFor(req))]));
+  for (let i = 0; i < again.length; i += 2) {
+    const chunk = again.slice(i, i + 2);
+    const user = chunk
+      .map((req) => `### ${req.id}: ${req.text}\n(Earlier, short excerpts were not enough to decide. These are longer.)${roadmapNote(leads.get(req.id)!)}\n${deepFor.get(req.id)!.map((c) => `--- ${c.file}\n${c.snippet}`).join("\n")}`)
+      .join("\n\n");
+    let raws: Raw[] = [];
+    try {
+      raws = parseVerdicts(await o.call([{ role: "system", content: JUDGE_SYSTEM }, { role: "user", content: user }]));
+    } catch {
+      raws = [];
+    }
+    for (const req of chunk) {
+      const raw = raws.find((r) => r.id === req.id);
+      if (!raw) continue;
+      const c = settle(raw, req, byRel);
+      if (rank[c.verdict] > rank[out.get(req.id)!.verdict]) out.set(req.id, c);
+      else if (c.verdict === out.get(req.id)!.verdict && c.verdict === "partial") out.set(req.id, c);
+    }
+  }
   return o.requirements.map((r) => out.get(r.id)!);
 }
 
@@ -281,6 +338,7 @@ export interface ExistenceArgs {
   docs?: string;
   shortlist?: string[];
   maxRequirements?: number;
+  built?: BuiltUnit[];
 }
 
 export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult> {
@@ -298,8 +356,21 @@ export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult>
     return { ...none, note: "The requirements could not be extracted, so nothing was checked against the code." };
   }
   if (!parsed || !parsed.applies) return none;
-  const items = await checkRequirements({ call: a.call, repoRoot: a.repoRoot, requirements: parsed.requirements, shortlist: a.shortlist });
+  const items = await checkRequirements({ call: a.call, repoRoot: a.repoRoot, requirements: parsed.requirements, shortlist: a.shortlist, built: a.built });
   return { applies: true, items, allBuilt: items.length > 0 && items.every((i) => i.verdict === "built"), note: "" };
+}
+
+/**
+ * "Let me know what is left before we work on anything", "just check, don't change anything": the person wants the findings,
+ * not a plan and not a build. Matched on plain wording, so it never depends on a model's reading of the request.
+ */
+export function wantsReportOnly(request: string): boolean {
+  return [
+    /\b(before|until) (we|you|i)\b[^.]{0,30}\b(work|start|build|chang|edit|touch|cod|implement)/i,
+    /\b(don'?t|do not|no need to|without|not yet)\b[^.]{0,12}\b(chang|build|edit|touch|writ|modify|work on|implement)/i,
+    /\b(let me know|tell me|show me|report|list)\b[^.]{0,60}\b(what('?s| is)? (left|remaining|missing|not done)|still (left|missing|to do)|what we (still )?(need|have) to)/i,
+    /\bjust (check|audit|compare|report|tell)\b/i,
+  ].some((re) => re.test(request));
 }
 
 const place = (e: Evidence) => `${e.file}: \`${e.quote.replace(/`/g, "'").slice(0, 110)}\``;
@@ -327,8 +398,11 @@ export function existencePlannerSection(r: ExistenceResult): string {
     "\n\nWhat already exists in this project (verified against the code: each quote was checked against the file). Do NOT rebuild or rewrite it: reuse it, and plan only what is partial or missing.\n" +
     (built.length ? `Already built:\n${built.map((c) => `- ${c.req.text} -> ${place(c.evidence[0])}`).join("\n")}\n` : "") +
     (partial.length ? `Partly built (extend the existing code in place):\n${partial.map((c) => `- ${c.req.text} -> exists in ${place(c.evidence[0])}; still missing: ${c.missing || "see the code"}`).join("\n")}\n` : "") +
-    (r.items.some((i) => i.verdict === "missing" || i.verdict === "unclear")
-      ? `Not built or not determined (these are the work):\n${r.items.filter((i) => i.verdict === "missing" || i.verdict === "unclear").map((c) => `- ${c.req.text}`).join("\n")}\n`
+    (r.items.some((i) => i.verdict === "missing")
+      ? `Not built (these are the work):\n${r.items.filter((i) => i.verdict === "missing").map((c) => `- ${c.req.text}`).join("\n")}\n`
+      : "") +
+    (r.items.some((i) => i.verdict === "unclear")
+      ? `Not determined (the check could not see whether these exist: read the code to decide, and plan work only for what you find is absent; do not rebuild them blindly):\n${r.items.filter((i) => i.verdict === "unclear").map((c) => `- ${c.req.text}${c.note ? ` (${c.note})` : ""}`).join("\n")}\n`
       : "")
   );
 }

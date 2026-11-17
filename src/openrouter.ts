@@ -1,7 +1,7 @@
 import { AgentConfig } from "./config.js";
 import { events, TokenUsage } from "./events.js";
 import { runControl, AbortedError } from "./remote/control.js";
-import { writeRawAbove } from "./terminalInput.js";
+import { hasPinnedInput, writeRawAbove } from "./terminalInput.js";
 
 export interface FunctionTool {
   type: "function";
@@ -418,7 +418,9 @@ export class OpenRouterClient {
         // never touch it — a stray dot would corrupt the stream for consumers.
         const jsonMode = events.isEnabled();
         const tick = (s: string) => {
-          if (!jsonMode) writeRawAbove(s);
+          // With the pinned prompt on screen a line written every second scrolls instead of updating in place, which is the flood
+          // of "Calling ..." lines; the status line already says what is running, and a call still logs when it ends and every 20s.
+          if (!jsonMode && !hasPinnedInput()) writeRawAbove(s);
         };
         const clearLine = "\r\x1b[K";
 
