@@ -54,7 +54,7 @@ describe("a test that cannot be healed gets a decision", () => {
   const run = async (root: string, files: string[]) => {
     const targets = files.length ? files : fs.readdirSync(path.join(root, "__tests__")).filter((f) => f.endsWith(".ts")).map((f) => "__tests__/" + f);
     const bad = targets.filter((f) => fs.readFileSync(path.join(root, f), "utf8").includes("BROKEN"));
-    return { ok: bad.length === 0, output: bad.map((f) => `FAIL ${f}\n  ● it\n    Error: boom`).join("\n") };
+    return { ok: bad.length === 0, output: bad.map((f) => `FAIL ${f}\n  ● Test suite failed to run\n    Cannot find module 'x'`).join("\n") };
   };
   const unclear = JSON.stringify({ verdict: "unclear", reason: "cannot tell" });
 
@@ -109,6 +109,23 @@ describe("a test that cannot be healed gets a decision", () => {
     assert.ok(has("__tests__/t.test.ts"));
   });
 
+  test("a test that loads and fails on behaviour is sent to the code fix, never settled away", async () => {
+    write("__tests__/t.test.ts", "BROKEN expect(started).toBe(true);\n");
+    const behaviour = async (root: string, files: string[]) => {
+      const targets = files.length ? files : ["__tests__/t.test.ts"];
+      const bad = targets.filter((f) => fs.readFileSync(path.join(root, f), "utf8").includes("BROKEN"));
+      return { ok: bad.length === 0, output: bad.map((f) => `FAIL ${f}\n  ● it starts\n    expect(received).toBe(expected)\n    Expected: true\n    Received: false`).join("\n") };
+    };
+    const report = await healTests({
+      repoRoot: dir,
+      run: behaviour,
+      call: async () => JSON.stringify({ verdict: "unclear", reason: "cannot tell why it does not start" }),
+    });
+    assert.equal(report.results[0].status, "code-bug");
+    assert.ok(has("__tests__/t.test.ts"), "the test is kept");
+    assert.ok(!has(".agent/removed-tests.json"));
+  });
+
   test("a code defect is not deleted by the settle step", async () => {
     write("__tests__/t.test.ts", "BROKEN expect(1).toBe(1);\n");
     const report = await healTests({
@@ -136,8 +153,9 @@ describe("after the code fix attempt", () => {
     assert.deepEqual(loadPendingFixes(dir), []);
   });
   test("only the fix task's own end triggers it", () => {
-    const task = fixTaskFor([{ file: "a.test.ts", reason: "r" }]);
+    const task = fixTaskFor([{ file: "a.test.ts", reason: "r", failure: "Expected: true\nReceived: false" }]);
     assert.ok(isFixTask(task));
+    assert.match(task, /How it fails:\n\s+Expected: true/);
     assert.ok(!isFixTask("add a settings screen"));
     assert.match(task, /Do not edit, skip or delete these tests/);
   });

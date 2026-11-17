@@ -111,7 +111,8 @@ describe("healing", () => {
       run,
       call: async () => JSON.stringify({ verdict: "stale-test", reason: "r", test: "expect(x).toBe('OLD');\n// tried\n" }),
     });
-    assert.equal(report.results[0].status, "unhealed");
+    // A behaviour failure the worker could not fix goes to the code fix rather than being given up on; the test is as it was.
+    assert.equal(report.results[0].status, "code-bug");
     assert.equal(read("__tests__/d.test.ts"), original);
   });
 
@@ -238,7 +239,7 @@ describe("a reply that is not the JSON asked for", () => {
   test("three in a row end as unclear and say what came back", async () => {
     write("__tests__/m.test.ts", "expect(x).toBe('OLD');\n");
     const report = await healTests({ repoRoot: dir, run: badRun, call: async () => "" });
-    assert.equal(report.results[0].status, "unclear");
+    assert.equal(report.results[0].status, "code-bug");
     assert.match(report.results[0].note, /did not return usable JSON/);
   });
 });

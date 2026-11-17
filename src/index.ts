@@ -5060,7 +5060,11 @@ async function main(): Promise<void> {
       console.log("\n🧪 [TESTS] " + renderHealReport(report));
       const bugs = report.results.filter((r) => r.status === "code-bug");
       if (bugs.length > 0) {
-        const items = bugs.map((b) => ({ file: b.file, reason: b.note }));
+        const items = bugs.map((b) => ({
+          file: b.file,
+          reason: b.note,
+          failure: (b.failure ?? "").replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").split(/\r?\n/).filter((l) => l.trim()).slice(-40).join("\n").slice(-4000),
+        }));
         savePendingFixes(repoRoot, items);
         pendingTestFixTask = fixTaskFor(items);
         console.log(`🧪 [TESTS] Sending ${bugs.length} code defect(s) to the normal pipeline to fix. Any of those tests still failing afterwards are removed.`);

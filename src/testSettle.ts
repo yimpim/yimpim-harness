@@ -136,6 +136,8 @@ export function renderRemoval(r: Removal): string {
 export interface PendingFix {
   file: string;
   reason: string;
+  /** The end of the failing run, so the fix starts from the real output. */
+  failure?: string;
 }
 
 const pendingPath = (root: string) => path.join(root, ".agent", "test-fixes.json");
@@ -186,7 +188,9 @@ export function fixTaskFor(items: PendingFix[]): string {
   return (
     `${FIX_TASK_START} (real defects, not outdated tests). Fix the CODE so every one of them passes. ` +
     `Do not edit, skip or delete these tests; each finding below says what is wrong and where.\n\n` +
-    items.map((i, n) => `${n + 1}. ${i.file}: ${i.reason}`).join("\n")
+    items
+      .map((i, n) => `${n + 1}. ${i.file}: ${i.reason}${i.failure ? `\n   How it fails:\n${i.failure.split("\n").map((l) => "   " + l).join("\n")}` : ""}`)
+      .join("\n\n")
   );
 }
 
