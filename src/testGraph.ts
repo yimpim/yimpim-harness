@@ -22,7 +22,7 @@ const execFileAsync = promisify(execFile);
 
 const posix = (p: string) => p.replace(/\\/g, "/");
 const EXTS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".py", "/index.ts", "/index.tsx", "/index.js", "/index.jsx", "/__init__.py"];
-const GLOBAL_CONFIG = /(^|\/)(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|jest\.config\.[\w.]+|jest\.setup\.[\w.]+|jest-setup\.[\w.]+|setupTests?\.[\w.]+|babel\.config\.[\w.]+|\.babelrc|tsconfig[\w.-]*\.json|metro\.config\.[\w.]+|vitest\.config\.[\w.]+|pytest\.ini|conftest\.py|pyproject\.toml|setup\.cfg)$/;
+export const GLOBAL_CONFIG = /(^|\/)(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|jest\.config\.[\w.]+|jest\.setup\.[\w.]+|jest-setup\.[\w.]+|setupTests?\.[\w.]+|babel\.config\.[\w.]+|\.babelrc|tsconfig[\w.-]*\.json|metro\.config\.[\w.]+|vitest\.config\.[\w.]+|pytest\.ini|conftest\.py|pyproject\.toml|setup\.cfg)$/;
 
 export interface TestSelection {
   selected: string[];
@@ -156,6 +156,14 @@ class Graph {
     }
     return { files, unresolved };
   }
+}
+
+/** Every file each of these tests reaches, and whether any import along the way could not be resolved. One graph is shared. */
+export function reachMany(repoRoot: string, tests: string[]): Map<string, { files: Set<string>; unresolved: boolean }> {
+  const g = new Graph(repoRoot);
+  const out = new Map<string, { files: Set<string>; unresolved: boolean }>();
+  for (const t of tests) out.set(posix(t), g.reach(posix(t)));
+  return out;
 }
 
 /** Every file a test reaches (itself included), through imports and aliases. */

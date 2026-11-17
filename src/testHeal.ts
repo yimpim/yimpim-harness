@@ -18,11 +18,13 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { isTestPath } from "./focusTests.js";
 import { parseLenient } from "./jsonRepair.js";
-import { runSuite, type SuiteRun } from "./testRun.js";
+import { runSuite, failingTestFiles, type SuiteRun } from "./testRun.js";
+import { runSuiteLogged, unchangedGreen, verdictFor, saveVerdict } from "./testLog.js";
+import { listTestFiles } from "./focusTests.js";
 import { reachableFiles } from "./testGraph.js";
 import { removeTest, renderRemoval, recordRemoved } from "./testSettle.js";
 
-export { runSuite, type SuiteRun };
+export { runSuite, failingTestFiles, type SuiteRun };
 
 const execFileAsync = promisify(execFile);
 
@@ -48,24 +50,13 @@ export interface HealOptions {
   files?: string[];
   /** Decide every file that could not be healed (rewrite it from scratch, or remove it). Default: on, except when `files` is given. */
   settle?: boolean;
+  /** Look at every test, ignoring what the test log says is unchanged since its last green run, and ignore stored diagnoses. */
+  all?: boolean;
   /** Replaces the real test runner (tests). */
   run?: (repoRoot: string, files: string[]) => Promise<SuiteRun>;
 }
 
 const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
-
-/** Test files named as failing in a runner's output (jest, vitest, pytest). */
-export function failingTestFiles(output: string): string[] {
-  const found = new Set<string>();
-  for (const raw of output.replace(ANSI, "").split(/\r?\n/)) {
-    const line = raw.trim();
-    let m = /^FAIL\s+(?:[\w-]+\s+)?(\S+\.[a-z0-9]+)\b/i.exec(line);
-    if (!m) m = /^FAILED\s+(\S+?\.py)(?:::|\s|$)/.exec(line);
-    if (!m) m = /^ERROR\s+(\S+?\.py)(?:::|\s|$)/.exec(line);
-    if (m) found.add(m[1].replace(/\\/g, "/"));
-  }
-  return [...found];
-}
 
 /** Files a test names by path in a string (source-pinning tests read them with fs), that exist in the repo. */
 export function referencedFiles(repoRoot: string, testRel: string, content: string): string[] {
@@ -167,7 +158,7 @@ async function healOne(opts: HealOptions, file: string): Promise<HealResult> {
 
 async function healOneInner(opts: HealOptions, file: string, trace: { output: string }): Promise<HealResult> {
   const { repoRoot } = opts;
-  const run = opts.run ?? runSuite;
+  const run = opts.run ?? runSuiteLogged;
   const abs = path.join(repoRoot, file);
   let original: string;
   try {
@@ -368,7 +359,7 @@ function onlyJestKeyChanged(before: string, after: string): boolean {
  */
 async function sharedCauses(opts: HealOptions, results: HealResult[], log: (l: string) => void): Promise<void> {
   const { repoRoot } = opts;
-  const run = opts.run ?? runSuite;
+  const run = opts.run ?? runSuiteLogged;
   const open = results.filter((r) => (r.status === "code-bug" || r.status === "unclear" || r.status === "unhealed") && r.failure);
   const groups = new Map<string, HealResult[]>();
   for (const r of open) {
@@ -473,7 +464,7 @@ const ENVIRONMENT_FAILURE = /Test suite failed to run|Cannot find module|NativeM
  */
 async function settleUnresolved(opts: HealOptions, results: HealResult[], log: (l: string) => void): Promise<void> {
   const { repoRoot } = opts;
-  const run = opts.run ?? runSuite;
+  const run = opts.run ?? runSuiteLogged;
   const open = results.filter((r) => r.status === "unclear" || r.status === "unhealed");
   await Promise.all(
     open.map(async (r) => {
@@ -549,44 +540,87 @@ async function settleUnresolved(opts: HealOptions, results: HealResult[], log: (
 }
 
 export interface HealReport {
+  /** Test files left out of the run because nothing they depend on changed since their last green run. */
+  unchanged?: number;
   before: SuiteRun;
   failing: string[];
   results: HealResult[];
   after?: SuiteRun;
 }
 
+/**
+ * Runs the tests that could have changed result: those not known green, or whose fingerprint (the test, what it reaches,
+ * the test config) differs from their last green run. With nothing in the log yet, that is simply the whole suite.
+ */
+async function runStale(opts: HealOptions, run: (root: string, files: string[]) => Promise<SuiteRun>): Promise<{ run: SuiteRun; skipped: number }> {
+  const tests = listTestFiles(opts.repoRoot).map((t) => t.replace(/\\/g, "/"));
+  const same = opts.all ? new Set<string>() : unchangedGreen(opts.repoRoot, tests);
+  if (same.size === 0) return { run: await run(opts.repoRoot, []), skipped: 0 };
+  const stale = tests.filter((t) => !same.has(t));
+  if (stale.length === 0) return { run: { ok: true, output: "" }, skipped: same.size };
+  return { run: await run(opts.repoRoot, stale), skipped: same.size };
+}
+
 /** The whole job: run, split by failing file, heal every file at once, run again. */
 export async function healTests(opts: HealOptions): Promise<HealReport> {
   const log = opts.log ?? (() => {});
-  const run = opts.run ?? runSuite;
+  const run = opts.run ?? runSuiteLogged;
   // Given specific files, only those are looked at and rerun: no full-suite runs around them.
   const scoped = Boolean(opts.files);
   if (!scoped) log("Running the full test suite once to see what is red…");
-  const before: SuiteRun = scoped ? { ok: false, output: "" } : await run(opts.repoRoot, []);
+  let unchanged = 0;
+  let before: SuiteRun = { ok: false, output: "" };
+  if (!scoped) {
+    const first = await runStale(opts, run);
+    before = first.run;
+    unchanged = first.skipped;
+    if (unchanged > 0) log(`${unchanged} test file(s) are unchanged since their last green run and were not rerun (/tests heal all rerun everything).`);
+  }
   const failing = opts.files ?? failingTestFiles(before.output);
-  if (before.ok && !scoped) return { before, failing: [], results: [] };
-  if (failing.length === 0) return { before, failing, results: [] };
+  if (before.ok && !scoped) return { before, failing: [], results: [], unchanged };
+  if (failing.length === 0) return { before, failing, results: [], unchanged };
+
+  // A red test nobody has touched since it was last diagnosed keeps its diagnosis: no model call to find it again.
+  const reused = (f: string): HealResult | undefined => {
+    if (opts.all) return undefined;
+    let v;
+    try {
+      v = verdictFor(opts.repoRoot, f);
+    } catch {
+      return undefined;
+    }
+    if (!v || !["code-bug", "unclear", "unhealed"].includes(v.status)) return undefined;
+    return { file: f, status: v.status as HealStatus, note: `${v.note} (nothing it depends on changed since it was last diagnosed)`, failure: v.failure, attempts: 0 };
+  };
   log(`${failing.length} failing test file${failing.length === 1 ? "" : "s"}. One worker each, all at once.`);
   const results = await Promise.all(
     failing.map(async (f) => {
-      const r = await healOne(opts, f);
+      const r = reused(f) ?? (await healOne(opts, f));
       log(`  ${icon(r.status)} ${r.file}: ${r.note}`);
       return r;
     })
   );
   await sharedCauses(opts, results, log);
   if (opts.settle ?? !scoped) await settleUnresolved(opts, results, log);
-  if (scoped) return { before, failing, results };
-  log("Running the full suite again…");
-  const after = await run(opts.repoRoot, []);
-  return { before, failing, results, after };
+  for (const r of results) {
+    if ((r.status === "code-bug" || r.status === "unclear" || r.status === "unhealed") && !/the model call failed/.test(r.note)) {
+      try {
+        saveVerdict(opts.repoRoot, r.file, { status: r.status, note: r.note.replace(/ \(nothing it depends on changed since it was last diagnosed\)$/, ""), failure: r.failure });
+      } catch {}
+    }
+  }
+  if (scoped) return { before, failing, results, unchanged };
+  log("Running the tests again…");
+  const after = (await runStale(opts, run)).run;
+  return { before, failing, results, after, unchanged };
 }
 
 const icon = (s: HealStatus) =>
   s === "healed" || s === "rewritten" ? "✓" : s === "removed" ? "✂" : s === "already-green" ? "·" : s === "code-bug" ? "🐞" : s === "unclear" ? "?" : "✗";
 
 export function renderHealReport(r: HealReport): string {
-  if (r.failing.length === 0 && r.before.ok) return "The test suite is already green. Nothing to heal.";
+  const unchangedNote = r.unchanged ? ` ${r.unchanged} test file(s) unchanged since their last green run were not rerun.` : "";
+  if (r.failing.length === 0 && r.before.ok) return "The test suite is already green. Nothing to heal." + unchangedNote;
   if (r.failing.length === 0) return "The suite fails but no failing test file could be read from its output, so nothing was changed.";
   const by = (s: HealStatus) => r.results.filter((x) => x.status === s);
   const lines = [
@@ -600,6 +634,6 @@ export function renderHealReport(r: HealReport): string {
   if (gone.length) lines.push("", "Removed (a later change that needs this covered gets a new test):", ...gone.map((b) => `  - ${b.file}: ${b.note}`));
   const rest = [...by("unclear"), ...by("unhealed")];
   if (rest.length) lines.push("", "Left alone:", ...rest.map((b) => `  - ${b.file}: ${b.note}`));
-  if (r.after) lines.push("", r.after.ok ? "Full suite after: green." : `Full suite after: still red in ${failingTestFiles(r.after.output).length} file(s).`);
+  if (r.after) lines.push("", (r.after.ok ? "Suite after: green." : `Suite after: still red in ${failingTestFiles(r.after.output).length} file(s).`) + unchangedNote);
   return lines.join("\n");
 }
