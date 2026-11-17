@@ -426,6 +426,44 @@ export function openItems(rm: Roadmap): { id: string; title: string; item: strin
   return rm.units.flatMap((u) => (u.done?.openItems ?? []).map((item) => ({ id: u.id, title: u.title, item })));
 }
 
+/** A unit the roadmap recorded as built: what it was, where it landed, and what it left open. */
+export interface BuiltUnit {
+  id: string;
+  title: string;
+  summary: string;
+  files: string[];
+  commit?: string;
+  openItems: string[];
+}
+
+/**
+ * Everything any roadmap of this project recorded as done: the active one and every archived one. This is the cheapest
+ * record of what was built, so a check "is the brief done?" starts from it and then confirms in the code.
+ */
+export function builtByUnits(repoRoot: string): BuiltUnit[] {
+  const sets: Roadmap[] = [];
+  const active = loadRoadmap(repoRoot);
+  if (active) sets.push(active);
+  try {
+    const dir = path.join(repoRoot, ".agent", "roadmaps");
+    for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".json"))) {
+      try {
+        const rm = JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"));
+        if (rm?.version === 1 && Array.isArray(rm.units)) sets.push(rm as Roadmap);
+      } catch {
+        // an unreadable archive is skipped
+      }
+    }
+  } catch {
+    // no archive folder
+  }
+  return sets.flatMap((rm) =>
+    rm.units
+      .filter((u) => u.status === "done" && u.done)
+      .map((u) => ({ id: u.id, title: u.title, summary: u.summary, files: u.done!.files, commit: u.done!.commit, openItems: u.done!.openItems ?? [] }))
+  );
+}
+
 /** Adds a note to a unit that is done, without reopening it. */
 export function addOpenItem(rm: Roadmap, id: string, text: string): boolean {
   const u = unitOf(rm, id);

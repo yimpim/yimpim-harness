@@ -40,14 +40,14 @@ import { openRenderer } from "./svgRender.js";
 import { ensureDesignSystem } from "./uiDesign.js";
 import { stageDesignImage } from "./designDelivery.js";
 import { parseLenient } from "./jsonRepair.js";
-import { checkExistence, existencePlannerSection, renderExistence } from "./existence.js";
+import { checkExistence, existencePlannerSection, renderExistence, wantsReportOnly } from "./existence.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { runSecurityAudit } from "./securityAudit.js";
 import { existingDirOnly, existingFilesOnly, projectLayout, renderLayout } from "./projectLayout.js";
 import { loadRepoMap, recordConfirmedFindings } from "./repoMap.js";
 import { describeSync, syncRepoMap } from "./repoMapSync.js";
 import { buildPhaseProgress, renderProgressNote, PhaseProgress } from "./progressNote.js";
-import { archiveFinishedRoadmap, attachTaskToUnit, loadRoadmap, nextUnits, onRoadmapChanged, progress as roadmapProgress, renderRoadmap, roadmapWire, saveRoadmap } from "./roadmap.js";
+import { archiveFinishedRoadmap, attachTaskToUnit, builtByUnits, loadRoadmap, nextUnits, onRoadmapChanged, progress as roadmapProgress, renderRoadmap, roadmapWire, saveRoadmap } from "./roadmap.js";
 import {
   FlowDeps,
   MAX_UNIT_ATTEMPTS,
@@ -576,6 +576,7 @@ let existenceChecked: { text: string; remaining: number | null } | null = null;
  * Planner (only the partial and missing work is planned) and returns "handled" when everything is already built.
  */
 async function checkWhatExists(text: string, client: OpenRouterClient, config: AgentConfig, repoRoot: string): Promise<"handled" | "task"> {
+  const reportOnly = wantsReportOnly(text);
   if (!config.existence.enabled) return "task";
   // Already checked this very request (the program question asks first): the Planner section is still set, do not pay twice.
   if (existenceChecked?.text === text) return "task";
@@ -595,9 +596,20 @@ async function checkWhatExists(text: string, client: OpenRouterClient, config: A
       docs,
       shortlist,
       maxRequirements: config.existence.maxRequirements,
+      built: builtByUnits(repoRoot),
     });
     if (found.applies) {
       console.log("\n🔎 [EXISTS] Checked what this asks for against the code (each quote below was verified in the file):\n" + renderExistence(found));
+      if (reportOnly && !found.allBuilt) {
+        const left = found.items.filter((i) => i.verdict !== "built").length;
+        console.log(
+          `\n📋 [EXISTS] ${found.items.length - left} of ${found.items.length} are already in the code; ${left} still need work or a closer look. Nothing was planned or changed, as you asked. ` +
+            'To build them, ask again without "before we work": for example "finish what is left in <the brief>". The check runs again and only those are planned.'
+        );
+        existenceSection = existencePlannerSection(found);
+        existenceChecked = { text, remaining: left };
+        return "handled";
+      }
       if (found.allBuilt) {
         console.log('\n✅ [EXISTS] Everything asked for is already in the code, so nothing was built. Say "verify it" to run the checks on it, or tell me what differs from what you expected.');
         return "handled";
@@ -606,6 +618,9 @@ async function checkWhatExists(text: string, client: OpenRouterClient, config: A
       existenceChecked = { text, remaining: found.items.filter((i) => i.verdict !== "built").length };
     } else if (found.note) {
       console.log("[EXISTS] " + found.note);
+    } else if (reportOnly) {
+      console.log("[EXISTS] I could not turn that request into things to check against the code, so nothing was compared. Name the document (for example reference/timeline-port/EXPO_PORT_BRIEF.md) and ask again.");
+      return "handled";
     }
   } catch (err: any) {
     console.log("[EXISTS] Skipped the check of what already exists: " + String(err?.message ?? err).slice(0, 100));
@@ -4756,9 +4771,10 @@ async function main(): Promise<void> {
         fallback: "Cancel",
         askedAt: new Date().toISOString(),
       },
-      notice + ` [${YES} / Cancel] `
+      // The phone keeps its exact two buttons; at the terminal it is a plain yes/no.
+      notice + " Start the roadmap? [yes / no] "
     );
-    if (answer !== YES && answer.trim().toLowerCase() !== YES.toLowerCase()) return false;
+    if (!/^(y|yes|yep|yeah|ok|okay|sure|go|start|i understand\b.*)$/i.test(answer.trim())) return false;
     rm.costNoticeAckedAt = new Date().toISOString();
     saveRoadmap(repoRoot, rm);
     return true;
