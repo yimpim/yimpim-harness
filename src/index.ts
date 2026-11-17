@@ -42,6 +42,7 @@ import { stageDesignImage } from "./designDelivery.js";
 import { parseLenient } from "./jsonRepair.js";
 import { splitJobs, unplannedJobs } from "./jobsList.js";
 import { healTests, renderHealReport, runSuite, failingTestFiles } from "./testHeal.js";
+import { fixTaskFor, isFixTask, savePendingFixes, settlePendingFixes } from "./testSettle.js";
 import { checkExistence, existencePlannerSection, renderExistence, wantsReportOnly, isAuditFollowUp } from "./existence.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { runSecurityAudit } from "./securityAudit.js";
@@ -326,8 +327,9 @@ Press Tab after typing a command's start (e.g. "/mo") to complete it.
   /approvals        Commands you approved for this project, with /approvals
                     revoke <n|all> to forget them
   /plan             The current plan
-  /tests heal       Bring a red test suite back to green: one worker per failing test file, all at once; tests that are out of date are
-                    updated, tests that expose a real code bug are left alone and reported
+  /tests heal       Bring a red test suite back to green: one worker per failing test file, all at once. Out-of-date tests are updated;
+                    one that cannot be is rewritten or removed (with its snapshot and every reference); a real code defect is sent
+                    to the normal pipeline to fix, and its test is removed if it still fails afterwards
   /pentest          Security audit of this project: code, git history and packages (read-only; nothing is attacked)
   /design <what>    Make a logo, favicon and app icons: several models propose
                     and draw concepts, the best are shown, you pick one
@@ -5032,6 +5034,19 @@ async function main(): Promise<void> {
     }
   });
 
+  // The code-fix task that /tests heal hands to the normal pipeline when tests turn out to be right and the code wrong.
+  let pendingTestFixTask: string | undefined;
+  // After that fix attempt (success or failure, never a Stop): tests that still fail are removed with everything pointing at them.
+  const settleTestFixes = async (finishedTask: string | undefined): Promise<void> => {
+    if (!isFixTask(finishedTask)) return;
+    try {
+      const lines = await settlePendingFixes(repoRoot);
+      for (const l of lines) console.log("🧪 [TESTS] " + l);
+    } catch {
+      // never blocks what comes next
+    }
+  };
+
   // /tests heal: brings a red test suite back to green, one worker per failing test file, all at once.
   const runTestHealJob = (): Promise<void> => asOwnTask("/tests heal", async () => {
     const healModels = config.models.repair ?? config.models.editor;
@@ -5043,6 +5058,13 @@ async function main(): Promise<void> {
         log: (line) => console.log("🧪 [TESTS] " + line),
       });
       console.log("\n🧪 [TESTS] " + renderHealReport(report));
+      const bugs = report.results.filter((r) => r.status === "code-bug");
+      if (bugs.length > 0) {
+        const items = bugs.map((b) => ({ file: b.file, reason: b.note }));
+        savePendingFixes(repoRoot, items);
+        pendingTestFixTask = fixTaskFor(items);
+        console.log(`🧪 [TESTS] Sending ${bugs.length} code defect(s) to the normal pipeline to fix. Any of those tests still failing afterwards are removed.`);
+      }
       return report.after ? report.after.ok : report.before.ok;
     } catch (err: any) {
       console.error("[TESTS] That did not complete: " + err.message);
@@ -5550,8 +5572,14 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
           }
         } else if (trimmed === "/tests" || trimmed.startsWith("/tests ")) {
           const sub = trimmed.slice("/tests".length).trim();
-          if (sub === "" || sub === "heal") await runTestHealJob();
-          else console.log("[TESTS] Use /tests heal to bring a red test suite back to green.");
+          if (sub === "" || sub === "heal") {
+            await runTestHealJob();
+            if (pendingTestFixTask) {
+              queuedInstructions = pendingTestFixTask;
+              pendingTestFixTask = undefined;
+              continue taskLoop;
+            }
+          } else console.log("[TESTS] Use /tests heal to bring a red test suite back to green.");
         } else if (trimmed === "/pentest" || trimmed.startsWith("/pentest ")) {
           await runPentestJob(trimmed.slice("/pentest".length).trim());
         } else if (trimmed === "/design" || trimmed.startsWith("/design ")) {
@@ -6876,6 +6904,8 @@ The user wants you to decide, not ask: ${d.choice}`);
         activeUnitId = undefined;
       }
 
+      await settleTestFixes(instructions);
+
       const queued = loadTaskQueue(repoRoot);
       if (queued.length > 0) {
         const next = queued[0];
@@ -6968,6 +6998,7 @@ The user wants you to decide, not ask: ${d.choice}`);
       if (err instanceof TaskFailedError) {
         console.error(`\n🛑 [ABORT] ${err.message}`);
         if (err.hint) console.error(`   ${err.hint}`);
+        await settleTestFixes(instructions);
         // Ephemeral note for the NEXT fresh task's planning — see
         // lastFailure.ts's own comment. Only a genuine TaskFailedError
         // counts: a user-initiated Stop (the `else` branch below) is a
