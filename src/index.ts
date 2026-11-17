@@ -359,7 +359,7 @@ Press Tab after typing a command's start (e.g. "/mo") to complete it.
                     including while a task is running (same as Esc, or the
                     phone's Stop button)
   /continue         Resume the last plan a Stop (phone, /stop, or Esc)
-                    interrupted — "/resume" also works. Skips Discovery/
+                    interrupted. Skips Discovery/
                     Planning for phases already done; only the interrupted
                     phase re-runs.
   /help             This list
