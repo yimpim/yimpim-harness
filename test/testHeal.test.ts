@@ -121,3 +121,100 @@ describe("healing", () => {
     assert.match(renderHealReport(report), /already green/);
   });
 });
+
+import { failureSignature } from "../src/testHeal.js";
+
+describe("shared causes, missing files and helpers", () => {
+  const nativeErr = "Error: [@RNC/AsyncStorage]: NativeModule: AsyncStorage is null.";
+  // Each test file fails until jest.setup.js mocks the native module.
+  const run = async (root: string, files: string[]) => {
+    const mocked = fs.existsSync(path.join(root, "jest.setup.js")) && fs.readFileSync(path.join(root, "jest.setup.js"), "utf8").includes("MOCK");
+    const targets = files.length ? files : fs.readdirSync(path.join(root, "__tests__")).map((f) => "__tests__/" + f);
+    const bad = mocked ? [] : targets;
+    return { ok: bad.length === 0, output: bad.map((f) => `FAIL ${f}\n  ● suite failed to run\n    ${nativeErr}`).join("\n") };
+  };
+
+  test("the signature ignores what differs between files", () => {
+    assert.equal(failureSignature("FAIL a\n  Error: x 12 at line 4"), failureSignature("FAIL b\n  Error: x 99 at line 8"));
+  });
+
+  test("several files with one error get one setup fix, not one 'code bug' each", async () => {
+    write("package.json", JSON.stringify({ scripts: { test: "jest" } }));
+    write("jest.setup.js", "// setup\n");
+    for (const n of ["a", "b", "c"]) write(`__tests__/${n}.test.ts`, "expect(1).toBe(1);\n");
+    const report = await healTests({
+      repoRoot: dir,
+      run,
+      call: async (_m, label) =>
+        label.startsWith("Shared test setup")
+          ? JSON.stringify({ cause: "AsyncStorage had no Jest mock", edits: [{ file: "jest.setup.js", content: "// setup\njest.mock('async-storage'); // MOCK\n" }] })
+          : JSON.stringify({ verdict: "code-bug", reason: "module fails to load" }),
+    });
+    assert.deepEqual(report.results.map((r) => r.status), ["healed", "healed", "healed"]);
+    assert.match(report.results[0].note, /shared fix in jest\.setup\.js.*AsyncStorage/);
+    assert.ok(report.after?.ok);
+  });
+
+  test("a setup change that fixes nothing is put back", async () => {
+    write("package.json", JSON.stringify({ scripts: { test: "jest" } }));
+    write("jest.setup.js", "// setup\n");
+    for (const n of ["a", "b"]) write(`__tests__/${n}.test.ts`, "expect(1).toBe(1);\n");
+    await healTests({
+      repoRoot: dir,
+      run,
+      call: async (_m, label) =>
+        label.startsWith("Shared test setup")
+          ? JSON.stringify({ cause: "x", edits: [{ file: "jest.setup.js", content: "// nothing useful\n" }] })
+          : JSON.stringify({ verdict: "code-bug", reason: "r" }),
+    });
+    assert.equal(read("jest.setup.js"), "// setup\n");
+  });
+
+  test("a shared fix may not rewrite application code", async () => {
+    write("package.json", JSON.stringify({ scripts: { test: "jest" } }));
+    write("src/app.ts", "export const a = 1;\n");
+    for (const n of ["a", "b"]) write(`__tests__/${n}.test.ts`, "expect(1).toBe(1);\n");
+    await healTests({
+      repoRoot: dir,
+      run,
+      call: async (_m, label) =>
+        label.startsWith("Shared test setup")
+          ? JSON.stringify({ cause: "x", edits: [{ file: "src/app.ts", content: "// gone\n" }] })
+          : JSON.stringify({ verdict: "code-bug", reason: "r" }),
+    });
+    assert.equal(read("src/app.ts"), "export const a = 1;\n");
+  });
+
+  test("a worker can ask for a file it was not shown and then decide", async () => {
+    write("src/Widget.tsx", "export const label = 'NEW';\n");
+    write("__tests__/w.test.ts", "expect(label).toBe('OLD');\n");
+    const asked: string[] = [];
+    let n = 0;
+    const report = await healTests({
+      repoRoot: dir,
+      run: async (root, files) => {
+        const bad = fs.readFileSync(path.join(root, "__tests__/w.test.ts"), "utf8").includes("OLD");
+        return { ok: !bad, output: bad ? "FAIL __tests__/w.test.ts\n  ● x\n    Expected: NEW\n    Received: OLD" : "" };
+      },
+      call: async (messages) => {
+        n++;
+        if (n === 1) return JSON.stringify({ need: ["src/Widget.tsx", "src/missing.tsx"] });
+        asked.push(messages[messages.length - 1].content);
+        return JSON.stringify({ verdict: "stale-test", reason: "label changed", test: "expect(label).toBe('NEW');\n" });
+      },
+    });
+    assert.match(asked[0], /export const label = 'NEW'/);
+    assert.equal(report.results[0].status, "healed");
+  });
+
+  test("a helper inside the tests folder is named as such, with no model call", async () => {
+    write("__tests__/helper.test.ts", "export const h = 1;\n");
+    const report = await healTests({
+      repoRoot: dir,
+      files: ["__tests__/helper.test.ts"],
+      run: async () => ({ ok: false, output: "FAIL __tests__/helper.test.ts\n  Your test suite must contain at least one test." }),
+      call: async () => assert.fail("no model call expected"),
+    });
+    assert.match(report.results[0].note, /testPathIgnorePatterns/);
+  });
+});
