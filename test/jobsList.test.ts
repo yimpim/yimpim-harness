@@ -66,3 +66,13 @@ describe("numbered jobs in a request", () => {
     assert.ok(left.some((l) => /Designer and Security/.test(l)), "the assumption that mentions them is not a plan");
   });
 });
+
+describe("three or more numbered jobs are a program", () => {
+  test("the classifier's lean toward a single task is overridden", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
+    assert.match(src, /if \(intent === "task" && splitJobs\(text\)\.jobs\.length >= 3\) intent = "program";/);
+    assert.equal(splitJobs(REQUEST).jobs.length, 4);
+    assert.equal(splitJobs("1. one\n2. two").jobs.length, 2, "two jobs stay a task");
+  });
+});
