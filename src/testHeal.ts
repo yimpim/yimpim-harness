@@ -464,6 +464,9 @@ const SETTLE_SYSTEM = `A test file could not be brought back to green by updatin
 - "delete": the test is obsolete, tied to implementation details that no longer exist, or cannot be made reliable. Deleting is fine: a later change that needs this behaviour covered will get a new test.
 Answer with JSON only: {"decision":"rewrite|delete","reason":"one sentence","test":"the complete new test file (rewrite only)"}`;
 
+/** A test that cannot even load: a broken environment, not a statement about behaviour. Only these may be rewritten or removed. */
+const ENVIRONMENT_FAILURE = /Test suite failed to run|Cannot find module|NativeModule|AsyncStorage is null|SyntaxError|Unexpected token|must contain at least one test|Jest encountered an unexpected token/i;
+
 /**
  * Files still red after healing that are not a code defect: each gets a decision. A rewrite must pass or the file is
  * removed; a removal takes the snapshot and every reference with it. A model that cannot be reached never causes a removal.
@@ -483,6 +486,15 @@ async function settleUnresolved(opts: HealOptions, results: HealResult[], log: (
       }
       const helper = /shared helper that sits where Jest looks/.test(r.note);
       if (helper) return; // not a test: the config fix is named in the report
+      // A test that loads and then fails on behaviour (an assertion, a render error, something that never starts) may be
+      // catching a real defect that nobody could pin down yet. Removing it would hide that, so it goes to the code fix first;
+      // it is removed only if it still fails after that attempt.
+      if (!ENVIRONMENT_FAILURE.test(r.failure ?? "")) {
+        r.status = "code-bug";
+        r.note = `it fails on behaviour and the cause could not be pinned on the test, so the code is fixed first (${r.note})`;
+        log(`  🐞 ${r.file}: ${r.note}`);
+        return;
+      }
       const sources = [...new Set([...importedSources(repoRoot, r.file, original), ...referencedFiles(repoRoot, r.file, original)])];
       const srcText = sources
         .map((s) => {
