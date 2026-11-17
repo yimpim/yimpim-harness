@@ -40,7 +40,7 @@ import { openRenderer } from "./svgRender.js";
 import { ensureDesignSystem } from "./uiDesign.js";
 import { stageDesignImage } from "./designDelivery.js";
 import { parseLenient } from "./jsonRepair.js";
-import { unplannedJobs } from "./jobsList.js";
+import { splitJobs, unplannedJobs } from "./jobsList.js";
 import { checkExistence, existencePlannerSection, renderExistence, wantsReportOnly, isAuditFollowUp } from "./existence.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { runSecurityAudit } from "./securityAudit.js";
@@ -711,6 +711,9 @@ async function answerIfQuestion(
       ) {
         intent = parsed.intent;
       }
+      // Three or more numbered jobs, "in order", are a program whatever the classifier leaned toward: it is offered the roadmap
+      // (or a single task) instead of being planned as just its first job.
+      if (intent === "task" && splitJobs(text).jobs.length >= 3) intent = "program";
       // The model picked these from what it was shown; only what is really on
       // disk is kept, so a made-up path is dropped and never used.
       turnDocuments = existingFilesOnly(repoRoot, parsed?.documents, 4);
