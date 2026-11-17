@@ -332,8 +332,10 @@ Press Tab after typing a command's start (e.g. "/mo") to complete it.
                     a logo you already have
   /roadmap          A big job split into units, tracked until it is done:
                     /roadmap new <idea>, /roadmap port <folder> <goal>,
-                    /roadmap run, /roadmap add <more> (or just say
-                    "continue the roadmap")
+                    /roadmap run, /roadmap add <more>, /roadmap drop|reopen|done
+                    <id>, /roadmap open <id> <note>, /roadmap sync, and
+                    /roadmap reset (keeps a copy of what was finished)
+                    (or just say "continue the roadmap")
   /push-repo       Connect this project to a GitHub remote (asking for a repo
                     URL if none is set yet) and push to it now — also how you
                     turn auto-push back ON after /push-local turned it off
@@ -4842,7 +4844,7 @@ async function main(): Promise<void> {
   // being there to ask, runs it as one task exactly as before.
   const handleProgram = async (text: string, hint: string | null, offer = true): Promise<"started" | "handled" | "single"> => {
     const canAsk = isInteractive() || !!remote?.connected;
-    const planRoadmap = async (): Promise<"started" | "handled"> => {
+    const planRoadmap = async (spendAcknowledged = false): Promise<"started" | "handled"> => {
       const referenceDir = hint ? resolveReferenceDir(repoRoot, hint) : undefined;
       if (hint && !referenceDir) console.log(`[ROADMAP] I could not find a folder matching "${hint}", so I am planning from your description alone.`);
       console.log(`[ROADMAP] Planning the whole job${referenceDir ? ` from "${referenceDir}"` : ""}. This can take a minute...`);
@@ -4850,6 +4852,14 @@ async function main(): Promise<void> {
       const made = await createRoadmap(roadmapDeps(), { goal: text, referenceDir, docs });
       console.log(made.text);
       if (!made.ok) return "handled";
+      // Choosing "Plan a roadmap" in the question that carried the spending notice IS the confirmation: it is not asked again.
+      if (spendAcknowledged) {
+        const rm = loadRoadmap(repoRoot);
+        if (rm && !rm.costNoticeAckedAt) {
+          rm.costNoticeAckedAt = new Date().toISOString();
+          saveRoadmap(repoRoot, rm);
+        }
+      }
       if (!offer || !canAsk) {
         console.log(`\nThe roadmap is saved. Start it with "/roadmap run".`);
         return "handled";
@@ -4900,11 +4910,12 @@ async function main(): Promise<void> {
       return "handled";
     }
     const pick = await ask(
-      "This looks bigger than one task. Plan the whole thing as a roadmap (units, tracked until it is all done), or run it as a single task?",
-      ["Plan a roadmap", SINGLE]
+      "This looks bigger than one task. Plan the whole thing as a roadmap (units, tracked until it is all done), or run it as a single task? " +
+        "A roadmap runs many model calls on its own and can cost real money. YimPim does not limit spend, so set a spending limit on your OpenRouter key first.",
+      ["Plan a roadmap (many model calls, may cost money)", SINGLE]
     );
     if (!pick.startsWith("Plan")) return "single";
-    return await planRoadmap();
+    return await planRoadmap(true);
   };
 
   // The roadmap's commands, for both "/roadmap ..." typed and a request the

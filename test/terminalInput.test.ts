@@ -1,6 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { slashCompleter, computeSuggestions } from "../src/terminalInput.js";
+import fs from "node:fs";
 import { DESKTOP_SLASH_COMMANDS } from "../src/slashCommands.js";
 
 describe("slashCompleter", () => {
@@ -77,5 +78,25 @@ describe("computeSuggestions", () => {
 
   test("returns nothing for a prefix that matches no real command", () => {
     assert.deepEqual(computeSuggestions("/nonexistent"), []);
+  });
+});
+
+
+describe("every command the prompt handles is suggested", () => {
+  test("/r lists the short top-level commands, and the roadmap sub-commands appear once /roadmap is typed", () => {
+    const top = computeSuggestions("/r").map((c) => c.cmd);
+    assert.ok(top.includes("/roadmap") && top.includes("/remote-control"));
+    assert.ok(!top.some((c) => c.startsWith("/roadmap ")), "sub-commands do not crowd the short list");
+    const sub = computeSuggestions("/roadmap ").map((c) => c.cmd);
+    assert.ok(sub.includes("/roadmap reset") && sub.includes("/roadmap new") && sub.includes("/roadmap open"));
+    assert.deepEqual(computeSuggestions("/roadmap re").map((c) => c.cmd), ["/roadmap reopen", "/roadmap reset"]);
+  });
+  test("/design and /pentest are suggested too, and every handled slash command is in the list", () => {
+    assert.ok(computeSuggestions("/pe").some((c) => c.cmd === "/pentest"));
+    assert.ok(computeSuggestions("/des").some((c) => c.cmd === "/design"));
+    const src = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
+    const handled = [...src.matchAll(/trimmed === "(\/[a-z-]+)"/g)].map((m) => m[1]);
+    const listed = new Set(DESKTOP_SLASH_COMMANDS.map((c) => c.cmd));
+    assert.deepEqual(handled.filter((c) => !listed.has(c)), []);
   });
 });

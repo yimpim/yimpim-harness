@@ -5,6 +5,7 @@
  * Everything that needs a model or a person is passed in, so none of this
  * knows how a question is asked or which model answers.
  */
+import { splitJobs } from "./jobsList.js";
 import fs from "fs";
 import path from "path";
 import {
@@ -143,9 +144,31 @@ export async function createRoadmap(
     return { ok: false, text: `I could not turn that into a roadmap${synth.warnings.length ? `: ${synth.warnings.join("; ")}` : ""}.` };
   }
 
+  // A request that lists numbered jobs IS the roadmap: one unit per job, in the order given, each depending on the one before.
+  // Grouping a reference folder's files instead loses the jobs, their order and what each must report.
+  const listed = splitJobs(args.goal);
+  const byJobs = listed.jobs.length >= 2;
+  if (byJobs) {
+    const wantsReport = /\breport\b/i.test(listed.preamble);
+    let prev: string | undefined;
+    const drafts = listed.jobs.map((j) => {
+      const title = shortTitle(`Job ${j.n}: ${j.text.split(/\.\s|\n/)[0]}`, 90);
+      const draft = {
+        title,
+        area: "Requested jobs",
+        summary: `Do only job ${j.n} of ${listed.jobs.length} from the request. ${j.text}`,
+        deps: prev ? [prev] : [],
+        acceptance: wantsReport ? ["Report what changed, the tests run with their counts, and anything that could not be verified."] : [],
+      };
+      prev = title;
+      return draft;
+    });
+    synth = { ...synth, drafts, warnings: [...synth.warnings, `Planned as the ${listed.jobs.length} jobs listed in the request, in that order.`] };
+  }
+
   // Before the roadmap is written: which of these units does the project already have? Those are not planned again.
   let checked: Checked[] = [];
-  if (!args.referenceDir && args.verifyExisting !== false) {
+  if (!args.referenceDir && !byJobs && args.verifyExisting !== false) {
     try {
       const drafts = synth.drafts.slice(0, 40);
       checked = await checkRequirements({
@@ -159,7 +182,7 @@ export async function createRoadmap(
   }
 
   const rm = emptyRoadmap(args.goal, args.referenceDir ? (args.docs ? "mixed" : "port") : "idea");
-  if (inventory) rm.reference = { dir: inventory.dir, fileCount: coverageFiles(inventory).length, scannedAt: new Date().toISOString() };
+  if (inventory && !byJobs) rm.reference = { dir: inventory.dir, fileCount: coverageFiles(inventory).length, scannedAt: new Date().toISOString() };
   const unasked = synth.questions.filter((q) => !answered.some((a) => a.question === q.question) && !decided.some((d) => d.question === q.question));
   setConventions(rm, [
     ...synth.conventions,
@@ -190,7 +213,7 @@ export async function createRoadmap(
 
   const notes = [...synth.warnings, ...added.warnings, ...issues];
   let cover = "";
-  if (inventory) {
+  if (inventory && !byJobs) {
     const c = coverage(rm, coverageFiles(inventory));
     cover = c.uncovered.length === 0 ? `\nEvery one of the ${rm.reference!.fileCount} reference files belongs to a unit.` : `\n${c.uncovered.length} reference file(s) belong to no unit.`;
   }
@@ -478,6 +501,14 @@ export function manualUpdate(repoRoot: string, cmd: RoadmapCommand): string {
 
 export function resetRoadmap(repoRoot: string): boolean {
   try {
+    // A roadmap that got anywhere is kept as a record before it is cleared: what its done units built is still what the audit
+    // starts from. One with nothing done has nothing to keep.
+    const rm = loadRoadmap(repoRoot);
+    if (rm && rm.units.some((u) => u.status === "done")) {
+      const dir = path.join(repoRoot, ".agent", "roadmaps");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${rm.createdAt.replace(/[^0-9A-Za-z]+/g, "-")}-reset.json`), JSON.stringify(rm, null, 2), "utf-8");
+    }
     fs.rmSync(roadmapPath(repoRoot), { force: true });
     notifyRoadmapChanged(repoRoot);
     return true;

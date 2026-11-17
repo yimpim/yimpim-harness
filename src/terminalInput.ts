@@ -27,7 +27,7 @@ import { stripAnsi } from "./richText.js";
 import { Writable } from "node:stream";
 import { PasteCollector } from "./pasteCollector.js";
 import { readClipboardText } from "./clipboard.js";
-import { DESKTOP_SLASH_COMMANDS, SlashCommand } from "./slashCommands.js";
+import { DESKTOP_SLASH_COMMANDS, SlashCommand, matchesTyped } from "./slashCommands.js";
 
 export interface CancellablePrompt {
   /** Resolves with the full answer, or rejects if cancel() ran first. */
@@ -159,9 +159,10 @@ function setPrompt(label: string): void {
  */
 export function computeSuggestions(line: string): SlashCommand[] {
   if (!line.startsWith("/") || line.length <= 1) return [];
-  const hits = DESKTOP_SLASH_COMMANDS.filter((c) => c.cmd.startsWith(line));
+  const hits = DESKTOP_SLASH_COMMANDS.filter((c) => matchesTyped(c, line));
   if (hits.length === 1 && hits[0].cmd === line) return [];
-  return hits.slice(0, MAX_SUGGESTIONS);
+  // A command with sub-commands shows them all once typed (roadmap has ten); otherwise the list stays short.
+  return hits.slice(0, hits.some((c) => c.parent) ? 10 : MAX_SUGGESTIONS);
 }
 
 function suggestionsEqual(a: SlashCommand[], b: SlashCommand[]): boolean {
@@ -493,7 +494,7 @@ function handleLine(rawLine: string): void {
  */
 export function slashCompleter(line: string): [string[], string] {
   if (!line.startsWith("/")) return [[], line];
-  const hits = DESKTOP_SLASH_COMMANDS.map((c) => c.cmd).filter((cmd) => cmd.startsWith(line));
+  const hits = DESKTOP_SLASH_COMMANDS.filter((c) => matchesTyped(c, line)).map((c) => c.cmd);
   // A single, unambiguous match auto-fills the line (readline's own
   // behavior for a one-element result) — trailing space lets the user keep
   // typing an argument (e.g. "/branch ") without an extra keystroke, and is

@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   emptyRoadmap, addUnits, markDone, markStarted, saveRoadmap, loadRoadmap, isFinished, openItems, addOpenItem,
-  archiveFinishedRoadmap, isEvidenceNoise, unitTaskPrompt, roadmapWire,
+  archiveFinishedRoadmap, isEvidenceNoise, unitTaskPrompt, roadmapWire, builtByUnits,
 } from "../src/roadmap.js";
 import { shortTitle, parseRoadmapCommand, manualUpdate, createRoadmap } from "../src/roadmapFlow.js";
 
@@ -127,5 +127,24 @@ describe("a new job after a finished roadmap", () => {
     // Whatever the model stub does next, the old roadmap was archived rather than blocking with "already exists".
     assert.ok(!res || !/already exists/.test(res.text));
     assert.ok(fs.readdirSync(path.join(dir, ".agent", "roadmaps")).length === 1);
+  });
+});
+
+import { resetRoadmap } from "../src/roadmapFlow.js";
+
+describe("reset keeps what was built", () => {
+  test("a roadmap with done units is archived before it is cleared, and its done units still count as built", () => {
+    const rm = twoUnits();
+    markDone(rm, "U001", { files: ["src/a.ts"], commit: "abc" });
+    saveRoadmap(dir, rm);
+    assert.equal(resetRoadmap(dir), true);
+    assert.equal(loadRoadmap(dir), undefined);
+    assert.deepEqual(builtByUnits(dir).map((u) => u.id), ["U001"]);
+  });
+  test("one with nothing done leaves nothing behind", () => {
+    saveRoadmap(dir, twoUnits());
+    resetRoadmap(dir);
+    assert.equal(loadRoadmap(dir), undefined);
+    assert.equal(fs.existsSync(path.join(dir, ".agent", "roadmaps")), false);
   });
 });

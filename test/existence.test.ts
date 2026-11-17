@@ -485,3 +485,43 @@ describe("a build request is not mistaken for an audit, and a follow-up to an au
     assert.match(src, /Do only what it found missing or not determined/);
   });
 });
+
+describe("a request that lists numbered jobs becomes those jobs, in order", () => {
+  const GOAL =
+    "Read first: reference/APP_SPEC.md. Do these jobs in order. For each one, report what you changed.\n" +
+    "1. Generic worker card. An unknown agent name becomes a plain card.\n" +
+    "2. Designer and Security workers. Names containing design or secur get their own cards.\n" +
+    "3. Longer questions. Show the whole prompt.\n" +
+    "4. Roadmap card. Parse roadmap.state and show one card.";
+  const MODEL_UNITS = { conventions: [], assumptions: [], questions: [], units: [
+    { title: "Dashboard Domain Models", area: "Dashboard", summary: "models" },
+    { title: "Roadmap Timeline Reducer", area: "Timeline", summary: "reducer" },
+  ] };
+  const call = async () => JSON.stringify(MODEL_UNITS);
+  test("one unit per job, in the order given, each depending on the one before, with the report asked for", async () => {
+    const dir = repo(PROJECT);
+    const out = await createRoadmap({ repoRoot: dir, complete: call as any }, { goal: GOAL });
+    assert.equal(out.ok, true);
+    const rm = loadRoadmap(dir)!;
+    assert.deepEqual(rm.units.map((u) => u.id), ["U001", "U002", "U003", "U004"]);
+    assert.match(rm.units[0].title, /^Job 1: Generic worker card/);
+    assert.match(rm.units[3].title, /^Job 4: Roadmap card/);
+    assert.deepEqual(rm.units.map((u) => u.deps), [[], ["U001"], ["U002"], ["U003"]]);
+    assert.match(rm.units[1].summary, /Do only job 2 of 4/);
+    assert.match(rm.units[1].acceptance[0], /Report what changed, the tests run with their counts/);
+    assert.ok(!rm.units.some((u) => /Dashboard Domain Models/.test(u.title)), "the model's own grouping was not used");
+    assert.match(rm.brief ?? rm.goal, /Do these jobs in order/);
+  });
+  test("a reference folder does not turn the jobs back into file groups", async () => {
+    const dir = repo({ ...PROJECT, "ref/a.kt": "fun a() {}\n", "ref/b.kt": "fun b() {}\n" });
+    await createRoadmap({ repoRoot: dir, complete: call as any }, { goal: GOAL, referenceDir: "ref" });
+    const rm = loadRoadmap(dir)!;
+    assert.equal(rm.units.length, 4);
+    assert.equal(rm.reference, undefined, "no reference coverage to chase: /roadmap sync would add file units");
+  });
+  test("a request with no numbered list is planned as before", async () => {
+    const dir = repo(PROJECT);
+    await createRoadmap({ repoRoot: dir, complete: call as any }, { goal: "bring the app up to the spec", verifyExisting: false });
+    assert.deepEqual(loadRoadmap(dir)!.units.map((u) => u.title), ["Dashboard Domain Models", "Roadmap Timeline Reducer"]);
+  });
+});
