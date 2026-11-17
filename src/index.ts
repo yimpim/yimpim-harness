@@ -41,7 +41,8 @@ import { ensureDesignSystem } from "./uiDesign.js";
 import { stageDesignImage } from "./designDelivery.js";
 import { parseLenient } from "./jsonRepair.js";
 import { splitJobs, unplannedJobs } from "./jobsList.js";
-import { healTests, renderHealReport, runSuite, failingTestFiles } from "./testHeal.js";
+import { healTests, renderHealReport, failingTestFiles } from "./testHeal.js";
+import { renderLog, runSuiteLogged } from "./testLog.js";
 import { fixTaskFor, isFixTask, savePendingFixes, settlePendingFixes } from "./testSettle.js";
 import { checkExistence, existencePlannerSection, renderExistence, wantsReportOnly, isAuditFollowUp } from "./existence.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
@@ -327,6 +328,7 @@ Press Tab after typing a command's start (e.g. "/mo") to complete it.
   /approvals        Commands you approved for this project, with /approvals
                     revoke <n|all> to forget them
   /plan             The current plan
+  /tests log        When each test last ran green or red, and which are unchanged since (what /tests heal skips)
   /tests heal       Bring a red test suite back to green: one worker per failing test file, all at once. Out-of-date tests are updated;
                     one that cannot be is rewritten or removed (with its snapshot and every reference); a real code defect is sent
                     to the normal pipeline to fix, and its test is removed if it still fails afterwards
@@ -5048,12 +5050,13 @@ async function main(): Promise<void> {
   };
 
   // /tests heal: brings a red test suite back to green, one worker per failing test file, all at once.
-  const runTestHealJob = (): Promise<void> => asOwnTask("/tests heal", async () => {
+  const runTestHealJob = (all = false): Promise<void> => asOwnTask(all ? "/tests heal all" : "/tests heal", async () => {
     const healModels = config.models.repair ?? config.models.editor;
     console.log(`🧪 [TESTS] Healing the test suite with ${healModels.join(", ")}. Every failing test file gets its own worker, started together.`);
     try {
       const report = await healTests({
         repoRoot,
+        all,
         call: (messages, label, json) => runLabeledCompletion({ client, models: healModels, messages: messages as any, agentName: "REPAIR", jsonMode: json, reason: label }),
         log: (line) => console.log("🧪 [TESTS] " + line),
       });
@@ -5576,14 +5579,16 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
           }
         } else if (trimmed === "/tests" || trimmed.startsWith("/tests ")) {
           const sub = trimmed.slice("/tests".length).trim();
-          if (sub === "" || sub === "heal") {
-            await runTestHealJob();
+          if (sub === "log") {
+            console.log("\n" + renderLog(repoRoot) + "\n");
+          } else if (sub === "" || sub === "heal" || sub === "heal all") {
+            await runTestHealJob(sub === "heal all");
             if (pendingTestFixTask) {
               queuedInstructions = pendingTestFixTask;
               pendingTestFixTask = undefined;
               continue taskLoop;
             }
-          } else console.log("[TESTS] Use /tests heal to bring a red test suite back to green.");
+          } else console.log("[TESTS] Use /tests heal (or /tests heal all), or /tests log.");
         } else if (trimmed === "/pentest" || trimmed.startsWith("/pentest ")) {
           await runPentestJob(trimmed.slice("/pentest".length).trim());
         } else if (trimmed === "/design" || trimmed.startsWith("/design ")) {
@@ -6894,7 +6899,7 @@ The user wants you to decide, not ask: ${d.choice}`);
             // anything that selection could not see still comes to light.
             if (pr.total > 0 && pr.done === pr.total) {
               console.log("🧪 [TESTS] The roadmap is complete. Running the full test suite once…");
-              const full = await runSuite(repoRoot, []);
+              const full = await runSuiteLogged(repoRoot, []);
               if (full.ok) console.log("🧪 [TESTS] Full suite: green.");
               else {
                 const red = failingTestFiles(full.output);

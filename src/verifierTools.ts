@@ -28,7 +28,8 @@ import { ProjectToolHooks, projectBackend } from "./qaProjectBackend.js";
 import { createSerialHooks } from "./qaFirmware.js";
 import { extractTestFailureReport } from "./testReport.js";
 import { selectTests, failsBefore } from "./testGraph.js";
-import { runSuite, failingTestFiles, healTests, type HealCall } from "./testHeal.js";
+import { failingTestFiles, healTests, type HealCall } from "./testHeal.js";
+import { runSuiteLogged } from "./testLog.js";
 import { NavHint, NavStepDecision, ProbeResult, probeAndroid, probeIOS, probeDesktopApp, probeExpoWeb, probePythonWeb, probeWeb } from "./visualProbes.js";
 import { NavFlowReplayer, nearestHintLabel } from "./uiFlows.js";
 import {
@@ -2589,7 +2590,7 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
       ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: false, detail: `no test reaches the changed files (${scope})` });
       return;
     }
-    const run = await runSuite(this.repoRoot, sel.selected);
+    const run = await runSuiteLogged(this.repoRoot, sel.selected);
     if (run.ok) {
       ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: true, detail: `all passed (${scope})` });
       return;
