@@ -382,6 +382,10 @@ export function wantsReportOnly(request: string): boolean {
     /\bnot (building|changing|editing)\s+anything\b/i,
     /\b(let me know|tell me|show me|report|list)\b[^.]{0,60}\b(what('?s| is)? (left|remaining|missing|not done)|still (left|missing|to do)|what we (still )?(need|have) to)/i,
     /\bjust (check|audit|compare|report|tell)\b/i,
+    // A plain QUESTION about completeness ("did we end up completing everything in the brief?", "are we done?", "what's still
+    // missing?") asks for an answer, not a plan. Only the interrogative form counts, so "finish what is left" still builds.
+    /^\s*(did|have|has|are|is|was|were|do|does)\s+(we|you|i|it|they|everything|all|the (brief|roadmap|spec|plan|port))\b[^.!]{0,100}\b(complet\w*|finish\w*|done|built|implement\w*|everything|left|remaining|missing|cover\w*|all of)\b[^.!]{0,100}\?\s*$/i,
+    /^\s*(what|which|how much|how many)\b[^.!?]{0,50}\b(left|remaining|missing|outstanding|not (done|built|finished|implemented))\b[^.!]{0,80}\??\s*$/i,
   ].some((re) => re.test(request));
 }
 
