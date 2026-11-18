@@ -154,6 +154,16 @@ export function unchangedGreen(root: string, tests: string[]): Set<string> {
   return new Set(known.filter((t) => fps.get(t)?.trusted && fps.get(t)!.fp === log.files[t].greenFingerprint));
 }
 
+/**
+ * For a phase that changed nothing (it only verifies): every test runs except those the log shows unchanged since their last
+ * green run. With an empty log, that is every test.
+ */
+export function selectUnverified(root: string): { selected: string[]; skipped: string[]; uncertain: string[]; everything: boolean } {
+  const all = listTestFiles(root).map(posix);
+  const same = unchangedGreen(root, all);
+  return { selected: all.filter((t) => !same.has(t)), skipped: all.filter((t) => same.has(t)), uncertain: [], everything: false };
+}
+
 /** The stored diagnosis of a red test, if nothing it depends on has changed since and the healing logic is the same. */
 export function verdictFor(root: string, file: string): StoredVerdict | undefined {
   const e = loadLog(root).files[posix(file)];

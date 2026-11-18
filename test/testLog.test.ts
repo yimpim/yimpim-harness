@@ -146,3 +146,24 @@ describe("heal uses the log", () => {
     assert.equal(loadLog(dir).files["__tests__/a.test.ts"].verdict, undefined);
   });
 });
+
+import { selectUnverified } from "../src/testLog.js";
+
+describe("a phase that changed nothing still runs tests", () => {
+  test("with nothing logged, every test runs (a verify-only phase is never left without test evidence)", () => {
+    const sel = selectUnverified(dir);
+    assert.deepEqual(sel.selected.sort(), tests);
+    assert.deepEqual(sel.skipped, []);
+  });
+  test("tests unchanged since green are skipped, the rest run", () => {
+    allGreen();
+    write("src/a.ts", "export const a = 2;");
+    const sel = selectUnverified(dir);
+    assert.deepEqual(sel.selected, ["__tests__/a.test.ts"]);
+    assert.deepEqual(sel.skipped, ["__tests__/b.test.ts"]);
+  });
+  test("a red test is always selected", () => {
+    recordRun(dir, [], { ok: false, output: "FAIL __tests__/a.test.ts\nPASS __tests__/b.test.ts" });
+    assert.deepEqual(selectUnverified(dir).selected, ["__tests__/a.test.ts"]);
+  });
+});
