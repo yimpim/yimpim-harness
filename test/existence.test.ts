@@ -499,3 +499,32 @@ describe("a request that lists numbered jobs becomes those jobs, in order", () =
     assert.deepEqual(loadRoadmap(dir)!.units.map((u) => u.title), ["Dashboard Domain Models", "Roadmap Timeline Reducer"]);
   });
 });
+
+describe("a long brief is checked in parallel", () => {
+  test("the batches of requirements are asked at the same time, and every requirement still gets its answer", async () => {
+    const files: Record<string, string> = {};
+    const reqs: Requirement[] = [];
+    for (let i = 1; i <= 10; i++) {
+      files[`src/feature${i}.ts`] = `export const feature${i}Handler = () => "feature${i}";\n`;
+      reqs.push(req(`R${i}`, `The feature${i}Handler exists`, [`feature${i}Handler`]));
+    }
+    const dir = repo(files);
+    let inFlight = 0;
+    let peak = 0;
+    let release!: () => void;
+    const together = new Promise<void>((r) => (release = r));
+    const call = async (m: Msg[]) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      // Held until three batches are waiting at once (or 3s, if they were asked one after another).
+      if (inFlight >= 3) release();
+      await Promise.race([together, new Promise((r) => setTimeout(r, 3000))]);
+      inFlight--;
+      const ids = [...m[1].content.matchAll(/### (R\d+):/g)].map((x) => x[1]);
+      return JSON.stringify({ results: ids.map((id) => ({ id, verdict: "missing", evidence: [], missing: "x" })) });
+    };
+    const out = await checkRequirements({ call, repoRoot: dir, requirements: reqs, exclude: [] });
+    assert.ok(peak >= 3, `peak concurrent calls was ${peak}`);
+    assert.deepEqual(out.map((o) => o.req.id), reqs.map((r) => r.id));
+  });
+});
