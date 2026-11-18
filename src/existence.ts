@@ -62,6 +62,18 @@ export const EXTRACT_SYSTEM =
   "For each, give up to 6 search terms: identifiers, route or screen names, UI strings, file names that would appear in the code IF it exists (the way a developer would name them). " +
   'Respond ONLY with JSON: {"applies": true|false, "requirements": [{"text": "", "terms": []}]}';
 
+/**
+ * Used when the person asked how much of a document is DONE ("did we finish everything in the brief?"). The extractor above treats a
+ * question as "not a feature request" and stands down, which silently turned an audit into a build. Here the document IS the list of
+ * what should exist, whatever the wording, and every requirement in it is listed.
+ */
+export const EXTRACT_AUDIT_SYSTEM =
+  "The person wants to know how much of a body of work is DONE. The document they named (a brief, spec, roadmap or list of requirements) is the list of what should exist in the app; their wording is only a question about it. " +
+  "Answer applies=true whenever the document describes things the app should do or show, and applies=false only if it has no such requirements (or no document was given). " +
+  "List EVERY distinct requirement in the document, each specific and checkable against code (one behaviour each; split compound sentences; keep the document's own words where they matter). Leave out text that only says how to work (process, rules, notes to the developer). " +
+  "For each, give up to 6 search terms: identifiers, route or screen names, UI strings, file names that would appear in the code IF it exists (the way a developer would name them). " +
+  'Respond ONLY with JSON: {"applies": true|false, "requirements": [{"text": "", "terms": []}]}';
+
 export function parseRequirements(text: string, max = 12): { applies: boolean; requirements: Requirement[] } | null {
   let j: any;
   try {
@@ -348,6 +360,8 @@ export interface ExistenceArgs {
   maxRequirements?: number;
   built?: BuiltUnit[];
   exclude?: string[];
+  /** The person asked how much of the document is done: it is read whole, every requirement in it is checked, and a question's wording does not stand the check down. */
+  audit?: boolean;
 }
 
 export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult> {
@@ -356,10 +370,15 @@ export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult>
   try {
     parsed = parseRequirements(
       await a.call([
-        { role: "system", content: EXTRACT_SYSTEM },
-        { role: "user", content: `The request:\n${a.request.slice(0, 3000)}${a.docs ? `\n\nA document the request names (the spec):\n${a.docs.slice(0, 14000)}` : ""}` },
+        { role: "system", content: a.audit ? EXTRACT_AUDIT_SYSTEM : EXTRACT_SYSTEM },
+        {
+          role: "user",
+          content: a.audit
+            ? `The question:\n${a.request.slice(0, 3000)}\n\nThe document (the list of what should exist):\n${a.docs ?? "(no document was given)"}`
+            : `The request:\n${a.request.slice(0, 3000)}${a.docs ? `\n\nA document the request names (the spec):\n${a.docs.slice(0, 14000)}` : ""}`,
+        },
       ]),
-      a.maxRequirements ?? 12
+      a.audit ? Infinity : (a.maxRequirements ?? 12)
     );
   } catch {
     return { ...none, note: "The requirements could not be extracted, so nothing was checked against the code." };
@@ -367,33 +386,6 @@ export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult>
   if (!parsed || !parsed.applies) return none;
   const items = await checkRequirements({ call: a.call, repoRoot: a.repoRoot, requirements: parsed.requirements, shortlist: a.shortlist, built: a.built, exclude: a.exclude });
   return { applies: true, items, allBuilt: items.length > 0 && items.every((i) => i.verdict === "built"), note: "" };
-}
-
-/**
- * "Let me know what is left before we work on anything", "just check, don't change anything": the person wants the findings,
- * not a plan and not a build. Matched on plain wording, so it never depends on a model's reading of the request.
- */
-export function wantsReportOnly(request: string): boolean {
-  // "Do not touch files outside the job" is a rule for a build, not a request for a report: only wording that says NOTHING
-  // should be changed, or that nothing should start yet, counts.
-  return [
-    /\b(before|until) (we|you|i)\s+(work on|start|begin|build|change|touch|do|code|implement|edit)\s+(anything|any of it|it)\b/i,
-    /\b(don'?t|do not|without)\s+(chang|edit|touch|modify|writ|build|alter)\w*\s+(anything|any code|any files?|the code|the project|yet)\b/i,
-    /\bnot (building|changing|editing)\s+anything\b/i,
-    /\b(let me know|tell me|show me|report|list)\b[^.]{0,60}\b(what('?s| is)? (left|remaining|missing|not done)|still (left|missing|to do)|what we (still )?(need|have) to)/i,
-    /\bjust (check|audit|compare|report|tell)\b/i,
-    // A plain QUESTION about completeness ("did we end up completing everything in the brief?", "are we done?", "what's still
-    // missing?") asks for an answer, not a plan. Only the interrogative form counts, so "finish what is left" still builds.
-    /^\s*(did|have|has|are|is|was|were|do|does)\s+(we|you|i|it|they|everything|all|the (brief|roadmap|spec|plan|port))\b[^.!]{0,100}\b(complet\w*|finish\w*|done|built|implement\w*|everything|left|remaining|missing|cover\w*|all of)\b[^.!]{0,100}\?\s*$/i,
-    /^\s*(what|which|how much|how many)\b[^.!?]{0,50}\b(left|remaining|missing|outstanding|not (done|built|finished|implemented))\b[^.!]{0,80}\??\s*$/i,
-  ].some((re) => re.test(request));
-}
-
-/** A short follow-up that points back at a report just given ("lets work on what existence found", "do the rest"). */
-export function isAuditFollowUp(text: string): boolean {
-  const t = text.trim();
-  if (t.length === 0 || t.length > 300 || wantsReportOnly(t)) return false;
-  return /\b(existence|the check|the audit|the report)\b|\bwhat (it|you|they|that|existence|the check) (found|said|reported|listed|flagged)\b|\b(the rest|the remaining|what('?s| is) (left|missing)|the gaps|the missing)\b|\b(go ahead|proceed|do (it|those|them|that)|finish (it|that|those|them)|fix (it|those|them))\b/i.test(t);
 }
 
 const place = (e: Evidence) => `${e.file}: \`${e.quote.replace(/`/g, "'").slice(0, 110)}\``;

@@ -310,7 +310,7 @@ describe("how it reaches a task", () => {
 describe("a big request run as one task is checked too", () => {
   test("the plain task path, the interactive 'single task' choice and the unattended program path all check first", () => {
     const idx = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
-    assert.equal((idx.match(/await checkWhatExists\(/g) ?? []).length, 4, "plain task, the program question, single chosen, and the unattended program path");
+    assert.equal((idx.match(/await checkWhatExists\(/g) ?? []).length, 5, "plain task, the program question, single chosen, the unattended program path, and the audit route");
     assert.match(idx, /programResult === "single" \? \(\(await checkWhatExists\(trimmed, client, config, repoRoot\)\) === "handled" \? "handled" : "task"\)/);
     assert.match(idx, /if \(said !== "single"\) return;\s*if \(\(await checkWhatExists\(instructions\.trim\(\), client, config, repoRoot\)\) === "handled"\) return;/);
   });
@@ -404,36 +404,9 @@ describe("the roadmap is read first, then the code confirms it", () => {
   });
 });
 
-import { wantsReportOnly } from "../src/existence.js";
 import { userNamedFiles } from "../src/userFiles.js";
 
 describe("an audit that only asks for findings", () => {
-  test("the wording that means 'tell me, do not build' is recognised", () => {
-    for (const t of [
-      "check eference/timeline-port/EXPO_PORT_BRIEF.md and see if we complted it all already from our roadmap. if not let me know what is left before we work on anything",
-      "compare the code to the spec, don't change anything",
-      "just check what we have against the brief",
-      "tell me what is still missing",
-      "report what's left",
-      "did we end up completing everything in the brief?",
-      "are we done?",
-      "have we finished everything in the roadmap?",
-      "is everything in the spec built?",
-      "what's still missing from the brief?",
-      "what is left?",
-      "how much is left to do",
-    ]) assert.ok(wantsReportOnly(t), t);
-    for (const t of [
-      "build the login screen",
-      "add push notifications and then check they work",
-      "fix the crash on launch",
-      "finish what is left in the brief",
-      "complete everything in the brief",
-      "do you know what is left? then build it",
-      "is the settings screen missing a back button? add one",
-      "what is left in the brief should be built now.",
-    ]) assert.ok(!wantsReportOnly(t), t);
-  });
   test("a typo in the front of a path still finds the document", () => {
     const dir = repo({ "reference/timeline-port/EXPO_PORT_BRIEF.md": "# brief", "reference/other/NOTES.md": "n" });
     assert.deepEqual(userNamedFiles("check eference/timeline-port/EXPO_PORT_BRIEF.md and see", dir), ["reference/timeline-port/EXPO_PORT_BRIEF.md"]);
@@ -478,26 +451,11 @@ describe("a folder being ported from is never proof that the project has it", ()
   });
 });
 
-import { isAuditFollowUp } from "../src/existence.js";
-
-describe("a build request is not mistaken for an audit, and a follow-up to an audit carries its findings", () => {
-  test("rules about what NOT to touch inside a build request do not make it report-only", () => {
-    for (const t of [
-      "Do these jobs in order. Do not touch files outside the job. Do not add dependencies.",
-      "add a login screen but don't change the header",
-      "Before we start, read the spec. Then build the cards.",
-      "build X, without changing the public API",
-    ]) assert.ok(!wantsReportOnly(t), t);
-    for (const t of ["see what's done and let me know what is left before we work on anything", "compare to the spec, do not change anything", "just check it, we are not building anything yet"]) assert.ok(wantsReportOnly(t), t);
-  });
-  test("short pointers back at a report are follow-ups; new requests and report requests are not", () => {
-    for (const t of ["lets work on what existence found", "do the rest", "finish what is left", "go ahead", "fix those", "build what the check found"]) assert.ok(isAuditFollowUp(t), t);
-    for (const t of ["add a settings screen", "tell me what is left before we work on anything", "x".repeat(400)]) assert.ok(!isAuditFollowUp(t), t);
-  });
-  test("the next prompt after a report-only audit gets the request and the findings as context", () => {
+describe("the follow-up to an audit report carries its findings", () => {
+  test("the next prompt after a report-only audit gets the request and the findings as context, when the router says it carries on", () => {
     const src = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
     assert.match(src, /lastAudit = \{ request: text\.slice\(0, 3000\), report: renderExistence\(found\)/);
-    assert.match(src, /const audit = !advice && lastAudit && isAuditFollowUp\(trimmed\)/);
+    assert.match(src, /const audit = !advice && lastAudit && intentFollowsAudit \? lastAudit : null/);
     assert.match(src, /Do only what it found missing or not determined/);
   });
 });

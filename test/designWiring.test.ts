@@ -4,6 +4,7 @@
  * the models come from config, and the person's pick goes through askChoice.
  */
 import { test, describe } from "node:test";
+import { parseIntentReply } from "../src/routeIntent.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { INTENT_SYSTEM } from "../src/prompts.js";
@@ -19,7 +20,7 @@ describe("the Designer is connected", () => {
   });
 
   test("a 'design' answer is accepted from the model and returned to the caller", () => {
-    assert.match(src, /parsed\?\.intent === "design"/);
+    assert.equal(parseIntentReply(JSON.stringify({ intent: "design" })).intent, "design");
     assert.ok(src.includes('if (intent === "design") return "design";'));
   });
 
