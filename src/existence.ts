@@ -20,6 +20,10 @@ export interface Requirement {
   text: string;
   /** Identifiers, routes, UI strings or file names that would appear in the code if it exists. */
   terms: string[];
+  /** The section of the document it comes from, as the document titles it (audits only). */
+  group?: string;
+  /** It is one of the document's own done / acceptance / "do not ship without" checklist items (audits only). */
+  doneList?: boolean;
 }
 
 export interface Evidence {
@@ -72,7 +76,16 @@ export const EXTRACT_AUDIT_SYSTEM =
   "Answer applies=true whenever the document describes things the app should do or show, and applies=false only if it has no such requirements (or no document was given). " +
   "List EVERY distinct requirement in the document, each specific and checkable against code (one behaviour each; split compound sentences; keep the document's own words where they matter). Leave out text that only says how to work (process, rules, notes to the developer). " +
   "For each, give up to 6 search terms: identifiers, route or screen names, UI strings, file names that would appear in the code IF it exists (the way a developer would name them). " +
-  'Respond ONLY with JSON: {"applies": true|false, "requirements": [{"text": "", "terms": []}]}';
+  'Also give each requirement "group": the title of the section of the document it comes from, short and as the document words it. Set "doneList": true on a requirement that is one of the document\'s OWN explicit done / acceptance / ship checklist items (a list the document itself says must be satisfied), and false on everything else. ' +
+  'Respond ONLY with JSON: {"applies": true|false, "requirements": [{"text": "", "terms": [], "group": "", "doneList": false}]}';
+
+/** A section title for display: cut at a word, with an ellipsis, never mid-word. */
+function groupTitle(v: unknown): string {
+  const t = String(v ?? "").replace(/\s+/g, " ").trim();
+  if (t.length <= 70) return t;
+  const cut = t.slice(0, 70);
+  return cut.slice(0, Math.max(cut.lastIndexOf(" "), 40)).replace(/[\s,;:(-]+$/, "") + "…";
+}
 
 export function parseRequirements(text: string, max = 12): { applies: boolean; requirements: Requirement[] } | null {
   let j: any;
@@ -89,10 +102,21 @@ export function parseRequirements(text: string, max = 12): { applies: boolean; r
   }
   if (!j || typeof j !== "object") return null;
   const requirements: Requirement[] = (Array.isArray(j.requirements) ? j.requirements : [])
-    .map((r: any) => ({ text: clip(r?.text, 240), terms: (Array.isArray(r?.terms) ? r.terms : []).map((t: unknown) => clip(t, 40)).filter((t: string) => t.length >= 3).slice(0, 6) }))
+    .map((r: any) => ({
+      text: clip(r?.text, 240),
+      terms: (Array.isArray(r?.terms) ? r.terms : []).map((t: unknown) => clip(t, 40)).filter((t: string) => t.length >= 3).slice(0, 6),
+      group: groupTitle(r?.group),
+      doneList: r?.doneList === true,
+    }))
     .filter((r: { text: string }) => r.text)
     .slice(0, max)
-    .map((r: { text: string; terms: string[] }, i: number) => ({ id: `R${i + 1}`, text: r.text, terms: r.terms }));
+    .map((r: { text: string; terms: string[]; group: string; doneList: boolean }, i: number) => ({
+      id: `R${i + 1}`,
+      text: r.text,
+      terms: r.terms,
+      ...(r.group ? { group: r.group } : {}),
+      ...(r.doneList ? { doneList: true } : {}),
+    }));
   return { applies: j.applies === true && requirements.length > 0, requirements };
 }
 
@@ -176,6 +200,20 @@ export const JUDGE_SYSTEM =
   "partial: some of it exists AND a specific piece is clearly absent from the code you can see; say exactly what that piece is. missing: no relevant code in the excerpts. " +
   "unclear: the requirement is too vague to judge, OR the excerpts are too short to see all of it. An excerpt being short is never a reason for partial: if you simply cannot see whether a part exists, answer unclear and say which part to look for. Never write that 'the excerpt does not show' something in the missing field. " +
   "Be strict: related code is not an implementation. For built and partial you MUST give evidence: one to three quotes, each copied EXACTLY (one or two lines, no line numbers) from an excerpt, with its file. A quote must be executable code (a function, a route, a config key, a handler), never a comment, docstring or documentation: a comment describing a feature is not the feature. A quote that is not in the excerpts, or is only a comment, will be rejected and the verdict downgraded. " +
+  'Respond ONLY with JSON: {"results": [{"id": "R1", "verdict": "built"|"partial"|"missing"|"unclear", "evidence": [{"file": "", "quote": ""}], "missing": "what is not there yet (partial)", "note": "one sentence"}]}';
+
+/**
+ * The last look, for what excerpts could not settle: the judge is given COMPLETE files, one at a time, with every requirement that points at
+ * that file. Short excerpts of a 2,000-line file were leaving more than half of a long brief as "could not tell"; that is the check's
+ * nearsightedness, not a fact about the app.
+ */
+export const JUDGE_WHOLE_SYSTEM =
+  "You judge requirements against ONE COMPLETE source file (every line, numbered). Several requirements are listed; judge each one from this file. " +
+  "built: this file clearly implements the whole requirement (not just something related). " +
+  "partial: some of it is here AND a specific piece is clearly absent from this complete file; say exactly what that piece is. " +
+  "missing: nothing in this file does any of it. " +
+  "unclear: only when the requirement is about behaviour that would live in a DIFFERENT file than this one; say which file or function to look at. " +
+  "Be strict: related code is not an implementation. For built and partial you MUST give one to three quotes copied EXACTLY (one or two lines, no line numbers) from this file; a quote must be executable code, never a comment. " +
   'Respond ONLY with JSON: {"results": [{"id": "R1", "verdict": "built"|"partial"|"missing"|"unclear", "evidence": [{"file": "", "quote": ""}], "missing": "what is not there yet (partial)", "note": "one sentence"}]}';
 
 const VERDICTS: Verdict[] = ["built", "partial", "missing", "unclear"];
@@ -346,6 +384,43 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
       else if (c.verdict === out.get(req.id)!.verdict && c.verdict === "partial") out.set(req.id, c);
     }
   }));
+
+  // Whatever is still partly built or undecided is read against the whole of its closest files. A file is sent once, with every
+  // requirement that points at it, so a big file costs one read however many requirements are about it.
+  const undecided = o.requirements.filter((r) => {
+    const c = out.get(r.id);
+    return c && (c.verdict === "partial" || c.verdict === "unclear") && c.note !== "No code in the project matched it.";
+  });
+  const filesOf = new Map(undecided.map((req) => [req.id, findCandidates(req, files, lower, boost, 3, false, strongFor(req)).map((c) => c.file)]));
+  const askedAbout = new Map<string, Requirement[]>();
+  for (const req of undecided) for (const file of filesOf.get(req.id)!) askedAbout.set(file, [...(askedAbout.get(file) ?? []), req]);
+  const seen = new Map<string, Checked[]>();
+  await Promise.all(
+    [...askedAbout].map(async ([file, reqs]) => {
+      const numbered = byRel.get(file)!.split(/\r?\n/).map((l, i) => `${i + 1}: ${l}`).join("\n");
+      const user = `The file ${file} (complete):\n${numbered}\n\nThe requirements to judge against it:\n${reqs.map((r) => `### ${r.id}: ${r.text}`).join("\n")}`;
+      let raws: Raw[] = [];
+      try {
+        raws = parseVerdicts(await o.call([{ role: "system", content: JUDGE_WHOLE_SYSTEM }, { role: "user", content: user }]));
+      } catch {
+        raws = [];
+      }
+      for (const req of reqs) {
+        const raw = raws.find((r) => r.id === req.id);
+        if (raw) seen.set(req.id, [...(seen.get(req.id) ?? []), settle(raw, req, byRel)]);
+      }
+    })
+  );
+  for (const req of undecided) {
+    const got = seen.get(req.id) ?? [];
+    const built = got.find((c) => c.verdict === "built");
+    const partial = got.find((c) => c.verdict === "partial");
+    if (built) out.set(req.id, built);
+    else if (partial && rank.partial >= rank[out.get(req.id)!.verdict]) out.set(req.id, partial);
+    else if (got.length > 0 && got.length === filesOf.get(req.id)!.length && got.every((c) => c.verdict === "missing")) {
+      out.set(req.id, { req, verdict: "missing", evidence: [], missing: "", note: `Not in the ${got.length} closest file${got.length === 1 ? "" : "s"}, which were read in full.` });
+    }
+  }
   return o.requirements.map((r) => out.get(r.id)!);
 }
 
@@ -396,8 +471,39 @@ export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult>
 
 const place = (e: Evidence) => `${e.file}: \`${e.quote.replace(/`/g, "'").slice(0, 110)}\``;
 
+const MARK: Record<Verdict, string> = { built: "✓", partial: "◐", missing: "✗", unclear: "?" };
+const tally = (list: Checked[]): string =>
+  (["built", "partial", "missing", "unclear"] as Verdict[])
+    .map((v) => [v, list.filter((i) => i.verdict === v).length] as const)
+    .filter(([, n]) => n > 0)
+    .map(([v, n]) => `${n} ${v === "missing" ? "not built" : v === "unclear" ? "could not tell" : v === "partial" ? "partly built" : "built"}`)
+    .join(", ") || "none";
+
+/** One line per requirement for the grouped report: what it is, the verdict, and only as much evidence as the verdict needs. */
+function groupedLine(c: Checked): string {
+  const head = `  ${MARK[c.verdict]} ${c.req.text}`;
+  if (c.verdict === "built") return `${head}  [${c.evidence[0]?.file ?? ""}]`;
+  if (c.verdict === "partial") return `${head}\n      exists: ${place(c.evidence[0])}\n      still missing: ${c.missing || "see the code"}`;
+  return c.note ? `${head}  (${c.note})` : head;
+}
+
+/** A document with sections (or its own done-list): by the document's own structure, its done-list first, a tally for each part. */
+function renderGrouped(r: ExistenceResult): string {
+  const lines: string[] = [`Checked ${r.items.length} requirements: ${tally(r.items)}.`];
+  const done = r.items.filter((i) => i.req.doneList);
+  if (done.length) lines.push("", `The document's own done-list (${tally(done)}):`, ...done.map(groupedLine));
+  const groups = new Map<string, Checked[]>();
+  for (const c of r.items.filter((i) => !i.req.doneList)) {
+    const g = c.req.group || "Other";
+    groups.set(g, [...(groups.get(g) ?? []), c]);
+  }
+  for (const [g, list] of groups) lines.push("", `${g} (${tally(list)}):`, ...list.map(groupedLine));
+  return lines.join("\n");
+}
+
 /** The report: what exists, with its evidence, what is partial, what is missing. */
 export function renderExistence(r: ExistenceResult): string {
+  if (r.items.some((i) => i.req.group || i.req.doneList)) return renderGrouped(r);
   const by = (v: Verdict) => r.items.filter((i) => i.verdict === v);
   const lines: string[] = [];
   const section = (title: string, list: Checked[], detail: (c: Checked) => string) => {
