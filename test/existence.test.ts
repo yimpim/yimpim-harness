@@ -108,7 +108,11 @@ describe("checking requirements against the code", () => {
     ] }), seen);
     const out = await checkRequirements({ call, repoRoot: dir, requirements: [req("R1", "Users can sign in with email", ["LoginScreen"]), req("R2", "Orders are listed", ["OrderList"]), req("R3", "Push notifications arrive", ["fcmToken"])] });
     assert.deepEqual(out.map((o) => o.verdict), ["built", "unclear", "missing"]);
-    assert.equal(seen.length, 2, "one call for the two that had code, then a second look at the one not clearly built");
+    const excerptCalls = seen.filter((m) => !m.startsWith("The file "));
+    const wholeFileCalls = seen.filter((m) => m.startsWith("The file "));
+    assert.equal(excerptCalls.length, 2, "one call for the two that had code, then a second look at the one not clearly built");
+    assert.equal(wholeFileCalls.length, 1, "then the complete file for the one still undecided");
+    assert.ok(wholeFileCalls[0].includes("R2") && !wholeFileCalls[0].includes("R1"));
     assert.ok(seen.every((m) => !m.includes("R3")), "the one with no code was not even asked about");
     assert.match(out[2].note, /No code in the project matched it/);
   });
@@ -118,7 +122,11 @@ describe("checking requirements against the code", () => {
     const reqs = Array.from({ length: 9 }, (_, i) => req(`R${i + 1}`, "login screen", ["LoginScreen"]));
     await checkRequirements({ call: judgeAs(() => ({ results: [] }), seen), repoRoot: dir, requirements: reqs });
     // three batches of up to four, then every one that could not be judged gets a second look, two at a time
-    assert.equal(seen.length, 3 + 5);
+    assert.equal(seen.filter((m) => !m.startsWith("The file ")).length, 3 + 5);
+    // then the complete file(s): each sent once, with every requirement that points at it
+    const whole = seen.filter((m) => m.startsWith("The file "));
+    assert.ok(whole.length >= 1 && whole.length <= 3, `${whole.length} whole-file calls`);
+    for (let i = 1; i <= 9; i++) assert.ok(whole.some((m) => m.includes(`### R${i}:`)), `R${i} was put to a whole file`);
   });
   test("a model that fails or skips a requirement leaves it unclear, never built, and never throws", async () => {
     const dir = repo(PROJECT);
@@ -537,5 +545,140 @@ describe("the size of a check is said before it runs", () => {
     const call = async (m: Msg[]) => (m[0].content.startsWith("The person wants to know") ? reply : JSON.stringify({ results: [] }));
     await checkExistence({ call, repoRoot: dir, request: "are we done?", docs: "doc", audit: true, onRequirements: (n) => told.push(n) });
     assert.deepEqual(told, [3]);
+  });
+});
+
+import { parseRequirements, renderExistence, JUDGE_WHOLE_SYSTEM } from "../src/existence.js";
+
+describe("an audit report follows the document's own structure", () => {
+  const raw = JSON.stringify({
+    applies: true,
+    requirements: [
+      { text: "Replay check is a Jest test", terms: ["replay"], group: "Rules", doneList: true },
+      { text: "Roadmap card shows done units", terms: ["roadmap"], group: "Card anatomy" },
+      { text: "Worker cards use agent names", terms: ["worker"], group: "Card anatomy" },
+      { text: "Reconnecting label is amber", terms: ["reconnecting"], group: "When the connection cannot be restored" },
+      { text: "A requirement with no section", terms: ["nothing"] },
+    ],
+  });
+
+  test("the section title and the done-list flag are kept from the extractor's answer", () => {
+    const p = parseRequirements(raw, Infinity)!;
+    assert.equal(p.requirements[0].doneList, true);
+    assert.equal(p.requirements[1].group, "Card anatomy");
+    assert.equal(p.requirements[1].doneList, undefined);
+    assert.equal(p.requirements[4].group, undefined);
+  });
+
+  test("a long section title is cut at a word with an ellipsis", () => {
+    const long = "The events the desktop sends, and what each one does (read this before building the reducer or any card)";
+    const p = parseRequirements(JSON.stringify({ applies: true, requirements: [{ text: "x", terms: [], group: long }] }), 5)!;
+    const g = p.requirements[0].group!;
+    assert.ok(g.endsWith("…") && g.length <= 71 && !/\s…$/.test(g), g);
+    assert.ok(long.startsWith(g.slice(0, -1).trimEnd()));
+  });
+
+  const ev = (file: string) => [{ file, quote: "q" }];
+  const items = (): any[] => {
+    const p = parseRequirements(raw, Infinity)!.requirements;
+    return [
+      { req: p[0], verdict: "built", evidence: ev("__tests__/replay.test.ts"), missing: "", note: "" },
+      { req: p[1], verdict: "built", evidence: ev("src/components/RoadmapCard.tsx"), missing: "", note: "" },
+      { req: p[2], verdict: "partial", evidence: ev("src/components/WorkerRow.tsx"), missing: "agent names for SECURITY", note: "" },
+      { req: p[3], verdict: "missing", evidence: [], missing: "", note: "No code in the project matched it." },
+      { req: p[4], verdict: "unclear", evidence: [], missing: "", note: "" },
+    ];
+  };
+  const report = () => renderExistence({ applies: true, items: items(), allBuilt: false, note: "" });
+
+  test("a total first, the document's own done-list next, then each section with its own tally", () => {
+    const text = report();
+    assert.match(text, /^Checked 5 requirements: 2 built, 1 partly built, 1 not built, 1 could not tell\./);
+    assert.ok(text.indexOf("The document's own done-list (1 built)") < text.indexOf("Card anatomy (1 built, 1 partly built)"));
+    assert.match(text, /When the connection cannot be restored \(1 not built\)/);
+    assert.match(text, /Other \(1 could not tell\)/);
+  });
+
+  test("a built requirement is one short line; a partial one says what is still missing", () => {
+    const text = report();
+    assert.match(text, /✓ Roadmap card shows done units {2}\[src\/components\/RoadmapCard\.tsx\]/);
+    assert.match(text, /◐ Worker cards use agent names\n\s+exists: .*WorkerRow\.tsx[^\n]*\n\s+still missing: agent names for SECURITY/);
+    assert.match(text, /✗ Reconnecting label is amber {2}\(No code in the project matched it\.\)/);
+  });
+
+  test("a done-list requirement is not repeated under its section", () => {
+    const text = report();
+    assert.equal((text.match(/Replay check is a Jest test/g) ?? []).length, 1);
+  });
+
+  test("without sections or a done-list the report keeps its plain form", () => {
+    const plain = items().map((i) => ({ ...i, req: { id: i.req.id, text: i.req.text, terms: i.req.terms } }));
+    const text = renderExistence({ applies: true, items: plain, allBuilt: false, note: "" });
+    assert.match(text, /^Already built \(2\):/);
+    assert.ok(!/Checked 5 requirements/.test(text));
+  });
+});
+
+describe("what excerpts cannot settle is read against the whole file", () => {
+  const BIG =
+    Array.from({ length: 400 }, (_, i) => `// filler line ${i}`).join("\n") +
+    "\nexport function renderAcceptanceCriteria(worker) {\n  return worker.type === 'QA' ? worker.criteria : [];\n}\n" +
+    Array.from({ length: 400 }, (_, i) => `// more filler ${i}`).join("\n");
+
+  const callFor = (whole: (m: Msg[]) => object) => async (m: Msg[]) => {
+    if (m[0].content === JUDGE_WHOLE_SYSTEM) return JSON.stringify(whole(m));
+    return JSON.stringify({ results: [] }); // the excerpt looks decide nothing
+  };
+
+  test("a requirement the excerpts left undecided is built when the complete file shows it", async () => {
+    const dir = repo({ "src/WorkerCard.tsx": BIG });
+    const out = await checkRequirements({
+      call: callFor(() => ({ results: [{ id: "R1", verdict: "built", evidence: [{ file: "src/WorkerCard.tsx", quote: "return worker.type === 'QA' ? worker.criteria : [];" }], note: "QA only" }] })),
+      repoRoot: dir,
+      requirements: [req("R1", "Acceptance criteria show on QA and not on the EDITOR", ["acceptance", "criteria"])],
+    });
+    assert.equal(out[0].verdict, "built");
+    assert.equal(out[0].evidence[0].file, "src/WorkerCard.tsx");
+  });
+
+  test("a quote that is not in the file still does not count, however complete the file was", async () => {
+    const dir = repo({ "src/WorkerCard.tsx": BIG });
+    const out = await checkRequirements({
+      call: callFor(() => ({ results: [{ id: "R1", verdict: "built", evidence: [{ file: "src/WorkerCard.tsx", quote: "a line of code that is nowhere in this file" }], note: "claimed" }] })),
+      repoRoot: dir,
+      requirements: [req("R1", "Acceptance criteria show on QA", ["acceptance", "criteria"])],
+    });
+    assert.notEqual(out[0].verdict, "built");
+  });
+
+  test("a requirement that every one of its closest complete files lacks is not built, and says where it looked", async () => {
+    const dir = repo({ "src/WorkerCard.tsx": BIG });
+    const out = await checkRequirements({
+      call: callFor(() => ({ results: [{ id: "R1", verdict: "missing", note: "not here" }] })),
+      repoRoot: dir,
+      requirements: [req("R1", "Acceptance criteria show on QA", ["acceptance", "criteria"])],
+    });
+    assert.equal(out[0].verdict, "missing");
+    assert.match(out[0].note, /read in full/);
+  });
+
+  test("when the complete file cannot settle it either, it stays undecided rather than turning into a guess", async () => {
+    const dir = repo({ "src/WorkerCard.tsx": BIG });
+    const out = await checkRequirements({
+      call: callFor(() => ({ results: [{ id: "R1", verdict: "unclear", note: "lives in the reducer" }] })),
+      repoRoot: dir,
+      requirements: [req("R1", "Acceptance criteria show on QA", ["acceptance", "criteria"])],
+    });
+    assert.equal(out[0].verdict, "unclear");
+  });
+
+  test("a failed whole-file call changes nothing and throws nothing", async () => {
+    const dir = repo({ "src/WorkerCard.tsx": BIG });
+    const call = async (m: Msg[]) => {
+      if (m[0].content === JUDGE_WHOLE_SYSTEM) throw new Error("down");
+      return JSON.stringify({ results: [] });
+    };
+    const out = await checkRequirements({ call, repoRoot: dir, requirements: [req("R1", "Acceptance criteria show on QA", ["acceptance", "criteria"])] });
+    assert.equal(out[0].verdict, "unclear");
   });
 });
