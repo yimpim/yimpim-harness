@@ -510,3 +510,68 @@ describe("OpenRouterClient — insufficient credits (HTTP 402)", () => {
     }
   });
 });
+
+import { isImageUnsupportedError, withoutImages } from "../src/openrouter.js";
+
+describe("a model that cannot read images", () => {
+  const imageErr = `HTTP 404: {"error":{"message":"No endpoints found that support image input","code":404}}`;
+  const withImage = (): any[] => [
+    { role: "user", content: [{ type: "text", text: "what is wrong?" }, { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] },
+  ];
+
+  test("the provider's refusal is recognised, and ordinary errors are not", () => {
+    assert.equal(isImageUnsupportedError(new Error(imageErr)), true);
+    assert.equal(isImageUnsupportedError(new Error("HTTP 500: upstream")), false);
+  });
+
+  test("images are replaced by a note, text is kept, and no images means nothing to strip", () => {
+    const out = withoutImages(withImage())!;
+    assert.equal(out[0].content[0].text, "what is wrong?");
+    assert.equal(out[0].content[1].type, "text");
+    assert.ok(!JSON.stringify(out).includes("base64"));
+    assert.equal(withoutImages([{ role: "user", content: "plain" }] as any), undefined);
+  });
+
+  test("it is not retried: one call per model, then the next model, and the first is not marked unhealthy", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: string[] = [];
+    (globalThis as any).fetch = async (_url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      calls.push(body.model);
+      if (body.model === "text/only") return new Response(imageErr.replace("HTTP 404: ", ""), { status: 404 });
+      return sseResponse([frame({ choices: [{ delta: { role: "assistant", content: "seen" } }] }), "data: [DONE]\n\n"]);
+    };
+    try {
+      const client = new OpenRouterClient("test-key");
+      const msg: any = await quietly(() => client.complete(["text/only", "sees/images"], withImage(), {}));
+      assert.equal(msg.content, "seen");
+      assert.deepEqual(calls, ["text/only", "sees/images"]);
+      // A text-only call afterwards still starts on the first model.
+      calls.length = 0;
+      await quietly(() => client.complete(["text/only", "sees/images"], [{ role: "user", content: "hi" }] as any, {}));
+      assert.equal(calls[0], "text/only");
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+    }
+  });
+
+  test("when no model in the chain can read images the same request goes again without them", async () => {
+    const originalFetch = globalThis.fetch;
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      bodies.push(body);
+      if (JSON.stringify(body.messages).includes("image_url")) return new Response(imageErr.replace("HTTP 404: ", ""), { status: 404 });
+      return sseResponse([frame({ choices: [{ delta: { role: "assistant", content: "ok" } }] }), "data: [DONE]\n\n"]);
+    };
+    try {
+      const client = new OpenRouterClient("test-key");
+      const msg: any = await quietly(() => client.complete(["text/only"], withImage(), {}));
+      assert.equal(msg.content, "ok");
+      assert.equal(bodies.length, 2, "one refused call, one without the image");
+      assert.ok(!JSON.stringify(bodies[1].messages).includes("image_url"));
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+    }
+  });
+});

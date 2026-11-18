@@ -31,6 +31,7 @@ import { selectTests, failsBefore } from "./testGraph.js";
 import { failingTestFiles, healTests, type HealCall } from "./testHeal.js";
 import { runSuiteLogged, selectUnverified, loadLog } from "./testLog.js";
 import { passingTestFiles } from "./testRun.js";
+import { isEvidenceNoise } from "./roadmap.js";
 
 /**
  * The evidence line for a green selected run names the test files that passed. A bare "all passed" gave the assertion judge
@@ -2585,10 +2586,14 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
    */
   private async selectedTestGate(change: ChangeSet | undefined, ledger: EvidenceLedger): Promise<void> {
     let sel: ReturnType<typeof selectTests>;
-    const nothingChanged = !change;
+    // Files the tools themselves write (build logs, caches, review notes) are not changes to the code under test. A verify-only phase
+    // whose only "change" is the export log its own build gate wrote is still a phase that changed nothing.
+    const touched = change
+      ? [...change.modified, ...change.added, ...change.deleted, ...change.renamed.flatMap((r) => [r.from, r.to])].filter((p) => !isEvidenceNoise(p))
+      : [];
+    const nothingChanged = touched.length === 0;
     try {
-      if (change) {
-        const touched = [...change.modified, ...change.added, ...change.deleted, ...change.renamed.flatMap((r) => [r.from, r.to])];
+      if (!nothingChanged) {
         sel = selectTests(this.repoRoot, touched);
       } else {
         // Nothing changed, so there is nothing to select by. Every test runs except those the log shows unchanged since green.
