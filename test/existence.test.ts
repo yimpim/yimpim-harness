@@ -548,7 +548,7 @@ describe("the size of a check is said before it runs", () => {
   });
 });
 
-import { parseRequirements, renderExistence, JUDGE_WHOLE_SYSTEM } from "../src/existence.js";
+import { parseRequirements, renderExistence, JUDGE_WHOLE_SYSTEM, JUDGE_COMBINE_SYSTEM } from "../src/existence.js";
 
 describe("an audit report follows the document's own structure", () => {
   const raw = JSON.stringify({
@@ -762,5 +762,55 @@ describe("what a single-use job costs is counted and shown", () => {
 
   test("a request that fails does not leak its cost marker into the next task", () => {
     assert.match(src, /instructions = "";\s+\/\/ What the failed request cost is not carried into whatever task comes next\.\s+printRequestCost/);
+  });
+});
+
+describe("a requirement spread over several files is judged from all of them", () => {
+  const BANNER = "export const RECONNECT_LABEL = 'Reconnecting…';\nexport function ReconnectBanner() { return RECONNECT_LABEL; }\n" + Array.from({ length: 200 }, (_, i) => `// padding ${i}`).join("\n");
+  const POLICY = "export const BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];\nexport function nextDelay(n: number) { return BACKOFF_MS[Math.min(n, 5)]; }\n" + Array.from({ length: 200 }, (_, i) => `// padding ${i}`).join("\n");
+  const R = req("R1", "Show the Reconnecting label and retry with delays of 1, 2, 4, 8, 16, then 30 seconds", ["Reconnecting", "BACKOFF_MS"]);
+  const files = { "src/ReconnectBanner.tsx": BANNER, "src/retryPolicy.ts": POLICY };
+
+  const run = (combine: (m: Msg[]) => object, seen: string[] = []) => async (m: Msg[]) => {
+    seen.push(m[0].content === JUDGE_COMBINE_SYSTEM ? "combine" : m[0].content === JUDGE_WHOLE_SYSTEM ? "whole" : "excerpt");
+    if (m[0].content === JUDGE_COMBINE_SYSTEM) return JSON.stringify(combine(m));
+    if (m[0].content === JUDGE_WHOLE_SYSTEM) {
+      const isBanner = m[1].content.startsWith("The file src/ReconnectBanner.tsx");
+      return JSON.stringify({ results: [{ id: "R1", verdict: "partial", evidence: [{ file: isBanner ? "src/ReconnectBanner.tsx" : "src/retryPolicy.ts", quote: isBanner ? "export const RECONNECT_LABEL = 'Reconnecting…';" : "export const BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];" }], missing: isBanner ? "the retry delays" : "the label", note: "" }] });
+    }
+    return JSON.stringify({ results: [] });
+  };
+
+  test("each file reports only its own part; together they make the requirement built, quoting the code", async () => {
+    const seen: string[] = [];
+    const out = await checkRequirements({
+      call: run(() => ({ results: [{ id: "R1", verdict: "built", evidence: [{ file: "src/retryPolicy.ts", quote: "export const BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];" }, { file: "src/ReconnectBanner.tsx", quote: "export const RECONNECT_LABEL = 'Reconnecting…';" }], note: "label in one file, delays in the other" }] }), seen),
+      repoRoot: repo(files),
+      requirements: [R],
+    });
+    assert.equal(out[0].verdict, "built");
+    assert.ok(seen.includes("combine"), "the findings were put together");
+    assert.equal(seen.filter((x) => x === "whole").length, 2, "each file was read once");
+  });
+
+  test("when the combination cannot make it built, the part that was found still shows as partly built, never worse", async () => {
+    const out = await checkRequirements({ call: run(() => ({ results: [{ id: "R1", verdict: "unclear", note: "cannot tell" }] })), repoRoot: repo(files), requirements: [R] });
+    assert.equal(out[0].verdict, "partial");
+    assert.ok(out[0].evidence.length > 0);
+  });
+
+  test("a combined 'built' still needs a quote that exists in the project", async () => {
+    const out = await checkRequirements({
+      call: run(() => ({ results: [{ id: "R1", verdict: "built", evidence: [{ file: "src/retryPolicy.ts", quote: "a line that was never written anywhere" }], note: "claimed" }] })),
+      repoRoot: repo(files),
+      requirements: [R],
+    });
+    assert.notEqual(out[0].verdict, "built");
+  });
+
+  test("the per-file prompt forbids concluding anything from what a single file lacks", () => {
+    assert.match(JUDGE_WHOLE_SYSTEM, /report what THIS file contributes/);
+    assert.match(JUDGE_WHOLE_SYSTEM, /Do NOT use partial just because something is absent here/);
+    assert.match(JUDGE_COMBINE_SYSTEM, /says nothing about the project/);
   });
 });
