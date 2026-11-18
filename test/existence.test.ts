@@ -528,3 +528,14 @@ describe("a long brief is checked in parallel", () => {
     assert.deepEqual(out.map((o) => o.req.id), reqs.map((r) => r.id));
   });
 });
+
+describe("the size of a check is said before it runs", () => {
+  test("the number of requirements found is reported first", async () => {
+    const dir = repo({ "src/a.ts": "export const a = 1;\n" });
+    const told: number[] = [];
+    const reply = JSON.stringify({ applies: true, requirements: [{ text: "One thing", terms: ["thing"] }, { text: "Another thing", terms: ["other"] }, { text: "A third thing", terms: ["third"] }] });
+    const call = async (m: Msg[]) => (m[0].content.startsWith("The person wants to know") ? reply : JSON.stringify({ results: [] }));
+    await checkExistence({ call, repoRoot: dir, request: "are we done?", docs: "doc", audit: true, onRequirements: (n) => told.push(n) });
+    assert.deepEqual(told, [3]);
+  });
+});
