@@ -13,7 +13,7 @@ import type { BuiltUnit } from "./roadmap.js";
 export type Msg = { role: "system" | "user"; content: string };
 export type Call = (messages: Msg[]) => Promise<string>;
 
-export type Verdict = "built" | "partial" | "missing" | "unclear";
+export type Verdict = "built" | "partial" | "missing" | "unclear" | "manual";
 
 export interface Requirement {
   id: string;
@@ -24,6 +24,12 @@ export interface Requirement {
   group?: string;
   /** It is one of the document's own done / acceptance / "do not ship without" checklist items (audits only). */
   doneList?: boolean;
+  /**
+   * What would show it is done (audits only). "test": the requirement is that a test or check EXISTS or passes, so test files are
+   * the evidence. "manual": a procedure a person must run or report (a manual test on a server, an owner decision): no code can show it.
+   * Anything else is a requirement on the code itself.
+   */
+  kind?: "test" | "manual";
 }
 
 export interface Evidence {
@@ -53,6 +59,8 @@ const clip = (v: unknown, n: number) => String(v ?? "").replace(/\s+/g, " ").tri
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
 // "reference" folders hold the other app being ported from (an Android copy, a design export), which is the SOURCE of a
 // requirement, never proof that this project has it. Matched by whole folder name: "preferences/" is not one.
+// The same, for a requirement that is ABOUT a test: test files are then the evidence, everything else stays out.
+const NOT_EVIDENCE_TESTS_OK = /(^|\/)(fixtures?|mocks?|examples?|samples?|docs?|node_modules|dist|build|references?|[\w-]+_reference|android-ui)\/|\.(stories|min)\.[a-z]+$/i;
 const NOT_EVIDENCE = /(^|\/)(__tests__|tests?|spec|e2e|fixtures?|mocks?|examples?|samples?|docs?|node_modules|dist|build|references?|[\w-]+_reference|android-ui)\/|\.(test|spec|stories|min)\.[a-z]+$/i;
 
 // ---------------------------------------------------------------------------
@@ -76,8 +84,9 @@ export const EXTRACT_AUDIT_SYSTEM =
   "Answer applies=true whenever the document describes things the app should do or show, and applies=false only if it has no such requirements (or no document was given). " +
   "List EVERY distinct requirement in the document, each specific and checkable against code (one behaviour each; split compound sentences; keep the document's own words where they matter). Leave out text that only says how to work (process, rules, notes to the developer). " +
   "For each, give up to 6 search terms: identifiers, route or screen names, UI strings, file names that would appear in the code IF it exists (the way a developer would name them). " +
+  'Give each requirement a "kind": "test" when the requirement is that a test, check or replay EXISTS or PASSES (the evidence is a test file); "manual" when it is a procedure a person must run or report (a manual test on a server, an owner decision, a note to the developer about process) that no code can show; otherwise "code". ' +
   'Also give each requirement "group": the title of the section of the document it comes from, short and as the document words it. Set "doneList": true on a requirement that is one of the document\'s OWN explicit done / acceptance / ship checklist items (a list the document itself says must be satisfied), and false on everything else. ' +
-  'Respond ONLY with JSON: {"applies": true|false, "requirements": [{"text": "", "terms": [], "group": "", "doneList": false}]}';
+  'Respond ONLY with JSON: {"applies": true|false, "requirements": [{"text": "", "terms": [], "group": "", "doneList": false, "kind": "code"}]}';
 
 /** A section title for display: cut at a word, with an ellipsis, never mid-word. */
 function groupTitle(v: unknown): string {
@@ -107,15 +116,17 @@ export function parseRequirements(text: string, max = 12): { applies: boolean; r
       terms: (Array.isArray(r?.terms) ? r.terms : []).map((t: unknown) => clip(t, 40)).filter((t: string) => t.length >= 3).slice(0, 6),
       group: groupTitle(r?.group),
       doneList: r?.doneList === true,
+      kind: r?.kind === "test" || r?.kind === "manual" ? (r.kind as "test" | "manual") : undefined,
     }))
     .filter((r: { text: string }) => r.text)
     .slice(0, max)
-    .map((r: { text: string; terms: string[]; group: string; doneList: boolean }, i: number) => ({
+    .map((r: { text: string; terms: string[]; group: string; doneList: boolean; kind?: "test" | "manual" }, i: number) => ({
       id: `R${i + 1}`,
       text: r.text,
       terms: r.terms,
       ...(r.group ? { group: r.group } : {}),
       ...(r.doneList ? { doneList: true } : {}),
+      ...(r.kind ? { kind: r.kind } : {}),
     }));
   return { applies: j.applies === true && requirements.length > 0, requirements };
 }
@@ -146,11 +157,12 @@ const count = (hay: string, needle: string, cap: number): number => {
 
 /** The files most likely to implement a requirement, with the matching lines. Test, doc and generated files are not candidates. */
 export function findCandidates(req: Requirement, files: FileText[], lower: Map<string, string>, boost: Set<string> = new Set(), maxFiles = 4, deep = false, strong: Set<string> = new Set()): Candidate[] {
+  const notEvidence = req.kind === "test" ? NOT_EVIDENCE_TESTS_OK : NOT_EVIDENCE;
   const terms = req.terms.map((t) => t.toLowerCase());
   const words = wordsOf(req.text);
   const scored: { f: FileText; score: number }[] = [];
   for (const f of files) {
-    if (NOT_EVIDENCE.test(f.rel) || /\.(json|lock)$/i.test(f.rel)) continue;
+    if (notEvidence.test(f.rel) || /\.(json|lock)$/i.test(f.rel)) continue;
     const text = lower.get(f.rel)!;
     const path = f.rel.toLowerCase();
     let score = 0;
@@ -256,10 +268,11 @@ const COMMENT_LINE = /^\s*(\/\/|\/\*|\*|#(?![a-z]+\s*[{:])|<!--|--\s|;|"""|''')/
 export const hasCode = (quote: string): boolean => quote.split(/\r?\n/).some((l) => l.trim() && !COMMENT_LINE.test(l));
 
 /** A quote counts only if it is real: in a source file the project has, word for word, long enough to mean something, and code. */
-export function validQuotes(evidence: Evidence[], byRel: Map<string, string>): Evidence[] {
+export function validQuotes(evidence: Evidence[], byRel: Map<string, string>, testsOk = false): Evidence[] {
+  const notEvidence = testsOk ? NOT_EVIDENCE_TESTS_OK : NOT_EVIDENCE;
   return evidence.filter((e) => {
     const q = norm(e.quote);
-    if (q.length < 12 || q.length > 400 || NOT_EVIDENCE.test(e.file) || !hasCode(e.quote)) return false;
+    if (q.length < 12 || q.length > 400 || notEvidence.test(e.file) || !hasCode(e.quote)) return false;
     const content = byRel.get(e.file);
     return content !== undefined && norm(content).includes(q);
   });
@@ -270,7 +283,7 @@ export function validQuotes(evidence: Evidence[], byRel: Map<string, string>): E
 export const SHORT_EXCERPT = /\b(excerpts?|snippets?|shown|visible|supplied|provided)\b[^.]{0,60}\b(not|n't|no|never|without)\b[^.]{0,40}\b(show|establish|include|contain|confirm|demonstrate|reveal)|\b(does|do) not (show|establish|confirm|include)\b/i;
 
 export function settle(raw: Raw, req: Requirement, byRel: Map<string, string>): Checked {
-  const evidence = validQuotes(raw.evidence, byRel);
+  const evidence = validQuotes(raw.evidence, byRel, req.kind === "test");
   if (raw.verdict === "partial" && SHORT_EXCERPT.test(raw.missing)) {
     return { req, verdict: "unclear", evidence, missing: "", note: `Not seen in the code that was checked (not shown to be absent): ${raw.missing}`.slice(0, 240) };
   }
@@ -322,8 +335,12 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
   const boost = new Set((o.shortlist ?? []).map((p) => p.replace(/\\/g, "/")));
   const leads = new Map(o.requirements.map((r) => [r.id, unitsFor(r, o.built ?? [])]));
   const strongFor = (r: Requirement) => new Set(leads.get(r.id)!.flatMap((u) => u.files.map((f) => f.replace(/\\/g, "/"))));
-  const withCode = o.requirements.map((req) => ({ req, cands: findCandidates(req, files, lower, boost, 4, false, strongFor(req)) }));
   const out = new Map<string, Checked>();
+  // A manual step (a test to run on a server, a decision for the owner) is not something the code can show: it is neither built nor missing.
+  for (const r of o.requirements.filter((x) => x.kind === "manual")) {
+    out.set(r.id, { req: r, verdict: "manual", evidence: [], missing: "", note: "A person has to do and report this; the code cannot show it." });
+  }
+  const withCode = o.requirements.filter((r) => r.kind !== "manual").map((req) => ({ req, cands: findCandidates(req, files, lower, boost, 4, false, strongFor(req)) }));
   // A requirement that matches no code at all is missing: no model needs to be asked, and an empty project costs nothing.
   const asked = withCode.filter(({ req, cands }) => {
     if (cands.length > 0) return true;
@@ -358,7 +375,7 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
 
   // Anything not clearly built gets a second look at much more of the code (more files, longer excerpts) before it is called
   // work: a first look that saw four short excerpts is not enough to say a requirement is only partly there.
-  const rank: Record<Verdict, number> = { built: 3, partial: 2, unclear: 1, missing: 0 };
+  const rank: Record<Verdict, number> = { built: 3, partial: 2, unclear: 1, missing: 0, manual: 0 };
   const again = o.requirements.filter((r) => {
     const c = out.get(r.id);
     return c && (c.verdict === "partial" || c.verdict === "unclear") && c.note !== "No code in the project matched it.";
@@ -466,17 +483,18 @@ export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult>
   if (!parsed || !parsed.applies) return none;
   a.onRequirements?.(parsed.requirements.length);
   const items = await checkRequirements({ call: a.call, repoRoot: a.repoRoot, requirements: parsed.requirements, shortlist: a.shortlist, built: a.built, exclude: a.exclude });
-  return { applies: true, items, allBuilt: items.length > 0 && items.every((i) => i.verdict === "built"), note: "" };
+  const checkable = items.filter((i) => i.verdict !== "manual");
+  return { applies: true, items, allBuilt: checkable.length > 0 && checkable.every((i) => i.verdict === "built"), note: "" };
 }
 
 const place = (e: Evidence) => `${e.file}: \`${e.quote.replace(/`/g, "'").slice(0, 110)}\``;
 
-const MARK: Record<Verdict, string> = { built: "✓", partial: "◐", missing: "✗", unclear: "?" };
+const MARK: Record<Verdict, string> = { built: "✓", partial: "◐", missing: "✗", unclear: "?", manual: "☐" };
 const tally = (list: Checked[]): string =>
-  (["built", "partial", "missing", "unclear"] as Verdict[])
+  (["built", "partial", "missing", "unclear", "manual"] as Verdict[])
     .map((v) => [v, list.filter((i) => i.verdict === v).length] as const)
     .filter(([, n]) => n > 0)
-    .map(([v, n]) => `${n} ${v === "missing" ? "not built" : v === "unclear" ? "could not tell" : v === "partial" ? "partly built" : "built"}`)
+    .map(([v, n]) => `${n} ${v === "missing" ? "not built" : v === "unclear" ? "could not tell" : v === "partial" ? "partly built" : v === "manual" ? "for a person to do" : "built"}`)
     .join(", ") || "none";
 
 /** One line per requirement for the grouped report: what it is, the verdict, and only as much evidence as the verdict needs. */
@@ -513,6 +531,7 @@ export function renderExistence(r: ExistenceResult): string {
   section("Partly built", by("partial"), (c) => `\n      exists: ${place(c.evidence[0])}\n      still missing: ${c.missing || "see the code"}`);
   section("Not built", by("missing"), (c) => (c.note ? `  (${c.note})` : ""));
   section("Could not tell", by("unclear"), (c) => (c.note ? `  (${c.note})` : ""));
+  section("For a person to do (the code cannot show these)", by("manual"), () => "");
   return lines.join("\n");
 }
 
