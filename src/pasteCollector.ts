@@ -11,6 +11,17 @@
  * input. Pressing Enter later expands the placeholder back to the full text,
  * so a paste is always one answer, never several commands.
  */
+/**
+ * What the input line holds once a paste ends, and whether the screen has to be repainted. It always does: readline's echo is dropped
+ * while the paste arrives (so a big block is not typed out line by line), which means NOTHING of a paste has been drawn yet, a
+ * single-line one included. Skipping the repaint when there was nothing to fold left the pasted text in the buffer but invisible
+ * until another key made readline redraw the line.
+ */
+export function settlePaste(collector: PasteCollector, current: string): { line: string; folded: boolean; repaint: true } {
+  const shown = collector.end(current);
+  return { line: shown ?? current, folded: shown !== undefined, repaint: true };
+}
+
 export class PasteCollector {
   private active = false;
   private lines: string[] = [];

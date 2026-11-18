@@ -47,3 +47,26 @@ test("a second paste gets its own number", () => {
   p.line("c");
   assert.match(p.end("d")!, /#2/);
 });
+
+import { settlePaste } from "../src/pasteCollector.js";
+
+test("a single-line paste keeps its text and still asks for a repaint, because nothing of it was echoed", () => {
+  const p = new PasteCollector();
+  p.start();
+  const s = settlePaste(p, "just one line pasted");
+  assert.equal(s.line, "just one line pasted");
+  assert.equal(s.folded, false);
+  assert.equal(s.repaint, true);
+  assert.equal(p.pasting, false);
+});
+
+test("a multi-line paste is folded to its placeholder and repainted", () => {
+  const p = new PasteCollector();
+  p.start();
+  p.line("one");
+  p.line("two");
+  const s = settlePaste(p, "three");
+  assert.equal(s.folded, true);
+  assert.match(s.line, /^\[Pasted text #\d+ \+3 lines\]$/);
+  assert.equal(s.repaint, true);
+});
