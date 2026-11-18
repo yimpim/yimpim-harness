@@ -292,8 +292,10 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
     out.set(req.id, { req, verdict: "missing", evidence: [], missing: "", note: "No code in the project matched it." });
     return false;
   });
-  for (let i = 0; i < asked.length; i += 4) {
-    const chunk = asked.slice(i, i + 4);
+  // Every batch is independent of the others, so they are all asked at once: a long brief is as quick to check as its slowest batch.
+  const firstBatches: (typeof asked)[] = [];
+  for (let i = 0; i < asked.length; i += 4) firstBatches.push(asked.slice(i, i + 4));
+  await Promise.all(firstBatches.map(async (chunk) => {
     const user = chunk
       .map(({ req, cands }) => `### ${req.id}: ${req.text}${roadmapNote(leads.get(req.id)!)}\n${cands.map((c) => `--- ${c.file}\n${c.snippet}`).join("\n")}`)
       .join("\n\n");
@@ -314,7 +316,7 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
       if (c.verdict === "missing" && cands.length > 0 && cands[0].score >= 25) c = { ...c, note: `${c.note} (code that matched closely was found in ${cands[0].file}, so check before rebuilding)`.trim() };
       out.set(req.id, c);
     }
-  }
+  }));
 
   // Anything not clearly built gets a second look at much more of the code (more files, longer excerpts) before it is called
   // work: a first look that saw four short excerpts is not enough to say a requirement is only partly there.
@@ -324,8 +326,9 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
     return c && (c.verdict === "partial" || c.verdict === "unclear") && c.note !== "No code in the project matched it.";
   });
   const deepFor = new Map(again.map((req) => [req.id, findCandidates(req, files, lower, boost, 8, true, strongFor(req))]));
-  for (let i = 0; i < again.length; i += 2) {
-    const chunk = again.slice(i, i + 2);
+  const secondBatches: (typeof again)[] = [];
+  for (let i = 0; i < again.length; i += 2) secondBatches.push(again.slice(i, i + 2));
+  await Promise.all(secondBatches.map(async (chunk) => {
     const user = chunk
       .map((req) => `### ${req.id}: ${req.text}\n(Earlier, short excerpts were not enough to decide. These are longer.)${roadmapNote(leads.get(req.id)!)}\n${deepFor.get(req.id)!.map((c) => `--- ${c.file}\n${c.snippet}`).join("\n")}`)
       .join("\n\n");
@@ -342,7 +345,7 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
       if (rank[c.verdict] > rank[out.get(req.id)!.verdict]) out.set(req.id, c);
       else if (c.verdict === out.get(req.id)!.verdict && c.verdict === "partial") out.set(req.id, c);
     }
-  }
+  }));
   return o.requirements.map((r) => out.get(r.id)!);
 }
 
