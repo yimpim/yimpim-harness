@@ -29,7 +29,7 @@ import { createSerialHooks } from "./qaFirmware.js";
 import { extractTestFailureReport } from "./testReport.js";
 import { selectTests, failsBefore } from "./testGraph.js";
 import { failingTestFiles, healTests, type HealCall } from "./testHeal.js";
-import { runSuiteLogged } from "./testLog.js";
+import { runSuiteLogged, selectUnverified, loadLog } from "./testLog.js";
 import { passingTestFiles } from "./testRun.js";
 
 /**
@@ -998,7 +998,8 @@ export class AutonomousVerifier {
       // this change, then whether the permanent suite moved with the code.
       if (!ledger.hasBlockingFailure()) await this.focusedTestGate(ledger);
       if (!ledger.hasBlockingFailure() && hasRealChange) this.mainSuiteGate(phaseGoal, change!, ledger);
-      if (!ledger.hasBlockingFailure() && hasRealChange) await this.selectedTestGate(change!, ledger);
+      // A phase that changed nothing (a verify-only phase) still has its tests run: the ones not known green since their last run.
+      if (!ledger.hasBlockingFailure()) await this.selectedTestGate(hasRealChange ? change : undefined, ledger);
 
       // Tier 2 — semantic: does the diff plausibly implement the stated goal.
       // Needs an actual diff to review — skipped entirely for a verify-only
@@ -2582,23 +2583,36 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
    * failure is checked against the last commit: one that was already red there is not this phase's doing; it is healed
    * (the stale test updated) and, if it stays red, reported without blocking. Only a failure the phase introduced blocks.
    */
-  private async selectedTestGate(change: ChangeSet, ledger: EvidenceLedger): Promise<void> {
+  private async selectedTestGate(change: ChangeSet | undefined, ledger: EvidenceLedger): Promise<void> {
     let sel: ReturnType<typeof selectTests>;
+    const nothingChanged = !change;
     try {
-      const touched = [...change.modified, ...change.added, ...change.deleted, ...change.renamed.flatMap((r) => [r.from, r.to])];
-      sel = selectTests(this.repoRoot, touched);
+      if (change) {
+        const touched = [...change.modified, ...change.added, ...change.deleted, ...change.renamed.flatMap((r) => [r.from, r.to])];
+        sel = selectTests(this.repoRoot, touched);
+      } else {
+        // Nothing changed, so there is nothing to select by. Every test runs except those the log shows unchanged since green.
+        sel = selectUnverified(this.repoRoot);
+      }
     } catch {
       return;
     }
     const total = sel.selected.length + sel.skipped.length;
     if (total === 0) return;
-    const gate = `tests the change can reach (${sel.selected.length} of ${total})`;
-    const scope =
-      sel.everything
+    const gate = nothingChanged ? `tests not known green (${sel.selected.length} of ${total})` : `tests the change can reach (${sel.selected.length} of ${total})`;
+    const scope = nothingChanged
+      ? `no code changed; ${sel.skipped.length} test file(s) are unchanged since their last green run`
+      : sel.everything
         ? "project-wide config changed, so every test runs"
         : `${sel.skipped.length} skipped: they do not reach any changed file${sel.uncertain.length ? `; ${sel.uncertain.length} run because their imports could not all be resolved` : ""}`;
     if (sel.selected.length === 0) {
-      ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: false, detail: `no test reaches the changed files (${scope})` });
+      if (nothingChanged) {
+        const log = loadLog(this.repoRoot).files;
+        const lines = sel.skipped.map((t) => `${t} (green ${(log[t]?.greenAt ?? "").replace("T", " ").slice(0, 16)})`);
+        ledger.add({ tier: "build", gate, method: "inspected", status: "pass", blocking: true, detail: `every test is unchanged since its last green run: ${lines.join(", ")}. Nothing any of them depends on has changed.` });
+      } else {
+        ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: false, detail: `no test reaches the changed files (${scope})` });
+      }
       return;
     }
     const run = await runSuiteLogged(this.repoRoot, sel.selected);
