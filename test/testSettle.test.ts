@@ -160,3 +160,19 @@ describe("after the code fix attempt", () => {
     assert.match(task, /Do not edit, skip or delete these tests/);
   });
 });
+
+describe("an assertion about null is a behaviour failure, not an environment one", () => {
+  test("it goes to the code fix, never settled away", async () => {
+    write("__tests__/n.test.ts", "BROKEN expect(x).not.toBeNull();\n");
+    const report = await healTests({
+      repoRoot: dir,
+      run: async (root) => {
+        const bad = fs.readFileSync(path.join(root, "__tests__/n.test.ts"), "utf8").includes("BROKEN");
+        return { ok: !bad, output: bad ? "FAIL __tests__/n.test.ts\n  ● returns a value\n    Expected: not null\n    Received: value is null" : "" };
+      },
+      call: async () => JSON.stringify({ verdict: "unclear", reason: "cannot tell" }),
+    });
+    assert.equal(report.results[0].status, "code-bug");
+    assert.ok(fs.existsSync(path.join(dir, "__tests__/n.test.ts")));
+  });
+});

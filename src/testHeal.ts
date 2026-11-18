@@ -128,7 +128,7 @@ export function gutted(before: string, after: string): string | undefined {
 
 const SYSTEM = `You repair a failing test file. A project's tests went red because the code changed and the tests were not updated with it.
 You decide WHO is wrong:
-- "stale-test": the code's new behaviour is intended and the test still asserts the old one (renamed export, changed output, new argument, moved file, changed text). It ALSO covers a broken test ENVIRONMENT: a native module that needs a mock in Jest (AsyncStorage, expo modules, react-native internals), a missing jest.mock, a provider or wrapper the component now needs. Fix those inside the test file (jest.mock(...) at the top, a wrapper in render). A module that fails to load under Jest is NOT a code bug. Return the whole corrected test file.
+- "stale-test": the code's new behaviour is intended and the test still asserts the old one (renamed export, changed output, new argument, moved file, changed text). It ALSO covers a broken test ENVIRONMENT: a native module that needs a mock in Jest (storage, device or platform modules, framework internals), a missing jest.mock, a provider or wrapper the component now needs. Fix those inside the test file (jest.mock(...) at the top, a wrapper in render). A module that fails to load under Jest is NOT a code bug. Return the whole corrected test file.
 - "code-bug": ONLY when the code's behaviour is wrong: the test asserts something sensible and the code now does something else that is a regression. Do NOT change the test. Say what is broken in the code and where.
 - "need": you cannot decide without more files. Ask for them: {"need":["path/one","path/two"]}. Any file in the repo can be asked for, including components, config and setup files. Ask instead of guessing.
 - "unclear": only after you have asked for what you need and it still does not settle it.
@@ -335,7 +335,7 @@ function configFiles(repoRoot: string): string[] {
   return [...out];
 }
 
-const ROOT_SYSTEM = `Several test files fail with the same error. That usually means ONE shared cause in the test setup, not many separate test problems: a native module with no Jest mock (AsyncStorage, expo modules), a missing global, a missing transform or preset entry.
+const ROOT_SYSTEM = `Several test files fail with the same error. That usually means ONE shared cause in the test setup, not many separate test problems: a native or platform module with no mock under the test runner, a missing global, a missing transform or preset entry.
 You may change only the Jest/test-setup files you are shown (and create a root-level jest.setup.js if none exists, registering it under "jest" in package.json). Do not change application code and do not change any test. Add the smallest fix that makes the shared error go away, for example a jest.mock(...) of the native module in the setup file.
 If this is not a setup problem (the application code is really wrong), return no edits.
 Answer with JSON only: {"cause":"one sentence","edits":[{"file":"path","content":"the complete new content of that file"}]}`;
@@ -456,7 +456,7 @@ const SETTLE_SYSTEM = `A test file could not be brought back to green by updatin
 Answer with JSON only: {"decision":"rewrite|delete","reason":"one sentence","test":"the complete new test file (rewrite only)"}`;
 
 /** A test that cannot even load: a broken environment, not a statement about behaviour. Only these may be rewritten or removed. */
-const ENVIRONMENT_FAILURE = /Test suite failed to run|Cannot find module|NativeModule|AsyncStorage is null|SyntaxError|Unexpected token|must contain at least one test|Jest encountered an unexpected token/i;
+const ENVIRONMENT_FAILURE = /Test suite failed to run|Cannot find module|NativeModule|SyntaxError|Unexpected token|must contain at least one test|Jest encountered an unexpected token/i;
 
 /**
  * Files still red after healing that are not a code defect: each gets a decision. A rewrite must pass or the file is
