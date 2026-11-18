@@ -220,13 +220,25 @@ export const JUDGE_SYSTEM =
  * nearsightedness, not a fact about the app.
  */
 export const JUDGE_WHOLE_SYSTEM =
-  "You judge requirements against ONE COMPLETE source file (every line, numbered). Several requirements are listed; judge each one from this file. " +
-  "built: this file clearly implements the whole requirement (not just something related). " +
-  "partial: some of it is here AND a specific piece is clearly absent from this complete file; say exactly what that piece is. " +
-  "missing: nothing in this file does any of it. " +
-  "unclear: only when the requirement is about behaviour that would live in a DIFFERENT file than this one; say which file or function to look at. " +
+  "You are shown ONE complete source file (every line, numbered) and several requirements. A requirement is usually implemented across SEVERAL files, and you only see this one: report what THIS file contributes. " +
+  "built: this file ALONE implements the whole requirement. " +
+  "partial: this file clearly implements part of it; quote that part, and say which part it does not cover (another file may). Do NOT use partial just because something is absent here. " +
+  "missing: nothing in this file relates to the requirement. " +
+  "unclear: it depends on code outside this file; say which. " +
   "Be strict: related code is not an implementation. For built and partial you MUST give one to three quotes copied EXACTLY (one or two lines, no line numbers) from this file; a quote must be executable code, never a comment. " +
-  'Respond ONLY with JSON: {"results": [{"id": "R1", "verdict": "built"|"partial"|"missing"|"unclear", "evidence": [{"file": "", "quote": ""}], "missing": "what is not there yet (partial)", "note": "one sentence"}]}';
+  'Respond ONLY with JSON: {"results": [{"id": "R1", "verdict": "built"|"partial"|"missing"|"unclear", "evidence": [{"file": "", "quote": ""}], "missing": "the part this file does not cover (partial)", "note": "one sentence"}]}';
+
+/**
+ * Then the findings from the several files are put together. A file lacking a piece says nothing about the project: the piece may sit in another file
+ * that was read. No code is sent here, only what each file was found to contribute, and every quote must still exist in the project.
+ */
+export const JUDGE_COMBINE_SYSTEM =
+  "Several COMPLETE source files were each judged against ONE requirement; each finding says what that file contributes. A file that lacks a piece says nothing about the project: the piece may be in another of these files. Decide from all the findings together. " +
+  "built: together the findings show the whole requirement is implemented. " +
+  "partial: some of it is implemented AND a specific piece is not found in ANY of these files; say exactly which piece. " +
+  "unclear: the findings cannot show it. " +
+  "For built and partial give one to three quotes, each copied EXACTLY from the quotes in the findings, with its file. " +
+  'Respond ONLY with JSON: {"results": [{"id": "R1", "verdict": "built"|"partial"|"unclear", "evidence": [{"file": "", "quote": ""}], "missing": "the piece not found in any file (partial)", "note": "one sentence"}]}';
 
 const VERDICTS: Verdict[] = ["built", "partial", "missing", "unclear"];
 
@@ -411,7 +423,7 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
   const filesOf = new Map(undecided.map((req) => [req.id, findCandidates(req, files, lower, boost, 3, false, strongFor(req)).map((c) => c.file)]));
   const askedAbout = new Map<string, Requirement[]>();
   for (const req of undecided) for (const file of filesOf.get(req.id)!) askedAbout.set(file, [...(askedAbout.get(file) ?? []), req]);
-  const seen = new Map<string, Checked[]>();
+  const seen = new Map<string, { file: string; c: Checked }[]>();
   await Promise.all(
     [...askedAbout].map(async ([file, reqs]) => {
       const numbered = byRel.get(file)!.split(/\r?\n/).map((l, i) => `${i + 1}: ${l}`).join("\n");
@@ -424,20 +436,49 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
       }
       for (const req of reqs) {
         const raw = raws.find((r) => r.id === req.id);
-        if (raw) seen.set(req.id, [...(seen.get(req.id) ?? []), settle(raw, req, byRel)]);
+        if (raw) seen.set(req.id, [...(seen.get(req.id) ?? []), { file, c: settle(raw, req, byRel) }]);
       }
     })
   );
-  for (const req of undecided) {
-    const got = seen.get(req.id) ?? [];
-    const built = got.find((c) => c.verdict === "built");
-    const partial = got.find((c) => c.verdict === "partial");
-    if (built) out.set(req.id, built);
-    else if (partial && rank.partial >= rank[out.get(req.id)!.verdict]) out.set(req.id, partial);
-    else if (got.length > 0 && got.length === filesOf.get(req.id)!.length && got.every((c) => c.verdict === "missing")) {
-      out.set(req.id, { req, verdict: "missing", evidence: [], missing: "", note: `Not in the ${got.length} closest file${got.length === 1 ? "" : "s"}, which were read in full.` });
-    }
-  }
+  await Promise.all(
+    undecided.map(async (req) => {
+      const got = seen.get(req.id) ?? [];
+      const built = got.find((g) => g.c.verdict === "built");
+      if (built) {
+        out.set(req.id, built.c);
+        return;
+      }
+      if (got.length === 0) return;
+      const asked = filesOf.get(req.id)!;
+      if (got.length === asked.length && got.every((g) => g.c.verdict === "missing")) {
+        out.set(req.id, { req, verdict: "missing", evidence: [], missing: "", note: `Not in the ${got.length} closest file${got.length === 1 ? "" : "s"}, which were read in full.` });
+        return;
+      }
+      const contributing = got.filter((g) => g.c.verdict === "partial");
+      if (contributing.length === 0) return; // nothing positive was found in any of them: stays as it was
+      if (got.length === 1 || contributing.length === 1 && asked.length === 1) {
+        if (rank.partial >= rank[out.get(req.id)!.verdict]) out.set(req.id, contributing[0].c);
+        return;
+      }
+      // Several files each hold part of it (or lack it): decide from the findings together, never from one file's absence.
+      const findings = got
+        .map(({ file, c }) => `- ${file}: ${c.verdict}.${c.missing ? ` Not covered here: ${c.missing}` : ""}${c.note ? ` ${c.note}` : ""}${c.evidence.length ? `\n    quotes:\n${c.evidence.map((e) => `      ${e.file}: ${e.quote}`).join("\n")}` : ""}`)
+        .join("\n");
+      let raws: Raw[] = [];
+      try {
+        raws = parseVerdicts(await o.call([{ role: "system", content: JUDGE_COMBINE_SYSTEM }, { role: "user", content: `### ${req.id}: ${req.text}\n${findings}` }]));
+      } catch {
+        raws = [];
+      }
+      const raw = raws.find((r) => r.id === req.id);
+      const combined = raw ? settle(raw, req, byRel) : undefined;
+      if (combined && (combined.verdict === "built" || combined.verdict === "partial") && rank[combined.verdict] >= rank[out.get(req.id)!.verdict]) {
+        out.set(req.id, combined);
+      } else if (rank.partial >= rank[out.get(req.id)!.verdict]) {
+        out.set(req.id, contributing[0].c);
+      }
+    })
+  );
   return o.requirements.map((r) => out.get(r.id)!);
 }
 
