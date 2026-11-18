@@ -682,3 +682,60 @@ describe("what excerpts cannot settle is read against the whole file", () => {
     assert.equal(out[0].verdict, "unclear");
   });
 });
+
+describe("requirements about a test, and steps only a person can do", () => {
+  const TEST_FILE = "import { parseRemoteEvent } from '../src/wire/events';\ndescribe('golden', () => {\n  test.each(['remote_history', 'samplehistoryreal'])('replays %s', (name) => {\n    expect(reduce(parseRemoteEvent(load(name)))).toEqual(golden(name));\n  });\n});\n";
+  const QUOTE = "expect(reduce(parseRemoteEvent(load(name)))).toEqual(golden(name));";
+
+  test("the extractor's kind is kept, and anything else is a plain code requirement", () => {
+    const p = parseRequirements(JSON.stringify({ applies: true, requirements: [
+      { text: "a", terms: [], kind: "test" }, { text: "b", terms: [], kind: "manual" }, { text: "c", terms: [], kind: "code" }, { text: "d", terms: [], kind: "banana" }, { text: "e", terms: [] },
+    ] }), 10)!;
+    assert.deepEqual(p.requirements.map((r) => r.kind), ["test", "manual", undefined, undefined, undefined]);
+  });
+
+  test("a requirement that a test exists is built from a test file", async () => {
+    const dir = repo({ "__tests__/timelineGolden.test.ts": TEST_FILE, "src/models/timeline.ts": "export function reduce() { return 1; }\n" });
+    const r = { ...req("R1", "A golden test runs the production parseRemoteEvent and compares the reducer output", ["parseRemoteEvent", "golden"]), kind: "test" as const };
+    const call = async (m: Msg[]) => JSON.stringify({ results: [{ id: "R1", verdict: "built", evidence: [{ file: "__tests__/timelineGolden.test.ts", quote: QUOTE }], note: "it does" }] });
+    const out = await checkRequirements({ call, repoRoot: dir, requirements: [r] });
+    assert.equal(out[0].verdict, "built");
+    assert.equal(out[0].evidence[0].file, "__tests__/timelineGolden.test.ts");
+  });
+
+  test("the same quote from a test file does not make a requirement on the CODE built", async () => {
+    const dir = repo({ "__tests__/timelineGolden.test.ts": TEST_FILE, "src/models/timeline.ts": "export function reduce() { return 1; }\n" });
+    const call = async (m: Msg[]) => JSON.stringify({ results: [{ id: "R1", verdict: "built", evidence: [{ file: "__tests__/timelineGolden.test.ts", quote: QUOTE }], note: "claimed" }] });
+    const out = await checkRequirements({ call, repoRoot: dir, requirements: [req("R1", "The timeline replays events through parseRemoteEvent and reduces them", ["parseRemoteEvent", "reduce"])] });
+    assert.notEqual(out[0].verdict, "built");
+  });
+
+  test("a manual step costs no model call, is neither built nor missing, and does not stop an audit from being all built", async () => {
+    const dir = repo({ "src/a.ts": "export const handler = () => 'handler';\n" });
+    const seen: string[] = [];
+    const call = async (m: Msg[]) => {
+      seen.push(m[1].content);
+      return JSON.stringify({ results: [{ id: "R1", verdict: "built", evidence: [{ file: "src/a.ts", quote: "export const handler = () => 'handler';" }], note: "" }] });
+    };
+    const reqs = [req("R1", "The handler exists", ["handler"]), { ...req("R2", "Run and report the broker-restart test on the VM", ["restart"]), kind: "manual" as const }];
+    const out = await checkRequirements({ call, repoRoot: dir, requirements: reqs });
+    assert.deepEqual(out.map((o) => o.verdict), ["built", "manual"]);
+    assert.ok(seen.every((m) => !m.includes("R2")), "the manual step was never put to the model");
+    const found = await checkExistence({ call: async (m: Msg[]) => (m[0].content.startsWith("The person wants to know") ? JSON.stringify({ applies: true, requirements: [{ text: "The handler exists", terms: ["handler"] }, { text: "Run the restart test on the VM", terms: ["restart"], kind: "manual" }] }) : call(m)), repoRoot: dir, request: "are we done?", docs: "doc", audit: true });
+    assert.equal(found.allBuilt, true);
+  });
+
+  test("the report puts manual steps apart and counts them separately", () => {
+    const text = renderExistence({
+      applies: true,
+      allBuilt: false,
+      note: "",
+      items: [
+        { req: { id: "R1", text: "The handler exists", terms: [], group: "Rules" }, verdict: "built", evidence: [{ file: "src/a.ts", quote: "q" }], missing: "", note: "" },
+        { req: { id: "R2", text: "Run the restart test on the VM", terms: [], group: "Manual tests", kind: "manual" }, verdict: "manual", evidence: [], missing: "", note: "A person has to do and report this; the code cannot show it." },
+      ],
+    });
+    assert.match(text, /Checked 2 requirements: 1 built, 1 for a person to do\./);
+    assert.match(text, /☐ Run the restart test on the VM/);
+  });
+});

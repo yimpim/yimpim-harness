@@ -621,9 +621,11 @@ async function checkWhatExists(text: string, client: OpenRouterClient, config: A
     if (found.applies) {
       console.log("\n🔎 [EXISTS] Checked what this asks for against the code (each quote below was verified in the file):\n" + renderExistence(found));
       if (reportOnly && !found.allBuilt) {
-        const left = found.items.filter((i) => i.verdict !== "built").length;
+        const manual = found.items.filter((i) => i.verdict === "manual").length;
+        const checkable = found.items.length - manual;
+        const left = found.items.filter((i) => i.verdict !== "built" && i.verdict !== "manual").length;
         console.log(
-          `\n📋 [EXISTS] ${found.items.length - left} of ${found.items.length} are already in the code; ${left} still need work or a closer look. Nothing was planned or changed, as you asked. ` +
+          `\n📋 [EXISTS] ${checkable - left} of ${checkable} checkable requirements are already in the code; ${left} still need work or a closer look.${manual ? ` ${manual} more are manual steps for a person, which the code cannot show.` : ""} Nothing was planned or changed, as you asked. ` +
             'To build them, ask again without "before we work": for example "finish what is left in <the brief>". The check runs again and only those are planned.'
         );
         existenceSection = existencePlannerSection(found);
@@ -636,7 +638,7 @@ async function checkWhatExists(text: string, client: OpenRouterClient, config: A
         return "handled";
       }
       existenceSection = existencePlannerSection(found);
-      existenceChecked = { text, remaining: found.items.filter((i) => i.verdict !== "built").length };
+      existenceChecked = { text, remaining: found.items.filter((i) => i.verdict !== "built" && i.verdict !== "manual").length };
     } else if (found.note) {
       console.log("[EXISTS] " + found.note);
     } else if (reportOnly) {
