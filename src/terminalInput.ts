@@ -25,7 +25,7 @@ import process from "node:process";
 import { runControl } from "./remote/control.js";
 import { stripAnsi } from "./richText.js";
 import { Writable } from "node:stream";
-import { PasteCollector } from "./pasteCollector.js";
+import { PasteCollector, settlePaste } from "./pasteCollector.js";
 import { readClipboardText } from "./clipboard.js";
 import { DESKTOP_SLASH_COMMANDS, SlashCommand, matchesTyped } from "./slashCommands.js";
 
@@ -545,10 +545,13 @@ function setup(): void {
       return;
     }
     if (key?.name === "paste-end") {
-      const shown = paste.end(rl?.line ?? "");
-      if (shown !== undefined && rl) {
-        (rl as any).line = shown;
-        (rl as any).cursor = shown.length;
+      const settled = settlePaste(paste, rl?.line ?? "");
+      if (rl) {
+        if (settled.folded) {
+          (rl as any).line = settled.line;
+          (rl as any).cursor = settled.line.length;
+        }
+        // Always repainted: nothing of the paste was echoed while it arrived (see settlePaste).
         refreshInputArea();
       }
       return;
