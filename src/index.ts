@@ -3823,8 +3823,32 @@ ${repairPlan
       // means REPAIR is looking at the same evidence QA had, not a paraphrase
       // of it, which is exactly where a repair loop tends to guess wrong.
       const latestScreenshot = result.screenshots?.[result.screenshots.length - 1];
+      // The screenshot goes to whichever repair model can SEE it. The check used to be on the Editor's model, but this call runs on
+      // the repair chain, which can be a different (text-only) set of models: the image then came back as a 404 from the provider.
+      // A repair model that cannot see images is swapped for the first vision chain configured for this kind of work; with none
+      // available the screenshot is left out (and said so), never sent to a model that will refuse it.
+      let repairModelsForCall = currentRepairModels;
+      let attachScreenshot = false;
+      if (latestScreenshot) {
+        if (await modelSupportsVision(currentRepairModels[0])) {
+          attachScreenshot = true;
+        } else {
+          const visionChain = [config.models.repairVision, config.models.editorVision, config.models.verifierVision].find(
+            (c): c is string[] => Array.isArray(c) && c.length > 0
+          );
+          if (visionChain && (await modelSupportsVision(visionChain[0]))) {
+            attachScreenshot = true;
+            repairModelsForCall = visionChain;
+            console.log(`[REPAIR] This failure has a screenshot, and ${currentRepairModels[0]} cannot see images, so this attempt uses a vision model: ${visionChain.join(", ")}.`);
+          } else {
+            console.log(
+              `[REPAIR] This failure has a screenshot, but ${currentRepairModels[0]} cannot see images and no vision model is set for repair (models.repairVision). Repairing from QA's text description instead.`
+            );
+          }
+        }
+      }
       const repairPayload =
-        editorSupportsVision && latestScreenshot
+        attachScreenshot && latestScreenshot
           ? withScreenshot(
               repairPrompt,
               latestScreenshot,
@@ -3847,7 +3871,7 @@ ${repairPlan
           client,
           config,
           agentTools,
-          models: currentRepairModels,
+          models: repairModelsForCall,
           agentName: "REPAIR",
           visionMode: usingEditorVision,
         });

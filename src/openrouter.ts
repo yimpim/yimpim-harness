@@ -410,6 +410,9 @@ export class OpenRouterClient {
     const agent = options?.agent ?? "unknown";
 
     for (const model of modelList) {
+      // Set when this model cannot read images at all: a fact about the model, not a failure, so it is neither retried nor
+      // counted against its health for the text-only calls that follow.
+      let cannotReadImages = false;
       for (let attempt = 1; attempt <= maxRetriesPerModel; attempt++) {
         const startTime = Date.now();
         const retrySuffix = attempt > 1 ? ` (retry ${attempt}/${maxRetriesPerModel})` : "";
@@ -672,7 +675,8 @@ export class OpenRouterClient {
           // unlike every OTHER timeout flavor (a cold connection, real
           // stream silence) or a 429/5xx, which genuinely can be transient
           // and still get the normal same-model retry below.
-          const skipRemainingRetries = err.name === "TimeoutError" && Boolean(err.budgetExceeded);
+          cannotReadImages = isImageUnsupportedError(err);
+          const skipRemainingRetries = (err.name === "TimeoutError" && Boolean(err.budgetExceeded)) || cannotReadImages;
 
           if (err.name === "TimeoutError") {
             console.log(
@@ -717,14 +721,48 @@ export class OpenRouterClient {
       // Reaching here means this model used up every attempt without returning
       // (credits waiting and a user Stop both exit differently). Remember it so
       // the NEXT call does not start by waiting on it again.
-      const failures = (this.modelHealth.get(model)?.failures ?? 0) + 1;
-      this.modelHealth.set(model, { failures, cooldownUntil: Date.now() + cooldownFor(failures) });
+      if (!cannotReadImages) {
+        const failures = (this.modelHealth.get(model)?.failures ?? 0) + 1;
+        this.modelHealth.set(model, { failures, cooldownUntil: Date.now() + cooldownFor(failures) });
+      }
 
       if (modelList.indexOf(model) < modelList.length - 1) {
         console.log(`[FALLBACK] Switching from ${model}...`);
       }
     }
 
+    // Every model in the chain refused the image: send the same request with the images replaced by a note, rather than failing a
+    // task over a screenshot a text-only model was never going to read.
+    if (lastError && isImageUnsupportedError(lastError)) {
+      const text = withoutImages(messages);
+      if (text) {
+        console.log(`[API] None of ${modelList.join(", ")} can read images — sending this request without them.`);
+        return this.complete(models, text, options);
+      }
+    }
+
     throw lastError || new Error("Failed all configured model attempts.");
   }
+}
+
+/** OpenRouter's answer when a model has no endpoint that accepts image input. It will not change on a retry. */
+export function isImageUnsupportedError(err: unknown): boolean {
+  return /No endpoints found that support image input/i.test(String((err as any)?.message ?? err ?? ""));
+}
+
+/** The same messages with every image part replaced by a short note. Undefined when there were no images to remove. */
+export function withoutImages(messages: ChatMessage[]): ChatMessage[] | undefined {
+  let removed = false;
+  const out = messages.map((m: any) => {
+    if (!Array.isArray(m?.content)) return m;
+    const content = m.content.map((part: any) => {
+      if (part && (part.type === "image_url" || part.type === "image" || part.type === "input_image")) {
+        removed = true;
+        return { type: "text", text: "[An image was attached here, but the model reading this cannot see images.]" };
+      }
+      return part;
+    });
+    return { ...m, content };
+  });
+  return removed ? (out as ChatMessage[]) : undefined;
 }
