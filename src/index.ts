@@ -612,6 +612,7 @@ async function checkWhatExists(text: string, client: OpenRouterClient, config: A
       request: text,
       docs: docs || (roadmapBrief ? `The roadmap's brief:\n${roadmapBrief}` : docs),
       audit: reportOnly,
+      onRequirements: (n) => console.log(`[EXISTS] Found ${n} requirement${n === 1 ? "" : "s"} in the document. Checking all of them against the code at once…`),
       shortlist,
       maxRequirements: config.existence.maxRequirements,
       built: builtByUnits(repoRoot),

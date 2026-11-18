@@ -365,6 +365,8 @@ export interface ExistenceArgs {
   exclude?: string[];
   /** The person asked how much of the document is done: it is read whole, every requirement in it is checked, and a question's wording does not stand the check down. */
   audit?: boolean;
+  /** Told how many requirements were found, before any of them is checked, so a big document is not a surprise. */
+  onRequirements?: (count: number) => void;
 }
 
 export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult> {
@@ -387,6 +389,7 @@ export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult>
     return { ...none, note: "The requirements could not be extracted, so nothing was checked against the code." };
   }
   if (!parsed || !parsed.applies) return none;
+  a.onRequirements?.(parsed.requirements.length);
   const items = await checkRequirements({ call: a.call, repoRoot: a.repoRoot, requirements: parsed.requirements, shortlist: a.shortlist, built: a.built, exclude: a.exclude });
   return { applies: true, items, allBuilt: items.length > 0 && items.every((i) => i.verdict === "built"), note: "" };
 }
