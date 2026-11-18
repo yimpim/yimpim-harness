@@ -74,3 +74,12 @@ describe("clearSetting", () => {
     assert.doesNotThrow(() => clearSetting(configPath, "models.editor"));
   });
 });
+
+import { PERSONAS } from "../src/models.js";
+import { findSetting } from "../src/settings.js";
+
+describe("every model role can be saved", () => {
+  test("each role the /model picker offers has a settings key to write to", () => {
+    for (const p of PERSONAS) assert.ok(findSetting(`models.${p.key}`), `models.${p.key} is offered by /model but is not a known setting`);
+  });
+});

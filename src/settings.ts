@@ -112,6 +112,32 @@ export const SETTINGS: SettingDef[] = [
       "models.verifier, which must then support vision itself, or these checks silently degrade.",
   },
   {
+    key: "models.designer",
+    type: "string[]",
+    group: "Models",
+    description:
+      "Optional. The logo designer (/design). Unlike the other roles this is a SET to rotate through, not a fallback chain: " +
+      "different models propose and draw different concepts, because one model alone settles into one style. Several models " +
+      "from different providers works best. Unset: reuses models.planner.",
+  },
+  {
+    key: "models.designerVision",
+    type: "string[]",
+    group: "Models",
+    description:
+      "Optional. Looks at the renders the designer makes and judges them. Unset: falls back to models.verifierVision, then " +
+      "models.editorVision.",
+  },
+  {
+    key: "models.security",
+    type: "string[]",
+    group: "Models",
+    description:
+      "Optional. Security work: the threat model for a sensitive task, the attacker-style review of risky changes, and " +
+      "/pentest. It runs rarely, so a frontier model is worth its cost here. A [primary, backup] chain like the other roles. " +
+      "Unset: falls back to models.verifier, then models.planner.",
+  },
+  {
     key: "provider.sort",
     type: "enum",
     choices: ["default", "throughput", "price", "latency"],

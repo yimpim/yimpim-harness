@@ -660,6 +660,10 @@ export function pauseInput(): void {
 export function resumeInput(): void {
   if (!installed || rl) return;
   setup();
+  // The menus that ran in between each closed their own readline, and closing one pauses stdin and drops raw mode. The new
+  // interface asks for both, but say it outright: a terminal left cooked or paused only delivers a line once Enter is pressed.
+  process.stdin.resume();
+  process.stdin.setRawMode?.(true);
 }
 
 /**
