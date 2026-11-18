@@ -30,6 +30,17 @@ import { extractTestFailureReport } from "./testReport.js";
 import { selectTests, failsBefore } from "./testGraph.js";
 import { failingTestFiles, healTests, type HealCall } from "./testHeal.js";
 import { runSuiteLogged } from "./testLog.js";
+import { passingTestFiles } from "./testRun.js";
+
+/**
+ * The evidence line for a green selected run names the test files that passed. A bare "all passed" gave the assertion judge
+ * nothing to tie a requirement to, so a correct fix was marked inconclusive and sent off to build extra tests.
+ */
+export function passedList(output: string, selected: string[]): string {
+  const ran = passingTestFiles(output);
+  const files = ran.length > 0 ? ran : selected;
+  return `all passed: ${files.join(", ")} (each file's own tests ran and passed)`;
+}
 import { NavHint, NavStepDecision, ProbeResult, probeAndroid, probeIOS, probeDesktopApp, probeExpoWeb, probePythonWeb, probeWeb } from "./visualProbes.js";
 import { NavFlowReplayer, nearestHintLabel } from "./uiFlows.js";
 import {
@@ -2592,7 +2603,7 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
     }
     const run = await runSuiteLogged(this.repoRoot, sel.selected);
     if (run.ok) {
-      ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: true, detail: `all passed (${scope})` });
+      ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: true, detail: `${passedList(run.output, sel.selected)} (${scope})` });
       return;
     }
     const failing = failingTestFiles(run.output);
@@ -2635,7 +2646,7 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
         detail: `${caused.length} test file(s) passed before this phase and fail now (${scope}): ${caused.join(", ")}${before ? "" : " (the earlier state could not be checked, so every failure is assumed to be this phase's)"}\n${report}`,
       });
     } else if (already.length > 0) {
-      ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: true, detail: `nothing this phase changed broke a test (${scope})` });
+      ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: true, detail: `nothing this phase changed broke a test. Passing now: ${passedList(run.output, sel.selected).replace(/^all passed: /, "")} (${scope})` });
     }
   }
 
