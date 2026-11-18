@@ -415,8 +415,24 @@ describe("an audit that only asks for findings", () => {
       "just check what we have against the brief",
       "tell me what is still missing",
       "report what's left",
+      "did we end up completing everything in the brief?",
+      "are we done?",
+      "have we finished everything in the roadmap?",
+      "is everything in the spec built?",
+      "what's still missing from the brief?",
+      "what is left?",
+      "how much is left to do",
     ]) assert.ok(wantsReportOnly(t), t);
-    for (const t of ["build the login screen", "add push notifications and then check they work", "fix the crash on launch"]) assert.ok(!wantsReportOnly(t), t);
+    for (const t of [
+      "build the login screen",
+      "add push notifications and then check they work",
+      "fix the crash on launch",
+      "finish what is left in the brief",
+      "complete everything in the brief",
+      "do you know what is left? then build it",
+      "is the settings screen missing a back button? add one",
+      "what is left in the brief should be built now.",
+    ]) assert.ok(!wantsReportOnly(t), t);
   });
   test("a typo in the front of a path still finds the document", () => {
     const dir = repo({ "reference/timeline-port/EXPO_PORT_BRIEF.md": "# brief", "reference/other/NOTES.md": "n" });
