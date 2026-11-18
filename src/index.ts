@@ -663,7 +663,7 @@ async function answerIfQuestion(
   forced = false,
   pendingAttachments: string[] = [],
   advisorMemory: { last?: { question: string; answer: string } } = {}
-): Promise<"handled" | "task" | "verify" | "program" | "roadmap" | "design" | "pentest" | "tests"> {
+): Promise<"handled" | "task" | "verify" | "program" | "roadmap" | "design" | "pentest" | "tests" | "audit"> {
   let intent: Intent = forced ? "question" : "task";
   intentFollowsAudit = false;
   let branchName: string | null = null;
@@ -797,14 +797,8 @@ async function answerIfQuestion(
   if (intent === "design") return "design";
   if (intent === "pentest") return "pentest";
   if (intent === "tests") return "tests";
-  // An audit reports what is done and what is left and builds nothing. If the comparison cannot be made (the check is switched
-  // off, or no requirements could be read out of the request), it is answered as a question from the code instead.
-  if (intent === "audit") {
-    existenceSection = "";
-    existenceChecked = null;
-    if ((await checkWhatExists(text, client, config, repoRoot, true)) === "handled") return "handled";
-    intent = "question";
-  }
+  // An audit reports what is done and what is left and builds nothing. The caller runs it as a job of its own, so its cost is counted.
+  if (intent === "audit") return "audit";
   if (intent !== "question") {
     existenceSection = "";
     existenceChecked = null;
@@ -5021,6 +5015,18 @@ async function main(): Promise<void> {
    * exact tokens and cost. The lifetime ledger attributes the calls to this task too. Inside a running task it adds nothing.
    */
   let closeOwnTask: ((state: "done" | "failed") => void) | undefined;
+  // Where the usage counters stood when the request being handled was typed, BEFORE the router (and the existence check) spent anything.
+  // A job's cost is measured from here, so those calls are part of what the request cost, not lost between tasks.
+  let requestUsageStart: UsageReport | null = null;
+  // Set when a job already printed its cost, so the same request is not summed twice on the console.
+  let costShownForRequest = false;
+  const printRequestCost = (label: string): void => {
+    if (requestUsageStart && !costShownForRequest) {
+      const spent = events.renderUsage(events.usageDelta(requestUsageStart), label);
+      if (spent) console.log(spent);
+    }
+    requestUsageStart = null;
+  };
   const asOwnTask = async (prompt: string, work: () => Promise<boolean>): Promise<void> => {
     if (taskRunning) {
       await work();
@@ -5028,7 +5034,7 @@ async function main(): Promise<void> {
     }
     currentTaskId = `task-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     currentPhaseForEvents = undefined;
-    currentTaskUsageStart = events.usageReport();
+    currentTaskUsageStart = requestUsageStart ?? events.usageReport();
     currentPhaseUsageStart = events.usageReport();
     currentPhaseUsageId = undefined;
     phaseUsageLog = {};
@@ -5039,6 +5045,11 @@ async function main(): Promise<void> {
     try {
       state = (await work()) ? "done" : "failed";
     } finally {
+      // What this job cost, on the console as well as on a paired phone (task.end carries the same numbers).
+      const spent = events.renderUsage(events.usageDelta(currentTaskUsageStart), "Cost of this job");
+      if (spent) console.log(spent);
+      costShownForRequest = true;
+      requestUsageStart = null;
       closeOwnTask?.(state);
     }
   };
@@ -5103,6 +5114,19 @@ async function main(): Promise<void> {
       return false;
     }
   });
+
+  // An audit (compare the work to a document, report, build nothing) is a job of its own: its model calls are attributed to it, a paired
+  // phone sees it as a task with its exact cost, and the console says what it cost. Resolves false when the comparison could not be made.
+  const runAuditJob = async (request: string): Promise<boolean> => {
+    let handled = false;
+    await asOwnTask(("Audit: " + request).slice(0, 200), async () => {
+      existenceSection = "";
+      existenceChecked = null;
+      handled = (await checkWhatExists(request, client, config, repoRoot, true)) === "handled";
+      return true;
+    });
+    return handled;
+  };
 
   const runDesignJob = (request: string): Promise<void> => asOwnTask(("/design " + request).trim(), async () => {
     const models = config.models.designer ?? config.models.planner;
@@ -5400,8 +5424,21 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
     // A roadmap unit is a build task by definition; classifying its text could
     // misread it as a question and answer it instead of building it.
     if (instructions.trim() && !args.yes && !(fromQueue && activeUnitId)) {
+      requestUsageStart = events.usageReport();
+      costShownForRequest = false;
       const outcome = await answerIfQuestion(instructions.trim(), client, config, repo, repoRoot, agentTools, memory, memoryFile, false, pendingAttachments, advisorMemory);
-      if (outcome === "handled") return;
+      if (outcome === "handled") {
+        printRequestCost("Cost of that request");
+        return;
+      }
+      if (outcome === "audit") {
+        if (!(await runAuditJob(instructions.trim()))) {
+          costShownForRequest = false;
+          await answerIfQuestion(instructions.trim(), client, config, repo, repoRoot, agentTools, memory, memoryFile, true, pendingAttachments, advisorMemory);
+          printRequestCost("Cost of that request");
+        }
+        return;
+      }
       if (outcome === "design") {
         await runDesignJob(instructions.trim());
         return;
@@ -5663,6 +5700,8 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
           // One cheap classification call per typed instruction, biased toward
           // "task" on anything uncertain — see answerIfQuestion's own comment
           // for why that bias is the right default.
+          requestUsageStart = events.usageReport();
+          costShownForRequest = false;
           let outcome = await answerIfQuestion(trimmed, client, config, repo, repoRoot, agentTools, memory, memoryFile, false, pendingAttachments, advisorMemory);
           if (outcome === "design") {
             await runDesignJob(trimmed);
@@ -5681,6 +5720,14 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
             }
             outcome = "handled";
           }
+          if (outcome === "audit") {
+            // The comparison could not be made (the check is off, or nothing could be read out of the request): answer it from the code.
+            if (!(await runAuditJob(trimmed))) {
+              costShownForRequest = false;
+              await answerIfQuestion(trimmed, client, config, repo, repoRoot, agentTools, memory, memoryFile, true, pendingAttachments, advisorMemory);
+            }
+            outcome = "handled";
+          }
           if (outcome === "roadmap") {
             const said = roadmapIntent as { action: unknown; request: unknown } | null;
             if ((await runRoadmapCommand(commandFromIntent(said?.action, said?.request))) === "started") continue taskLoop;
@@ -5692,6 +5739,8 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
             // Chosen "single task": what the spec asks for is still checked against the code first.
             outcome = programResult === "single" ? ((await checkWhatExists(trimmed, client, config, repoRoot)) === "handled" ? "handled" : "task") : "handled";
           }
+          // A request that ended here without becoming a task (an answer, a note, a git action) still cost something: say what.
+          if (outcome === "handled") printRequestCost("Cost of that request");
           if (outcome !== "handled") {
             verifyOnly = outcome === "verify";
             // This turn wasn't itself a question — if the previous turn WAS
@@ -5715,6 +5764,8 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
         }
         } catch (err: any) {
           instructions = "";
+          // What the failed request cost is not carried into whatever task comes next.
+          printRequestCost("Cost of that request");
           console.error(`\n[ERROR] That didn't complete: ${err.message}`);
           console.error(`[ERROR] Nothing was changed by it — back to a fresh prompt.\n`);
         }
@@ -5821,7 +5872,8 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
     // A loop-back session shares one cumulative usage tracker across every
     // task it runs — without this snapshot, this task's "done" summary would
     // silently fold in the previous task's spend too.
-    currentTaskUsageStart = events.usageReport();
+    currentTaskUsageStart = requestUsageStart ?? events.usageReport();
+    requestUsageStart = null;
     // Also reset here, not just at each phase's own start below: Discovery
     // and Planner both run BEFORE any phase begins, and their own agent.end
     // pushes would otherwise report phaseTokensUsed/phaseCostUsd left over

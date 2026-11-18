@@ -739,3 +739,28 @@ describe("requirements about a test, and steps only a person can do", () => {
     assert.match(text, /☐ Run the restart test on the VM/);
   });
 });
+
+describe("what a single-use job costs is counted and shown", () => {
+  const src = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
+
+  test("an audit runs as a job of its own, so its calls are attributed and a paired phone sees task.end with the cost", () => {
+    assert.match(src, /const runAuditJob = async \(request: string\): Promise<boolean> => \{[\s\S]*?await asOwnTask\(/);
+    assert.match(src, /if \(intent === "audit"\) return "audit";/);
+    assert.ok(!/intent === "audit"[\s\S]{0,200}checkWhatExists\(text/.test(src), "the router does not run the audit itself");
+  });
+
+  test("every job prints what it cost on the console", () => {
+    assert.match(src, /events\.renderUsage\(events\.usageDelta\(currentTaskUsageStart\), "Cost of this job"\)/);
+    assert.match(src, /printRequestCost\("Cost of that request"\)/);
+  });
+
+  test("the router's and the existence check's calls count towards the job or task they led to", () => {
+    const starts = src.match(/currentTaskUsageStart = requestUsageStart \?\? events\.usageReport\(\);/g) ?? [];
+    assert.equal(starts.length, 2, "a job (asOwnTask) and a build task both start from where the request started");
+    assert.match(src, /requestUsageStart = events\.usageReport\(\);\s+costShownForRequest = false;\s+(let outcome|const outcome) = await answerIfQuestion/);
+  });
+
+  test("a request that fails does not leak its cost marker into the next task", () => {
+    assert.match(src, /instructions = "";\s+\/\/ What the failed request cost is not carried into whatever task comes next\.\s+printRequestCost/);
+  });
+});
