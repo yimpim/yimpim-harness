@@ -44,7 +44,8 @@ import { splitJobs, unplannedJobs } from "./jobsList.js";
 import { healTests, renderHealReport, failingTestFiles } from "./testHeal.js";
 import { renderLog, runSuiteLogged } from "./testLog.js";
 import { fixTaskFor, isFixTask, savePendingFixes, settlePendingFixes } from "./testSettle.js";
-import { checkExistence, existencePlannerSection, renderExistence, wantsReportOnly, isAuditFollowUp } from "./existence.js";
+import { checkExistence, existencePlannerSection, renderExistence } from "./existence.js";
+import { type Intent, parseIntentReply, routeFacts } from "./routeIntent.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { runSecurityAudit } from "./securityAudit.js";
 import { existingDirOnly, existingFilesOnly, projectLayout, renderLayout } from "./projectLayout.js";
@@ -580,6 +581,8 @@ function roadmapStateLine(repoRoot: string): string {
 
 // The last report-only audit: so "lets work on what existence found" on the next prompt knows what was found.
 let lastAudit: { request: string; report: string } | null = null;
+// Set by the router for the request being handled: it carries on from the audit report just given.
+let intentFollowsAudit = false;
 
 // The request last checked and how many of the things it asks for are not built yet (null: not known).
 let existenceChecked: { text: string; remaining: number | null } | null = null;
@@ -588,8 +591,7 @@ let existenceChecked: { text: string; remaining: number | null } | null = null;
  * Before anything is planned: what does this request ask for that the code already has? Sets existenceSection for the
  * Planner (only the partial and missing work is planned) and returns "handled" when everything is already built.
  */
-async function checkWhatExists(text: string, client: OpenRouterClient, config: AgentConfig, repoRoot: string): Promise<"handled" | "task"> {
-  const reportOnly = wantsReportOnly(text);
+async function checkWhatExists(text: string, client: OpenRouterClient, config: AgentConfig, repoRoot: string, reportOnly = false): Promise<"handled" | "task"> {
   if (!config.existence.enabled) return "task";
   // Already checked this very request (the program question asks first): the Planner section is still set, do not pay twice.
   if (existenceChecked?.text === text) return "task";
@@ -602,11 +604,14 @@ async function checkWhatExists(text: string, client: OpenRouterClient, config: A
     } catch {
       shortlist = [];
     }
+    // An audit with no document named falls back to the active roadmap's own brief: "are we done with the roadmap?"
+    const roadmapBrief = reportOnly && !docs ? loadRoadmap(repoRoot)?.brief : undefined;
     const found = await checkExistence({
-      call: (messages) => runLabeledCompletion({ client, models: config.models.planner, messages: messages as any, agentName: "EXISTENCE", jsonMode: true, reason: "Checking what already exists" }),
+      call: (messages) => runLabeledCompletion({ client, models: config.models.planner, messages: messages as any, agentName: "EXISTENCE", jsonMode: true, reason: reportOnly ? "Checking the work against the document" : "Checking what already exists" }),
       repoRoot,
       request: text,
-      docs,
+      docs: docs || (roadmapBrief ? `The roadmap's brief:\n${roadmapBrief}` : docs),
+      audit: reportOnly,
       shortlist,
       maxRequirements: config.existence.maxRequirements,
       built: builtByUnits(repoRoot),
@@ -655,10 +660,9 @@ async function answerIfQuestion(
   forced = false,
   pendingAttachments: string[] = [],
   advisorMemory: { last?: { question: string; answer: string } } = {}
-): Promise<"handled" | "task" | "verify" | "program" | "roadmap" | "design" | "pentest"> {
-  let intent: "question" | "task" | "verify" | "git_review" | "branch_only" | "merge_only" | "note" | "program" | "roadmap" | "design" | "pentest" = forced
-    ? "question"
-    : "task";
+): Promise<"handled" | "task" | "verify" | "program" | "roadmap" | "design" | "pentest" | "tests"> {
+  let intent: Intent = forced ? "question" : "task";
+  intentFollowsAudit = false;
   let branchName: string | null = null;
   turnDocuments = [];
   roadmapIntent = null;
@@ -684,6 +688,7 @@ async function answerIfQuestion(
             role: "user",
             content:
               `Context about the project (not part of the request):\n${roadmapStateLine(repoRoot)}\n\n` +
+              `${routeFacts({ numberedJobs: splitJobs(text).jobs.length, lastAuditRequest: lastAudit?.request })}` +
               `${renderLayout(projectLayout(repoRoot))}${pendingStepsBlock}The request:\n${text}`,
           },
         ],
@@ -699,28 +704,10 @@ async function answerIfQuestion(
         typeof response === "string"
           ? response
           : response?.content ?? response?.choices?.[0]?.message?.content ?? "{}";
-      const parsed = JSON.parse(content || "{}");
-      // Only ever move OFF the "task" default on a confident match — anything
-      // else (including a malformed/unexpected value) falls through to the
-      // full pipeline, the same fail-open posture used everywhere uncertain
-      // in this app.
-      if (
-        parsed?.intent === "question" ||
-        parsed?.intent === "verify" ||
-        parsed?.intent === "git_review" ||
-        parsed?.intent === "branch_only" ||
-        parsed?.intent === "merge_only" ||
-        parsed?.intent === "note" ||
-        parsed?.intent === "program" ||
-        parsed?.intent === "roadmap" ||
-        parsed?.intent === "design" ||
-        parsed?.intent === "pentest"
-      ) {
-        intent = parsed.intent;
-      }
-      // Three or more numbered jobs, "in order", are a program whatever the classifier leaned toward: it is offered the roadmap
-      // (or a single task) instead of being planned as just its first job.
-      if (intent === "task" && splitJobs(text).jobs.length >= 3) intent = "program";
+      // The router's own answer is the route. An unusable reply is a plain task (the fail-open default used everywhere here).
+      const parsed = parseIntentReply(content);
+      intent = parsed.intent;
+      intentFollowsAudit = parsed.followsLastAudit && lastAudit !== null;
       // The model picked these from what it was shown; only what is really on
       // disk is kept, so a made-up path is dropped and never used.
       turnDocuments = existingFilesOnly(repoRoot, parsed?.documents, 4);
@@ -736,7 +723,9 @@ async function answerIfQuestion(
       if (typeof parsed?.branch === "string" && parsed.branch.trim()) {
         branchName = parsed.branch.trim();
       }
-    } catch {}
+    } catch (err: any) {
+      console.log(`[ROUTER] Could not work out what that asks for (${String(err?.message ?? err).slice(0, 80)}), so it is treated as a task.`);
+    }
   }
 
   // "Review/commit/clean up what's already uncommitted" has no business going
@@ -804,6 +793,15 @@ async function answerIfQuestion(
   if (intent === "roadmap") return "roadmap";
   if (intent === "design") return "design";
   if (intent === "pentest") return "pentest";
+  if (intent === "tests") return "tests";
+  // An audit reports what is done and what is left and builds nothing. If the comparison cannot be made (the check is switched
+  // off, or no requirements could be read out of the request), it is answered as a question from the code instead.
+  if (intent === "audit") {
+    existenceSection = "";
+    existenceChecked = null;
+    if ((await checkWhatExists(text, client, config, repoRoot, true)) === "handled") return "handled";
+    intent = "question";
+  }
   if (intent !== "question") {
     existenceSection = "";
     existenceChecked = null;
@@ -5409,6 +5407,12 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
         await runPentestJob(instructions.trim());
         return;
       }
+      if (outcome === "tests") {
+        await runTestHealJob();
+        if (!pendingTestFixTask) return;
+        instructions = pendingTestFixTask;
+        pendingTestFixTask = undefined;
+      }
       // A big request run unattended: a roadmap when it is clearly too big for one task, else one task; either way it is
       // checked against the code first.
       if (outcome === "program") {
@@ -5665,6 +5669,15 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
             await runPentestJob(trimmed);
             outcome = "handled";
           }
+          if (outcome === "tests") {
+            await runTestHealJob();
+            if (pendingTestFixTask) {
+              queuedInstructions = pendingTestFixTask;
+              pendingTestFixTask = undefined;
+              continue taskLoop;
+            }
+            outcome = "handled";
+          }
           if (outcome === "roadmap") {
             const said = roadmapIntent as { action: unknown; request: unknown } | null;
             if ((await runRoadmapCommand(commandFromIntent(said?.action, said?.request))) === "started") continue taskLoop;
@@ -5688,7 +5701,7 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
             const advice = advisorMemory.last;
             advisorMemory.last = undefined;
             // The same for an audit that only reported: "lets work on what existence found" carries the request and the findings.
-            const audit = !advice && lastAudit && isAuditFollowUp(trimmed) ? lastAudit : null;
+            const audit = !advice && lastAudit && intentFollowsAudit ? lastAudit : null;
             if (audit) lastAudit = null;
             instructions = advice
               ? `${trimmed}\n\n[Context: you previously answered "${advice.question}" with the following — use it if this request refers to it:\n${advice.answer}]`

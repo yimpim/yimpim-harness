@@ -14,6 +14,6 @@ describe("verify is read-only", () => {
   test("the intent prompt keeps document audits out of verify", () => {
     const p = src("prompts.ts");
     assert.match(p, /NOT "verify": checking WORK AGAINST A DOCUMENT/);
-    assert.match(p, /only what is missing is planned/);
+    assert.match(p, /it is "audit"; when they want the missing part built it is "task"/);
   });
 });

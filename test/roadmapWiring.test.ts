@@ -5,6 +5,7 @@
  * roadmap instead of a queue that "no" deletes.
  */
 import { test, describe } from "node:test";
+import { parseIntentReply } from "../src/routeIntent.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
@@ -69,7 +70,7 @@ describe("the classifier decides when a request is a roadmap, not the user typin
   });
 
   test("a program-sized request is handed back to the prompt loop, which offers a roadmap", () => {
-    assert.match(src, /parsed\?\.intent === "program"/);
+    assert.equal(parseIntentReply(JSON.stringify({ intent: "program" })).intent, "program");
     assert.match(src, /if \(intent === "program"\) \{[\s\S]*?return "program";/);
     assert.match(src, /const programResult = await handleProgram\(trimmed, programReferenceHint\);\n\s+if \(programResult === "started"\) continue taskLoop;/);
   });

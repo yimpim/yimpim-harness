@@ -920,7 +920,23 @@ Respond ONLY with valid JSON:
  * that should have been a "task" has the exact same silent-no-op failure
  * mode as a "question" misclassification would.
  */
-export const INTENT_SYSTEM = `Classify what the user wants. Respond with ONLY this JSON: {"intent": "question" | "task" | "verify" | "git_review" | "branch_only" | "merge_only" | "note" | "program" | "roadmap" | "design" | "pentest", "branch": string | null, "reference": string | null, "documents": string[], "roadmapAction": "show" | "run" | "add" | "drop" | null, "roadmapRequest": string | null, "resolvedManualSteps": string[]}
+export const INTENT_SYSTEM = `You route what the user typed to the part of a coding agent that should handle it. Pick the ONE route whose job matches what they actually want. Judge the meaning of the whole request, not particular words: the same wish can be worded a hundred ways. A "Facts about the session" block may precede the request; use it. Respond with ONLY this JSON: {"intent": "question" | "task" | "verify" | "git_review" | "branch_only" | "merge_only" | "note" | "program" | "roadmap" | "design" | "pentest" | "audit" | "tests", "branch": string | null, "reference": string | null, "documents": string[], "roadmapAction": "show" | "run" | "add" | "drop" | null, "roadmapRequest": string | null, "followsLastAudit": boolean, "resolvedManualSteps": string[]}
+
+"task" — they want something built, changed, fixed or FINISHED. This includes carrying on with unfinished work: "finish what is left in the
+  brief", "do the rest", "build what's missing", "complete the spec". Before anything is planned the code is checked against the request, so only what
+  is really missing gets built; you do not need to separate "finish it" from "build it". When it is unclear what else fits, choose "task".
+  Set "followsLastAudit" true ONLY when the Facts say an audit report was just given and this request carries on from it (a short "finish it", "do the
+  rest", "fix what it found"); otherwise false.
+
+"audit" — they want to KNOW what is done and what is left of a body of work, answered by reading the code against a brief, spec, roadmap or requirements.
+  Nothing is built or changed. It is a question about completeness or progress: "did we finish everything in the brief?", "are we done with the
+  roadmap?", "check reference/X.md against the code and tell me what's left", "what's still missing from the spec?", "see if we completed it all
+  before we work on anything". Not "task": they have not asked for the missing part to be built. Not "question": the answer must come from
+  comparing the code to the document, not from general knowledge. Not "verify": nothing is being run.
+
+"tests" — they want the project's failing or broken tests fixed, or the test suite brought back to green: "fix the failing tests", "get the tests
+  passing", "heal the test suite", "the tests are all red, sort them out". Not "verify" (that is running the app or its tests to see whether
+  something works), and not a change to the app's code.
 
 "question" — they want information, advice, or an opinion, nothing more.
   Examples: "what's the best stack for a todo app?", "should I use Postgres
@@ -968,15 +984,10 @@ export const INTENT_SYSTEM = `Classify what the user wants. Respond with ONLY th
   message describes a new feature or a concrete change to make regardless of
   what's found ("add X", "change Y to Z"), that is "task" instead, even if it
   also asks you to verify the result afterward.
-  NOT "verify": checking WORK AGAINST A DOCUMENT. "We finished the brief in
-  docs/X.md, check that everything in it is done", "see what of this spec is
-  built and do the rest", "compare the code to the requirements". That is not
-  running the app to see if it behaves; it is reading the code against a list
-  of requirements, finding what is built and what is missing, and doing the
-  missing part. Classify it "task" (a very large document is "program"): the
-  work already in the code is found first and only what is missing is planned.
+  NOT "verify": checking WORK AGAINST A DOCUMENT (a brief, spec, roadmap, requirements). That is not running the app to see if it behaves. When they
+  want to KNOW what is done and what is left it is "audit"; when they want the missing part built it is "task" (a very large document is "program").
 
-"program" — a request for a WHOLE body of work that cannot be one task: building a complete product, app, site or
+"program" — a request for a WHOLE body of work that cannot be one task (three or more separate numbered jobs to do in order is one): building a complete product, app, site or
   system from an idea ("build me something like X", "an app for Y with accounts, listings, messaging and payments");
   rebuilding, porting, converting or migrating an existing app, codebase or reference folder to another platform,
   language or stack; or a long list of separate features asked for at once. The signal is SIZE AND BREADTH (many

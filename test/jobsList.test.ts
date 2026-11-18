@@ -67,11 +67,12 @@ describe("numbered jobs in a request", () => {
   });
 });
 
-describe("three or more numbered jobs are a program", () => {
-  test("the classifier's lean toward a single task is overridden", async () => {
+describe("numbered jobs reach the router as a fact, not as a rule that overrules it", () => {
+  test("the router is told how many jobs the request lists, and nothing overrides its choice", async () => {
     const fs = await import("node:fs");
     const src = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
-    assert.match(src, /if \(intent === "task" && splitJobs\(text\)\.jobs\.length >= 3\) intent = "program";/);
+    assert.match(src, /numberedJobs: splitJobs\(text\)\.jobs\.length/);
+    assert.ok(!/intent = "program";\s*$/m.test(src.split("answerIfQuestion")[1]?.slice(0, 6000) ?? ""), "no code forces the program route");
     assert.equal(splitJobs(REQUEST).jobs.length, 4);
     assert.equal(splitJobs("1. one\n2. two").jobs.length, 2, "two jobs stay a task");
   });
