@@ -101,3 +101,15 @@ describe("was it already red", () => {
     assert.equal(await failsBefore({ repoRoot: dir, files: ["x.test.ts"], run: async () => ({ ok: true, output: "" }) }), undefined);
   });
 });
+
+import { passedList } from "../src/verifierTools.js";
+
+describe("the evidence for a green selected run names the tests", () => {
+  test("from the runner's PASS lines", () => {
+    const s = passedList("PASS __tests__/gapRecovery.test.ts\nPASS __tests__\\eventLog.test.ts\nTests: 9 passed", ["x.test.ts"]);
+    assert.match(s, /all passed: __tests__\/gapRecovery\.test\.ts, __tests__\/eventLog\.test\.ts/);
+  });
+  test("from the selection when the runner prints no PASS lines", () => {
+    assert.match(passedList("5 passed", ["tests/test_a.py"]), /all passed: tests\/test_a\.py/);
+  });
+});
