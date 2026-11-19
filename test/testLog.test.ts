@@ -201,3 +201,73 @@ describe("a helper in the test folder is not logged as a green test", () => {
     assert.deepEqual(staleSince(dir), ["__tests__/a.test.ts"], "the helper is never listed as stale");
   });
 });
+
+import { recordHealOutcome, healParked, HEAL_PARK_AT } from "../src/testLog.js";
+
+describe("a test that cannot be healed is not paid for again in every phase", () => {
+  const red = () => recordRun(dir, [], { ok: false, output: "FAIL __tests__/a.test.ts\nPASS __tests__/b.test.ts" });
+  const A = "__tests__/a.test.ts";
+
+  test("one real failure to fix it parks it", () => {
+    red();
+    assert.equal(healParked(dir, A), false);
+    recordHealOutcome(dir, A, { status: "unhealed", note: "the same failure came back, so the file was put back as it was" });
+    assert.equal(healParked(dir, A), true);
+  });
+  test("a model call that failed outright takes two to park it, since it says nothing about the test", () => {
+    red();
+    recordHealOutcome(dir, A, { status: "unhealed", note: "the model call failed: terminated" });
+    assert.equal(healParked(dir, A), false);
+    recordHealOutcome(dir, A, { status: "unhealed", note: "the model call failed: terminated" });
+    assert.equal(healParked(dir, A), true);
+    assert.equal(HEAL_PARK_AT, 2);
+  });
+  test("a fix clears it", () => {
+    red();
+    recordHealOutcome(dir, A, { status: "code-bug", note: "the code is wrong" });
+    assert.equal(healParked(dir, A), true);
+    recordHealOutcome(dir, A, { status: "healed", note: "updated" });
+    assert.equal(healParked(dir, A), false);
+    assert.equal(loadLog(dir).files[A].healStrikes, undefined);
+  });
+  test("passing again clears it", () => {
+    red();
+    recordHealOutcome(dir, A, { status: "code-bug", note: "x" });
+    allGreen();
+    assert.equal(healParked(dir, A), false);
+    assert.equal(loadLog(dir).files[A].healStrikes, undefined);
+  });
+  test("it stays parked as the code around it changes, which is what happens in every phase", () => {
+    red();
+    recordHealOutcome(dir, A, { status: "unhealed", note: "same failure" });
+    write("src/a.ts", "export const a = 99;");
+    assert.equal(healParked(dir, A), true, "the fingerprint changed, the test file did not");
+  });
+  test("but editing the test file itself tries it again", () => {
+    red();
+    recordHealOutcome(dir, A, { status: "unhealed", note: "same failure" });
+    write(A, `import { a } from "../src/a";\nexpect(a).toBe(2);`);
+    assert.equal(healParked(dir, A), false);
+  });
+  test("a test never logged has nothing to park, and a green one is never parked", () => {
+    recordHealOutcome(dir, "__tests__/never.test.ts", { status: "unhealed", note: "x" });
+    assert.equal(healParked(dir, "__tests__/never.test.ts"), false);
+    allGreen();
+    assert.equal(healParked(dir, A), false);
+  });
+  test("/tests log says so", () => {
+    red();
+    recordHealOutcome(dir, A, { status: "unhealed", note: "same failure" });
+    assert.match(renderLog(dir), /not retried in phases: healing failed; \/tests heal tries again/);
+  });
+});
+
+describe("the wiring", () => {
+  const read = (p: string) => fs.readFileSync(new URL(p, import.meta.url), "utf-8").replace(/\r\n/g, "\n");
+  test("every heal outcome is recorded, and the phase gate retries only tests that are not parked", () => {
+    assert.match(read("../src/testHeal.ts"), /recordHealOutcome\(opts\.repoRoot, r\.file, r\)/);
+    const gate = read("../src/verifierTools.ts");
+    assert.match(gate, /const parked = already\.filter\(\(f\) => healParked\(this\.repoRoot, f\)\);/);
+    assert.match(gate, /files: retry, call/);
+  });
+});

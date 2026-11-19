@@ -19,9 +19,11 @@ import { promisify } from "util";
 import { isTestPath } from "./focusTests.js";
 import { parseLenient } from "./jsonRepair.js";
 import { runSuite, failingTestFiles, type SuiteRun } from "./testRun.js";
-import { runSuiteLogged, unchangedGreen, verdictFor, saveVerdict } from "./testLog.js";
+import { runSuiteLogged, unchangedGreen, verdictFor, saveVerdict, recordHealOutcome } from "./testLog.js";
 import { listTestFiles } from "./focusTests.js";
 import { reachableFiles } from "./testGraph.js";
+import { digestFailure } from "./failureDigest.js";
+import { applyEdits, parseEdits, presentLargeFile, readRange, searchRepo, LARGE_FILE_LINES } from "./healEdits.js";
 import { removeTest, renderRemoval, recordRemoved } from "./testSettle.js";
 
 export { runSuite, failingTestFiles, type SuiteRun };
@@ -128,12 +130,14 @@ export function gutted(before: string, after: string): string | undefined {
 
 const SYSTEM = `You repair a failing test file. A project's tests went red because the code changed and the tests were not updated with it.
 You decide WHO is wrong:
-- "stale-test": the code's new behaviour is intended and the test still asserts the old one (renamed export, changed output, new argument, moved file, changed text). It ALSO covers a broken test ENVIRONMENT: a native module that needs a mock in Jest (storage, device or platform modules, framework internals), a missing jest.mock, a provider or wrapper the component now needs. Fix those inside the test file (jest.mock(...) at the top, a wrapper in render). A module that fails to load under Jest is NOT a code bug. Return the whole corrected test file.
+- "stale-test": the code's new behaviour is intended and the test still asserts the old one (renamed export, changed output, new argument, moved file, changed text). It ALSO covers a broken test ENVIRONMENT: a native module that needs a mock in Jest (storage, device or platform modules, framework internals), a mock that no longer provides something the code now uses, a provider or wrapper the component now needs. Fix those inside the test file. A module that fails to load under a test runner is NOT a code bug.
+Start from the FAILURE section: it lists the distinct causes with how many times each happens and the first line of the project's own code each points at. Many failures usually share ONE cause; fix the cause, not each test. If a mock is missing something, look at how other tests in the project mock the same module (search for it) and match them.
 - "code-bug": ONLY when the code's behaviour is wrong: the test asserts something sensible and the code now does something else that is a regression. Do NOT change the test. Say what is broken in the code and where.
-- "need": you cannot decide without more files. Ask for them: {"need":["path/one","path/two"]}. Any file in the repo can be asked for, including components, config and setup files. Ask instead of guessing.
+- "need": you cannot decide without more. Ask for it: {"need":["path/one",{"path":"path/two","from":120,"to":260},{"search":"someName"}]}. A string is a whole file, an object with a path is a range of lines, and a search finds where a name is defined, used or mocked across the project. Ask instead of guessing.
 - "unclear": only after you have asked for what you need and it still does not settle it.
-Rules for a stale test: keep every case that is still meaningful, update expected values and calls to match the code you were shown, never delete assertions or skip tests to make it pass, never loosen an assertion into one that cannot fail. Mock only what the test already mocked.
-Answer with JSON only: {"verdict":"stale-test|code-bug|unclear","reason":"one sentence","test":"the complete new test file (stale-test only)"} or {"need":[...]}.`;
+Rules for a stale test: keep every case that is still meaningful, update expected values and calls to match the code you were shown, never delete assertions or skip tests to make it pass, never loosen an assertion into one that cannot fail. Mock only what the test already mocked, plus what the code now needs.
+Answer with JSON only: {"verdict":"stale-test|code-bug|unclear","reason":"one sentence","edits":[{"find":"exact existing text","replace":"new text"}]} or {"need":[...]}.
+"edits" are applied in order; each "find" is copied EXACTLY from the file (never the line-number prefix), as short as it can be while matching once. For a test file under ${LARGE_FILE_LINES} lines you may instead return the complete corrected file as "test"; for a longer one ALWAYS use edits and never return the whole file.`;
 
 function matchEol(original: string, next: string): string {
   const crlf = original.includes("\r\n");
@@ -154,6 +158,16 @@ async function healOne(opts: HealOptions, file: string): Promise<HealResult> {
   const r = await healOneInner(opts, file, trace);
   if (r.status !== "healed" && r.status !== "already-green") r.failure = trace.output;
   return r;
+}
+
+/**
+ * What a worker is told about a failure: the digest (distinct causes, counts, the first line of the project's own code each points
+ * at) and the start of the raw output. When no cause can be read out of the output, the raw tail, as before.
+ */
+export function failureText(output: string, repoRoot: string, file: string): string {
+  const clean = output.replace(ANSI, "");
+  const digest = digestFailure(clean, repoRoot, file);
+  return digest.text ? `${digest.text}\n\nRAW OUTPUT (start)\n${clean.slice(0, 3000)}` : clean.slice(-14_000);
 }
 
 async function healOneInner(opts: HealOptions, file: string, trace: { output: string }): Promise<HealResult> {
@@ -186,10 +200,14 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   try {
     others = reachableFiles(repoRoot, file).filter((f) => !provided.has(f) && !/(^|\/)node_modules\//.test(f));
   } catch {}
+  // A source file longer than this is not pasted whole: its start, and the lines named in the failure, are enough to begin with.
   const sourceText = sources
     .map((s) => {
       try {
-        return `--- ${s}\n${fs.readFileSync(path.join(repoRoot, s), "utf-8")}`;
+        const text = fs.readFileSync(path.join(repoRoot, s), "utf-8");
+        return text.split(/\r?\n/).length > LARGE_FILE_LINES
+          ? `--- ${s} (${text.split(/\r?\n/).length} lines; the start is shown, ask for other lines)\n${readRange(repoRoot, s, 1, 200)?.replace(/^--- .*\n/, "") ?? ""}`
+          : `--- ${s}\n${text}`;
       } catch {
         return "";
       }
@@ -197,6 +215,11 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     .filter(Boolean)
     .join("\n\n");
   const history = await gitHistory(repoRoot, [file, ...sources]);
+
+  const lineCount = original.split(/\r?\n/).length;
+  const large = lineCount > LARGE_FILE_LINES;
+  const digest0 = digestFailure(first.output.replace(ANSI, ""), repoRoot, file);
+  const view = large ? presentLargeFile(original, file, digest0, repoRoot) : original;
 
   const seen = new Set<string>();
   let current = first;
@@ -207,19 +230,25 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     {
       role: "user",
       content:
-        `TEST FILE ${file}\n${original}\n\nFAILURE (this file run on its own)\n${current.output.replace(ANSI, "").slice(-14_000)}\n\n` +
+        `TEST FILE ${file}\n${view}\n\nFAILURE (this file run on its own)\n${failureText(current.output, repoRoot, file)}\n\n` +
         `SOURCE IT IMPORTS OR NAMES\n${sourceText || "(none could be resolved)"}\n\n` +
         `OTHER FILES IT REACHES (ask for any you need)\n${others.length ? others.join("\n") : "(none)"}\n\nRECENT GIT HISTORY\n${history || "(none)"}`,
     },
   ];
 
+  // Set when the last answer was not applied (its edits did not match, or it was refused): the file was not changed and not run again,
+  // so the failure is of course the same, and that is no reason to stop: the model is told why and tries again.
+  let retryUnchanged = false;
   for (;;) {
-    const key = failureKey(current.output);
-    if (seen.has(key)) {
-      fs.writeFileSync(abs, original);
-      return { file, status: "unhealed", note: "the same failure came back, so the file was put back as it was", attempts };
+    if (!retryUnchanged) {
+      const key = failureKey(current.output);
+      if (seen.has(key)) {
+        fs.writeFileSync(abs, original);
+        return { file, status: "unhealed", note: "the same failure came back, so the file was put back as it was", attempts };
+      }
+      seen.add(key);
     }
-    seen.add(key);
+    retryUnchanged = false;
     attempts++;
 
     let reply = "";
@@ -242,15 +271,29 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         }
         messages.push(
           { role: "assistant", content: reply || "(empty)" },
-          { role: "user", content: 'That was not the JSON object asked for. Reply with ONLY {"verdict":...,"reason":...,"test":...} or {"need":[...]}.' }
+          { role: "user", content: 'That was not the JSON object asked for. Reply with ONLY {"verdict":...,"reason":...,"edits":[...]} or {"need":[...]}.' }
         );
         continue;
       }
       messages.push({ role: "assistant", content: reply });
-      const fresh = (parsed.need as unknown[])
-        .map((p) => String(p).replace(/\\/g, "/").replace(/^\.\//, ""))
-        .filter((p) => !provided.has(p) && !p.startsWith("..") && !/(^|\/)(\.git|\.agent)\//.test(p) && fs.existsSync(path.join(repoRoot, p)) && fs.statSync(path.join(repoRoot, p)).isFile());
-      if (fresh.length === 0) {
+      // Each request is a whole file (by path), a line range, or a search of the repository.
+      const blocks: string[] = [];
+      for (const n of parsed.need as unknown[]) {
+        if (typeof n === "string") {
+          const p = n.replace(/\\/g, "/").replace(/^\.\//, "");
+          if (provided.has(p) || !fs.existsSync(path.join(repoRoot, p))) continue;
+          const body = readRange(repoRoot, p, 1, 800);
+          if (!body) continue;
+          provided.add(p);
+          blocks.push(body);
+        } else if (n && typeof n === "object" && typeof (n as any).search === "string") {
+          blocks.push(await searchRepo(repoRoot, (n as any).search));
+        } else if (n && typeof n === "object" && typeof (n as any).path === "string") {
+          const body = readRange(repoRoot, (n as any).path, (n as any).from, (n as any).to);
+          if (body) blocks.push(body);
+        }
+      }
+      if (blocks.length === 0) {
         dry++;
         if (dry >= 2) {
           parsed = { verdict: "unclear", reason: "it needed files that are not available" };
@@ -259,11 +302,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         messages.push({ role: "user", content: "Those files are already provided or do not exist. Decide with what you have." });
         continue;
       }
-      for (const p of fresh) provided.add(p);
-      messages.push({
-        role: "user",
-        content: fresh.map((p) => `--- ${p}\n${fs.readFileSync(path.join(repoRoot, p), "utf-8")}`).join("\n\n"),
-      });
+      messages.push({ role: "user", content: blocks.join("\n\n") });
     }
     const verdict = String(parsed?.verdict ?? "");
     const reason = String(parsed?.reason ?? "").trim() || "no reason given";
@@ -271,11 +310,46 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       fs.writeFileSync(abs, original);
       return { file, status: "code-bug", note: reason, attempts };
     }
-    if (verdict !== "stale-test" || typeof parsed?.test !== "string" || !parsed.test.trim()) {
+    if (verdict !== "stale-test") {
       fs.writeFileSync(abs, original);
       return { file, status: "unclear", note: reason, attempts };
     }
-    const next = matchEol(original, parsed.test);
+
+    // The change: edits applied to the file as it is now, or (for a file that is not large) the whole corrected file.
+    let next: string | undefined;
+    const edits = parseEdits(parsed?.edits);
+    if (edits) {
+      const applied = applyEdits(last, edits);
+      if (!applied.ok) {
+        messages.push({ role: "assistant", content: reply }, { role: "user", content: `Not applied: ${applied.error} The file is unchanged${last === original ? "" : " since your earlier edits, which it contains"}.` });
+        const k = `edit:${applied.error}`;
+        if (seen.has(k)) {
+          fs.writeFileSync(abs, original);
+          return { file, status: "unhealed", note: `its edits could not be applied (${applied.error.slice(0, 120)})`, attempts };
+        }
+        seen.add(k);
+        retryUnchanged = true;
+        continue;
+      }
+      next = matchEol(original, applied.text);
+    } else if (typeof parsed?.test === "string" && parsed.test.trim()) {
+      if (large) {
+        messages.push({ role: "assistant", content: reply }, { role: "user", content: `This file has ${lineCount} lines: do not return it whole. Reply with "edits": [{"find":"exact existing text","replace":"new text"}].` });
+        const k = "whole-file-refused";
+        if (seen.has(k)) {
+          fs.writeFileSync(abs, original);
+          return { file, status: "unhealed", note: "it kept returning the whole file instead of edits", attempts };
+        }
+        seen.add(k);
+        retryUnchanged = true;
+        continue;
+      }
+      next = matchEol(original, parsed.test);
+    }
+    if (next === undefined) {
+      fs.writeFileSync(abs, original);
+      return { file, status: "unclear", note: reason, attempts };
+    }
     const refusal = gutted(original, next);
     if (refusal) {
       messages.push({ role: "assistant", content: reply }, { role: "user", content: `Refused: ${refusal}. Try again.` });
@@ -285,6 +359,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         return { file, status: "unhealed", note: `kept proposing a rewrite that ${refusal}`, attempts };
       }
       seen.add(k);
+      retryUnchanged = true;
       continue;
     }
     fs.writeFileSync(abs, next);
@@ -294,9 +369,11 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     if (current.ok) return { file, status: "healed", note: reason, attempts };
     messages.push(
       { role: "assistant", content: reply },
-      { role: "user", content: `That file still fails:\n${current.output.replace(ANSI, "").slice(-12_000)}\n\nReturn the corrected JSON again.` }
+      {
+        role: "user",
+        content: `Your change is applied and the file still fails.\n${failureText(current.output, repoRoot, file)}\n\nReturn the corrected JSON again (edits are applied to the file as it is now).`,
+      }
     );
-    void last;
   }
 }
 
@@ -392,7 +469,7 @@ async function sharedCauses(opts: HealOptions, results: HealResult[], log: (l: s
           {
             role: "user",
             content:
-              `SAME ERROR IN ${group.length} FILES: ${group.map((g) => g.file).join(", ")}\n\nONE FAILURE\n${group[0].failure!.replace(ANSI, "").slice(-8000)}\n\n` +
+              `SAME ERROR IN ${group.length} FILES: ${group.map((g) => g.file).join(", ")}\n\nONE FAILURE\n${failureText(group[0].failure!, repoRoot, group[0].file)}\n\n` +
               `SETUP FILES YOU MAY CHANGE\n${shown || "(none exist; you may create jest.setup.js)"}`,
           },
         ],
@@ -501,7 +578,7 @@ async function settleUnresolved(opts: HealOptions, results: HealResult[], log: (
         { role: "system", content: SETTLE_SYSTEM },
         {
           role: "user",
-          content: `TEST FILE ${r.file}\n${original}\n\nWHY IT COULD NOT BE HEALED\n${r.note}\n\nLAST FAILURE\n${(r.failure ?? "").replace(ANSI, "").slice(-8000)}\n\nSOURCE\n${srcText || "(none resolved)"}`,
+          content: `TEST FILE ${r.file}\n${original}\n\nWHY IT COULD NOT BE HEALED\n${r.note}\n\nLAST FAILURE\n${failureText(r.failure ?? "", repoRoot, r.file)}\n\nSOURCE\n${srcText || "(none resolved)"}`,
         },
       ];
       let parsed: any;
@@ -603,6 +680,10 @@ export async function healTests(opts: HealOptions): Promise<HealReport> {
   await sharedCauses(opts, results, log);
   if (opts.settle ?? !scoped) await settleUnresolved(opts, results, log);
   for (const r of results) {
+    // Remembered across phases (see LogEntry.healStrikes), so a test that cannot be healed is not paid for again in every one.
+    try {
+      if (r.status !== "already-green") recordHealOutcome(opts.repoRoot, r.file, r);
+    } catch {}
     if ((r.status === "code-bug" || r.status === "unclear" || r.status === "unhealed") && !/the model call failed/.test(r.note)) {
       try {
         saveVerdict(opts.repoRoot, r.file, { status: r.status, note: r.note.replace(/ \(nothing it depends on changed since it was last diagnosed\)$/, ""), failure: r.failure });

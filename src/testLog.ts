@@ -40,6 +40,13 @@ export interface LogEntry {
   greenAt?: string;
   greenFingerprint?: string;
   verdict?: StoredVerdict;
+  /**
+   * How badly attempts to heal this red test have gone: 2 for a real failure to fix it, 1 for a model call that failed outright.
+   * Not tied to the fingerprint, which changes with every phase: that is what let one unfixable test cost a heal in every phase.
+   */
+  healStrikes?: number;
+  /** The test file as it was when the last strike was recorded: if someone edits it, it is worth trying again. */
+  strikeFileHash?: string;
 }
 
 interface TestLog {
@@ -125,7 +132,7 @@ export function recordRun(root: string, requested: string[], run: SuiteRun, now 
   for (const f of green) {
     const fp = fps.get(f);
     if (!fp) continue;
-    log.files[f] = { ...(log.files[f] ?? {}), lastRun: at, result: "green", fingerprint: fp.fp, greenAt: at, greenFingerprint: fp.fp, verdict: undefined };
+    log.files[f] = { ...(log.files[f] ?? {}), lastRun: at, result: "green", fingerprint: fp.fp, greenAt: at, greenFingerprint: fp.fp, verdict: undefined, healStrikes: undefined, strikeFileHash: undefined };
   }
   for (const f of red) {
     const fp = fps.get(f);
@@ -183,6 +190,38 @@ export function staleSince(root: string, exclude: string[] = []): string[] {
   });
 }
 
+/** A test is left alone by the automatic heal in a phase once its strikes reach this (one real failure, or two failed calls). */
+export const HEAL_PARK_AT = 2;
+const HEALED_STATUSES = new Set(["healed", "already-green", "rewritten", "removed"]);
+
+/** Folds one heal attempt into the test's record: a fix clears it, a failure to fix adds a strike. */
+export function recordHealOutcome(root: string, file: string, r: { status: string; note: string }): void {
+  const f = posix(file);
+  const log = loadLog(root);
+  const cur = log.files[f];
+  if (!cur) return; // never logged: nothing to hang a count on
+  if (HEALED_STATUSES.has(r.status)) {
+    if (cur.healStrikes === undefined) return;
+    delete cur.healStrikes;
+    delete cur.strikeFileHash;
+  } else {
+    cur.healStrikes = (cur.healStrikes ?? 0) + (/the model call failed/.test(r.note) ? 1 : 2);
+    cur.strikeFileHash = fileHash(root, f, new Map());
+  }
+  saveLog(root, log);
+}
+
+/**
+ * True when automatic healing has already failed enough for this red test that it is not tried again in a phase (an explicit
+ * `/tests heal` still tries it). It is tried again once the test file itself has been edited, and it stops being red when it passes.
+ */
+export function healParked(root: string, file: string): boolean {
+  const f = posix(file);
+  const e = loadLog(root).files[f];
+  if (!e || e.result !== "red" || (e.healStrikes ?? 0) < HEAL_PARK_AT) return false;
+  return !e.strikeFileHash || e.strikeFileHash === fileHash(root, f, new Map());
+}
+
 /** The stored diagnosis of a red test, if nothing it depends on has changed since and the healing logic is the same. */
 export function verdictFor(root: string, file: string): StoredVerdict | undefined {
   const e = loadLog(root).files[posix(file)];
@@ -222,7 +261,8 @@ export function renderLog(root: string): string {
       lines.push(`  ·  never run      ${t}`);
     } else if (e.result === "red") {
       red++;
-      lines.push(`  ✗  red since ${stamp(e.lastRun)}  ${t}${e.verdict ? `  (${e.verdict.status}: ${e.verdict.note.slice(0, 80)})` : ""}`);
+      const parked = healParked(root, t) ? "  [not retried in phases: healing failed; /tests heal tries again]" : "";
+      lines.push(`  ✗  red since ${stamp(e.lastRun)}  ${t}${e.verdict ? `  (${e.verdict.status}: ${e.verdict.note.slice(0, 80)})` : ""}${parked}`);
     } else if (unchanged.has(t)) {
       green++;
       lines.push(`  ✓  green ${stamp(e.greenAt)}  ${t}`);
