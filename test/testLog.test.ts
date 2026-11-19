@@ -190,3 +190,14 @@ describe("tests gone stale outside the current change are found now", () => {
     assert.deepEqual(staleSince(dir, ["__tests__/a.test.ts"]), []);
   });
 });
+
+describe("a helper in the test folder is not logged as a green test", () => {
+  test("a clean full run logs only the files the runner reported passing", () => {
+    write("__tests__/e2e/harness.ts", "export const helper = 1;");
+    recordRun(dir, [], { ok: true, output: "PASS __tests__/a.test.ts\nPASS __tests__/b.test.ts" });
+    const files = Object.keys(loadLog(dir).files).sort();
+    assert.deepEqual(files, ["__tests__/a.test.ts", "__tests__/b.test.ts"]);
+    write("src/a.ts", "export const a = 2;");
+    assert.deepEqual(staleSince(dir), ["__tests__/a.test.ts"], "the helper is never listed as stale");
+  });
+});

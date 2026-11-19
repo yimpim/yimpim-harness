@@ -114,7 +114,9 @@ export function recordRun(root: string, requested: string[], run: SuiteRun, now 
   const asked = requested.length ? requested.map(posix) : all;
   const failed = new Set(failingTestFiles(run.output));
   const passed = new Set(passingTestFiles(run.output));
-  const green = run.ok ? asked : asked.filter((f) => passed.has(f) && !failed.has(f));
+  // A clean run proves green for the files the runner reported passing. A helper that sits in the test folder holds no tests, so the
+  // runner never reports it: it must not be logged green. When the output names no file at all, a clean run still counts for what was asked.
+  const green = run.ok ? (passed.size > 0 ? asked.filter((f) => passed.has(f)) : asked) : asked.filter((f) => passed.has(f) && !failed.has(f));
   const red = [...failed];
   if (green.length === 0 && red.length === 0) return;
   const log = loadLog(root);
