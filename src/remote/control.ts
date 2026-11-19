@@ -282,26 +282,42 @@ ${promptText}`;
       // asked as written
     }
   }
-  const answer = await askRaw(question, promptText, interactive);
-  return back.get(answer.trim().toLowerCase()) ?? answer;
+  const raw = await askRaw(question, promptText, interactive);
+  const answer = back.get(raw.answer.trim().toLowerCase()) ?? raw.answer;
+  // A question left on screen with nothing under it reads as still waiting, hours later, in the scrollback. Say what was answered and where
+  // it came from. A stop is not an answer, so nothing is claimed then.
+  if (!runControl.isAborted) console.log(answeredLine(question.prompt, answer, raw.by));
+  return answer;
 }
 
-async function askRaw(question: PendingQuestion, promptText: string, interactive: boolean): Promise<string> {
+/** One line that closes a question in the log: what was answered, and from where. */
+export function answeredLine(prompt: string, answer: string, by: "terminal" | "phone"): string {
+  const lines = prompt.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  // "X wants to run a command:" says nothing without the line after it.
+  const what = (lines[0]?.endsWith(":") && lines[1] ? lines[0] + " " + lines[1] : lines[0] ?? "").replace(/\s+/g, " ").slice(0, 110);
+  const said = answer.trim().replace(/\s+/g, " ");
+  const mark = /^(yes|y)$/i.test(said) ? "✔ " : /^(no|n)$/i.test(said) ? "✖ " : "";
+  return `   ↳ ${mark}Answered "${said.slice(0, 100)}${said.length > 100 ? "…" : ""}" ${by === "phone" ? "from the phone" : "here"}: ${what}`;
+}
+
+async function askRaw(question: PendingQuestion, promptText: string, interactive: boolean): Promise<{ answer: string; by: "terminal" | "phone" }> {
   const remote = runControl.ask(question);
   if (!interactive) {
     // No terminal to ask: wait only on the remote surface, and if nothing is
     // connected the caller's timeout/fallback applies.
     const answer = await remote;
     runControl.answer(question.id, answer);
-    return answer;
+    return { answer, by: "phone" };
   }
 
   // startPrompt (not a raw rl.question): folds a pasted multi-line answer
   // into one response instead of splitting it on every embedded newline and
   // leaking the tail into whatever prompt reads stdin next.
   const prompt = startPrompt(promptText);
+  let by: "terminal" | "phone" | undefined;
   const local = prompt.answer
     .then((a) => {
+      by ??= "terminal";
       // Feed the terminal answer through the same path so remote surfaces see
       // the question disappear.
       runControl.answer(question.id, a.trim());
@@ -310,7 +326,8 @@ async function askRaw(question: PendingQuestion, promptText: string, interactive
     .catch(() => question.fallback);
 
   try {
-    return await Promise.race([local, remote]);
+    const answer = await Promise.race([local, remote.then((a) => ((by ??= "phone"), a))]);
+    return { answer, by: by ?? "terminal" };
   } finally {
     prompt.cancel();
   }
