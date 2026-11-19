@@ -44,6 +44,7 @@ import { splitJobs, unplannedJobs } from "./jobsList.js";
 import { healTests, renderHealReport, failingTestFiles, failureText } from "./testHeal.js";
 import { renderLog, runSuiteLogged } from "./testLog.js";
 import { fixTaskFor, isFixTask, savePendingFixes, settlePendingFixes } from "./testSettle.js";
+import { directFixFor, setMustPass } from "./directFix.js";
 import { checkExistence, existencePlannerSection, renderExistence } from "./existence.js";
 import { type Intent, parseIntentReply, routeFacts } from "./routeIntent.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
@@ -5458,8 +5459,9 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
     // The interactive loop below classifies its own input as it is typed,
     // so this only applies when instructions arrived from one of these flags.
     // A roadmap unit is a build task by definition; classifying its text could
-    // misread it as a question and answer it instead of building it.
-    if (instructions.trim() && !args.yes && !(fromQueue && activeUnitId)) {
+    // misread it as a question and answer it instead of building it. A fix task queued from a failing test is the same: its text is about
+    // tests, so the router read it as another request to heal them, ran the heal again, and spent a call on it.
+    if (instructions.trim() && !args.yes && !(fromQueue && activeUnitId) && !isFixTask(instructions)) {
       requestUsageStart = events.usageReport();
       costShownForRequest = false;
       const outcome = await answerIfQuestion(instructions.trim(), client, config, repo, repoRoot, agentTools, memory, memoryFile, false, pendingAttachments, advisorMemory);
@@ -5956,13 +5958,24 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
       ...buildUsageStatusPatch(),
     });
 
+    // A fix for a DIAGNOSED defect (a test failing because the code is wrong) goes straight to the Editor: the diagnosis already names the
+    // code and the line, so Discovery and the Planner would only rediscover it with larger models, and write a plan for a small fix.
+    // Which tests the fix is for is also told to the verifier, which must not excuse them as "already failing". Set for every task, so
+    // a stale set never leaks into the next one.
+    const direct = !verifyOnly && isFixTask(instructions) ? directFixFor(instructions, repoRoot) : undefined;
+    setMustPass(direct ? direct.tests : []);
+
     // 1. Discovery Phase (Inspect Memory & Bounded Repo Map)
-    console.log(`\n==================================================`);
-    console.log(
-      `🔍 **[STAGE 1: DISCOVERY${usingDiscoveryVision ? " - VISION" : ""}]** Models: ` +
-        `${(usingDiscoveryVision ? config.models.discoveryVision! : config.models.discovery).join(", ")}`
-    );
-    console.log(`==================================================`);
+    if (direct) {
+      console.log(`\n[FIX] The diagnosis already names the code (${direct.files.join(", ")}), so Discovery and the Planner are skipped: the Editor starts from it, and ${direct.tests.join(", ")} must pass afterwards.`);
+    } else {
+      console.log(`\n==================================================`);
+      console.log(
+        `🔍 **[STAGE 1: DISCOVERY${usingDiscoveryVision ? " - VISION" : ""}]** Models: ` +
+          `${(usingDiscoveryVision ? config.models.discoveryVision! : config.models.discovery).join(", ")}`
+      );
+      console.log(`==================================================`);
+    }
 
     // The repo map is already loaded; rank it against the task so Discovery
     // starts from the likely files and confirms them instead of searching.
@@ -6012,7 +6025,7 @@ You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DI
 
     // What was already read before this pass, so only what Discovery reads now is credited to it.
     const readBeforeDiscovery = new Set(agentTools.inspectedThisPhase());
-    const discoveryRaw = await runToolAgent({
+    const discoveryRaw = direct ? direct.discovery : await runToolAgent({
       prompt: discoveryPrompt,
       repo,
       repoRoot,
@@ -6065,14 +6078,16 @@ You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DI
     saveCodebaseMemory(memoryFile, memory);
 
     // 2. Planning Phase (Pure Synthesis: 0 Tool Calls)
-    console.log(`\n==================================================`);
-    console.log(
-      `🧠 **[STAGE 2: PLANNER${verifyOnly ? " - VERIFY ONLY" : ""}]** Models: ${config.models.planner.join(", ")}`
-    );
-    if (verifyOnly) {
-      console.log(`[PLANNER] 🔍 Verify-only task — planning checkable scenarios, no code changes planned.`);
+    if (!direct) {
+      console.log(`\n==================================================`);
+      console.log(
+        `🧠 **[STAGE 2: PLANNER${verifyOnly ? " - VERIFY ONLY" : ""}]** Models: ${config.models.planner.join(", ")}`
+      );
+      if (verifyOnly) {
+        console.log(`[PLANNER] 🔍 Verify-only task — planning checkable scenarios, no code changes planned.`);
+      }
+      console.log(`==================================================`);
     }
-    console.log(`==================================================`);
 
     // A request that builds or restyles user-facing UI gets a design system first (once, into design-system/),
     // so the Planner and every Editor build from the same decisions instead of improvising a look per screen.
@@ -6103,7 +6118,7 @@ You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DI
     // Security before building: the project's posture, and a threat model for a task that touches identity, money, files,
     // personal data, webhooks, email or infrastructure. Its requirements go to the Planner, which puts them into the plan.
     let securitySection = "";
-    if (config.security.enabled && !verifyOnly) {
+    if (config.security.enabled && !verifyOnly && !direct) {
       try {
         const sec = await ensureThreatModel({
           call: (ms, messages, label, json) => runLabeledCompletion({ client, models: ms, messages: messages as any, agentName: "SECURITY", jsonMode: json, reason: "Security: " + label }),
@@ -6168,7 +6183,7 @@ ${memory.liveRules.map((r) => `- ${r}`).join("\n") || "None"}`;
     // next retry's `attempt`, and reset per task since it's declared inside
     // the per-task loop body.
     let plannerAttempt = 1;
-    planOutput = await runToolAgent({
+    planOutput = direct ? direct.plan : await runToolAgent({
       prompt: buildUserContent(plannerPrompt, attachments) as any,
       repo,
       repoRoot,
@@ -6200,7 +6215,7 @@ ${memory.liveRules.map((r) => `- ${r}`).join("\n") || "None"}`;
 
     activePlan = parsed.plan;
     let planErrors = parsed.degraded
-      ? ["Planner did not return a valid structured plan"]
+      ? [`Planner did not return a valid structured plan (${parsed.degradedReason ?? "unreadable"})`]
       : validatePlan(activePlan, verifyOnly);
     // Soft findings about verification bullets (vague, or quoting UI text with
     // no source). They ride along on the one corrective pass the plan may get
@@ -6262,6 +6277,37 @@ ${discoveryOutput ?? ""}`,
           `commentary, no tool calls. Keep the plan's content; only fix its form.`,
         "Previous reply was not a parseable plan"
       );
+    // An unreadable plan is usually a good plan in the wrong form: prose around it, or JSON cut off before its end. Asking for the same plan
+    // again as JSON only is one cheap call; the corrective pass below is a full re-plan with tools, many calls. So the cheap one comes first,
+    // and what the Planner actually returned is kept in .agent/planner-raw.txt, so a failure can be looked at and not guessed at.
+    if (parsed.degraded) {
+      const said = String(planOutput).replace(/\s+/g, " ");
+      console.warn(
+        `[PLANNER] ⚠️ The reply was not a readable plan: ${parsed.degradedReason ?? "unreadable"}. It was ${said.length} characters and began "${said.slice(0, 160)}${said.length > 160 ? "…" : ""}". ` +
+          `Asking once for the same plan as JSON only.`
+      );
+      try {
+        fs.mkdirSync(path.join(repoRoot, ".agent"), { recursive: true });
+        fs.writeFileSync(path.join(repoRoot, ".agent", "planner-raw.txt"), `${new Date().toISOString()}\nwhy: ${parsed.degradedReason ?? "unreadable"}\n\n${planOutput}`);
+      } catch {
+        // a note for the person; never a reason to fail
+      }
+      planOutput = await reaskJsonOnly(planOutput);
+      parsed = parsePlan(planOutput, instructions.trim());
+      if (!parsed.degraded) {
+        console.log(`[PLANNER] ✓ That one was readable.`);
+        activePlan = parsed.plan;
+        verificationIssues = lintVerification();
+        planErrors = [
+          ...validatePlan(activePlan, verifyOnly),
+          ...verificationIssues.map((i) => i.message),
+          ...lintAssumptions(parsed.plan.assumptions),
+          ...lintTargetFiles(parsed.plan, targetExists),
+        ];
+      } else {
+        planErrors = [`Planner did not return a valid structured plan (${parsed.degradedReason ?? "unreadable"})`];
+      }
+    }
     if (planErrors.length > 0) {
       // Says WHY, which it never did: "lacks surgical scope" with no reason is something nobody can act on or learn from.
       const shown = planErrors.slice(0, 3).map((e) => e.replace(/\s+/g, " ").slice(0, 170));
@@ -6325,7 +6371,7 @@ ${discoveryOutput ?? ""}`,
       } else {
         activePlan = parsed.plan;
         planErrors = parsed.degraded
-          ? ["Corrective Planner pass did not return a valid structured plan"]
+          ? [`Corrective Planner pass did not return a valid structured plan (${parsed.degradedReason ?? "unreadable"})`]
           : validatePlan(activePlan, verifyOnly);
         // Second and last look: hard errors still fail as before, but a bullet
         // that is STILL vague or unsourced is accepted with a tag, not retried.

@@ -49,3 +49,10 @@ describe("a cut-off reply is asked for again, not used", () => {
     assert.match(t, /^2 failures, 1 distinct cause\./);
   });
 });
+
+describe("stored diagnoses from an older worker are not reused", () => {
+  test("the heal logic version was raised when the worker changed", async () => {
+    const { HEAL_LOGIC_VERSION } = await import("../src/testLog.js");
+    assert.ok(HEAL_LOGIC_VERSION >= 5, "a diagnosis stored by version 4 (which could be cut off mid-sentence) is not reused");
+  });
+});

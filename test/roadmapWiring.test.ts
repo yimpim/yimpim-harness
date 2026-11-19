@@ -53,7 +53,10 @@ describe("the roadmap is wired into the run loop", () => {
 
 describe("a unit is never mistaken for a question", () => {
   test("its text skips the intent classifier, which could read it as a question and answer it instead of building it", () => {
-    assert.match(src, /!args\.yes && !\(fromQueue && activeUnitId\)\) \{\n\s+requestUsageStart = events\.usageReport\(\);\n\s+costShownForRequest = false;\n\s+const outcome = await answerIfQuestion\(instructions\.trim\(\)/);
+    assert.match(src, /!args\.yes && !\(fromQueue && activeUnitId\) && !isFixTask\(instructions\)\) \{\n\s+requestUsageStart = events\.usageReport\(\);\n\s+costShownForRequest = false;\n\s+const outcome = await answerIfQuestion\(instructions\.trim\(\)/);
+  });
+  test("a fix task queued from a failing test skips it too: its text is about tests, and the router read it as another request to heal them", () => {
+    assert.ok(src.includes("&& !isFixTask(instructions)) {"));
   });
 });
 
