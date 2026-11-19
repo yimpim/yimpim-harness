@@ -113,7 +113,25 @@ async function gitHistory(repoRoot: string, files: string[]): Promise<string> {
   return parts.join("\n");
 }
 
-const countAssertions = (s: string) => (s.match(/\b(expect|assert)\w*\s*[.(]|\bassert\s|\bself\.assert/g) ?? []).length;
+/** A lookup result that carries nothing: a search that matched nothing or could not run. */
+const NO_RESULT = /\n\((no matches|search text too short|the search could not run)\)$/;
+
+/** Lines added plus lines removed between two versions (order is ignored: it is a count of what is different, not a diff). */
+export function changedLines(a: string, b: string): number {
+  const tally = (s: string) => {
+    const m = new Map<string, number>();
+    for (const l of s.split(/\r?\n/)) m.set(l, (m.get(l) ?? 0) + 1);
+    return m;
+  };
+  const A = tally(a);
+  const B = tally(b);
+  let n = 0;
+  for (const [l, c] of B) n += Math.max(0, c - (A.get(l) ?? 0));
+  for (const [l, c] of A) n += Math.max(0, c - (B.get(l) ?? 0));
+  return n;
+}
+
+const countAssertions =(s: string) => (s.match(/\b(expect|assert)\w*\s*[.(]|\bassert\s|\bself\.assert/g) ?? []).length;
 const countSkips = (s: string) => (s.match(/\.skip\(|\bxit\(|\bxtest\(|\bxdescribe\(|\.todo\(|@pytest\.mark\.skip|\bunittest\.skip/g) ?? []).length;
 
 /** Why a rewritten test is refused, or undefined when it is acceptable. */
@@ -239,6 +257,8 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   // Set when the last answer was not applied (its edits did not match, or it was refused): the file was not changed and not run again,
   // so the failure is of course the same, and that is no reason to stop: the model is told why and tries again.
   let retryUnchanged = false;
+  // Lookups the worker has asked for in this heal, so a repeat is not answered twice.
+  const asked = new Set<string>();
   for (;;) {
     if (!retryUnchanged) {
       const key = failureKey(current.output);
@@ -276,9 +296,12 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         continue;
       }
       messages.push({ role: "assistant", content: reply });
-      // Each request is a whole file (by path), a line range, or a search of the repository.
+      // Each request is a whole file (by path), a line range, or a search of the repository. One already answered is not answered twice.
       const blocks: string[] = [];
       for (const n of parsed.need as unknown[]) {
+        const asking = typeof n === "string" ? `file:${n}` : n && typeof n === "object" ? `${(n as any).search !== undefined ? "search" : "range"}:${JSON.stringify(n)}` : "";
+        if (!asking || asked.has(asking)) continue;
+        asked.add(asking);
         if (typeof n === "string") {
           const p = n.replace(/\\/g, "/").replace(/^\.\//, "");
           if (provided.has(p) || !fs.existsSync(path.join(repoRoot, p))) continue;
@@ -293,15 +316,22 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
           if (body) blocks.push(body);
         }
       }
-      if (blocks.length === 0) {
+      // Looking is as long as it is useful. What ends it is not a number of rounds but a lookup that turns up nothing new (a file already
+      // shown, one that is not there, a search that matches nothing) twice in a row: then it has to decide with what it has.
+      const useful = blocks.filter((b) => !NO_RESULT.test(b));
+      if (useful.length === 0) {
         dry++;
         if (dry >= 2) {
-          parsed = { verdict: "unclear", reason: "it needed files that are not available" };
+          parsed = { verdict: "unclear", reason: "its lookups turned up nothing new" };
           break;
         }
-        messages.push({ role: "user", content: "Those files are already provided or do not exist. Decide with what you have." });
+        messages.push({
+          role: "user",
+          content: `${blocks.length ? blocks.join("\n\n") + "\n\n" : ""}Nothing new turned up (those files are already provided or do not exist, or nothing matched). Decide with what you have.`,
+        });
         continue;
       }
+      dry = 0;
       messages.push({ role: "user", content: blocks.join("\n\n") });
     }
     const verdict = String(parsed?.verdict ?? "");
@@ -366,7 +396,12 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     last = next;
     current = await run(repoRoot, [file]);
     trace.output = current.output;
-    if (current.ok) return { file, status: "healed", note: reason, attempts };
+    if (current.ok) {
+      // How much it changed, said plainly and never judged: a stale mock is a few lines, a renamed API can be a hundred, and which
+      // one this was is for the person reading the report (and the diff) to see, not for a fixed number to decide.
+      const changed = changedLines(original, next);
+      return { file, status: "healed", note: `${reason} (${changed} line${changed === 1 ? "" : "s"} changed)`, attempts };
+    }
     messages.push(
       { role: "assistant", content: reply },
       {
