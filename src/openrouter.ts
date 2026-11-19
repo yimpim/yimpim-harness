@@ -664,7 +664,8 @@ export class OpenRouterClient {
             );
 
             clearInterval(ticker);
-            endCall();
+            // The provider's own count of what the model wrote replaces the running estimate in the step's total.
+            endCall.done(usage?.completion);
             const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
             console.log(`${clearLine}[API] ${model} (${agent})${retrySuffix} ✔ (${elapsed}s)`);
 

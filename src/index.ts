@@ -159,7 +159,7 @@ import { runControl, AbortedError, askAnywhere, askChoice, setQuestionExplainer 
 import { plainWordsFor } from "./plainWords.js";
 import { commitOnly } from "./gitCommit.js";
 import { terminalView, isVerbose, setVerbose, setStatusAvailable, wrapForTerminal } from "./consoleView.js";
-import { composeStatus, liveCallCount } from "./liveCalls.js";
+import { composeStatus, liveCallCount, resetStep, stepActive } from "./liveCalls.js";
 import { installPersistentInput, registerLiveCommands, printAbove, writeRawAbove, pauseInput, resumeInput, setStatusLine, setModelStrip, hasPinnedInput, openPanel, refreshPanel } from "./terminalInput.js";
 import { ModelQueue } from "./modelQueue.js";
 import { ModelPanel } from "./modelPanel.js";
@@ -4498,13 +4498,21 @@ async function main(): Promise<void> {
   const runningAgentLabels: string[] = [];
   // The one live line under the stream: what the run is on, and what model calls are being waited on right now, with moving dots.
   // The wait is shown here and not as a line per call every 20 seconds, which, with several workers at once, was a wall of text.
-  const refreshStatus = () => setStatusLine(composeStatus(runningAgentLabels[runningAgentLabels.length - 1], Date.now(), (process.stdout.columns || 80) - 4));
+  let statusBase: string | undefined;
+  const refreshStatus = () => {
+    const base = runningAgentLabels[runningAgentLabels.length - 1];
+    // A different persona (or none) is a different step: its totals of time and tokens start again. Within a step they only go up, across
+    // every call and every file, which is what a person watching wants; a per-call timer reset with each call.
+    if (base !== statusBase || (!base && liveCallCount() === 0)) {
+      statusBase = base;
+      resetStep();
+    }
+    setStatusLine(composeStatus(base, Date.now(), (process.stdout.columns || 80) - 4));
+  };
   setStatusAvailable(hasPinnedInput);
-  let liveBefore = 0;
+  // Redrawn while a call is in flight and while a step is under way (between its calls the total keeps counting), then it stops.
   setInterval(() => {
-    const now = liveCallCount();
-    if (now > 0 || liveBefore > 0) refreshStatus();
-    liveBefore = now;
+    if (liveCallCount() > 0 || stepActive()) refreshStatus();
   }, 500).unref();
     events.onEmit((event) => {
     if (event.type === "phase.end" && taskRunning && currentTaskId) {
