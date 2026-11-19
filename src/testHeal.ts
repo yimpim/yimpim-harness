@@ -154,7 +154,7 @@ Start from the FAILURE section: it lists the distinct causes with how many times
 - "need": you cannot decide without more. Ask for it: {"need":["path/one",{"path":"path/two","from":120,"to":260},{"search":"someName"}]}. A string is a whole file, an object with a path is a range of lines, and a search finds where a name is defined, used or mocked across the project. Ask instead of guessing.
 - "unclear": only after you have asked for what you need and it still does not settle it.
 Rules for a stale test: keep every case that is still meaningful, update expected values and calls to match the code you were shown, never delete assertions or skip tests to make it pass, never loosen an assertion into one that cannot fail. Mock only what the test already mocked, plus what the code now needs.
-Answer with JSON only: {"verdict":"stale-test|code-bug|unclear","reason":"one sentence","edits":[{"find":"exact existing text","replace":"new text"}]} or {"need":[...]}.
+Answer with JSON only: {"verdict":"stale-test|code-bug|unclear","reason":"one or two sentences: what is wrong and where (file:line)","edits":[{"find":"exact existing text","replace":"new text"}]} or {"need":[...]}.
 "edits" are applied in order; each "find" is copied EXACTLY from the file (never the line-number prefix), as short as it can be while matching once. For a test file under ${LARGE_FILE_LINES} lines you may instead return the complete corrected file as "test"; for a longer one ALWAYS use edits and never return the whole file.`;
 
 function matchEol(original: string, next: string): string {
@@ -280,7 +280,22 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         fs.writeFileSync(abs, original);
         return { file, status: "unhealed", note: `the model call failed: ${err?.message ?? err}`, attempts };
       }
-      parsed = parseLenient(reply)?.value;
+      const lenient = parseLenient(reply);
+      parsed = lenient?.value;
+      // A reply that only parses after being repaired was CUT OFF: its reason ends mid-sentence and its edits may be missing the end of
+      // the list. An incomplete diagnosis handed on as if it were whole is worse than none, so it is asked for again, shorter.
+      if (lenient?.repaired && parsed && typeof parsed === "object" && (typeof parsed.verdict === "string" || Array.isArray(parsed.need))) {
+        malformed++;
+        if (malformed >= 3) {
+          parsed = { verdict: "unclear", reason: "its replies kept being cut off before they ended" };
+          break;
+        }
+        messages.push(
+          { role: "assistant", content: reply },
+          { role: "user", content: 'That reply was cut off before it ended. Reply again in full, with "reason" in two sentences at most (what is wrong and where, as file:line), then the rest.' }
+        );
+        continue;
+      }
       if (!Array.isArray(parsed?.need)) {
         if (typeof parsed?.verdict === "string" && parsed.verdict) break;
         // Not the JSON asked for (empty, cut off, or prose): say so and ask again instead of giving up on the file.
@@ -743,7 +758,7 @@ export function renderHealReport(r: HealReport): string {
     `Test healing: ${r.failing.length} red file(s) before. ${by("healed").length} healed, ${by("already-green").length} already passing alone, ${by("code-bug").length} are code bugs, ${by("rewritten").length} rewritten, ${by("removed").length} removed, ${by("unclear").length + by("unhealed").length} left alone.`,
   ];
   const bugs = by("code-bug");
-  if (bugs.length) lines.push("", "The CODE is wrong here (tests left untouched; a fix is queued, and a test that still fails afterwards is removed):", ...bugs.map((b) => `  - ${b.file}: ${b.note}`));
+  if (bugs.length) lines.push("", "The CODE is wrong here (tests left untouched; a fix is queued; a test file is removed afterwards only if nothing in it passes, one that fails in part is kept):", ...bugs.map((b) => `  - ${b.file}: ${b.note}`));
   const rewritten = by("rewritten");
   if (rewritten.length) lines.push("", "Rewritten from scratch:", ...rewritten.map((b) => `  - ${b.file}: ${b.note}`));
   const gone = by("removed");

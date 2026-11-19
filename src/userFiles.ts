@@ -103,6 +103,9 @@ export function userNamedFiles(request: string, repoRoot: string, max = 8): stri
     const token = norm(m[0]).replace(/[.,;:)]+$/, "");
     if (!token || seen.has(token) || path.isAbsolute(token) || token.split("/").includes("..")) continue;
     seen.add(token);
+    // A dependency is not one of the project's files. A path into one in a request is nearly always a stack-trace frame pasted in with a
+    // failure (the fix task for a failing test carries them), not something the person wants put in front of the Planner.
+    if (/(^|\/)(node_modules|\.git|site-packages|dist-packages)(\/|$)/.test(token)) continue;
     try {
       const full = path.resolve(root, token);
       if (full.startsWith(root) && fs.statSync(full).isFile()) {

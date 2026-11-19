@@ -198,6 +198,22 @@ export function fixTaskFor(items: PendingFix[]): string {
  * After the fix attempt: a pending test that passes is done; one that still fails is removed with everything pointing at it,
  * and the reason is written down. Returns the log lines.
  */
+/**
+ * How many tests a run says failed and passed, read from the runner's own summary line (Jest and Vitest "Tests: 14 failed, 150 passed",
+ * pytest "14 failed, 150 passed in 3s", Mocha "150 passing" / "14 failing"). Undefined when the output carries no such summary.
+ */
+export function testCounts(output: string): { failed: number; passed: number } | undefined {
+  const clean = output.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
+  const grab = (line: string, word: RegExp) => Number(word.exec(line)?.[1] ?? 0);
+  const jest = /^\s*Tests:?\s+(.*)$/m.exec(clean)?.[1];
+  if (jest) return { failed: grab(jest, /(\d+) failed/), passed: grab(jest, /(\d+) passed/) };
+  const py = [...clean.matchAll(/^.*\b(?:\d+ (?:passed|failed))\b.*\bin [\d.]+s\b.*$/gm)].pop()?.[0];
+  if (py) return { failed: grab(py, /(\d+) failed/), passed: grab(py, /(\d+) passed/) };
+  const mocha = /(\d+) passing/.exec(clean);
+  if (mocha) return { failed: grab(clean, /(\d+) failing/), passed: Number(mocha[1]) };
+  return undefined;
+}
+
 export async function settlePendingFixes(root: string, run = runSuite): Promise<string[]> {
   const pending = loadPendingFixes(root);
   if (pending.length === 0) return [];
@@ -206,6 +222,18 @@ export async function settlePendingFixes(root: string, run = runSuite): Promise<
   for (const { p, r } of results) {
     if (r.ok) {
       lines.push(`${p.file} passes now.`);
+      continue;
+    }
+    // A file is removed only when nothing in it passes. One that still fails in part is kept: deleting a file to get rid of a few
+    // failing tests throws away every test that works, and the failing ones are often the ones that are RIGHT (the code is wrong). If the
+    // runner's counts cannot be read, nothing is known to be worth losing or not, so it is kept.
+    const counts = testCounts(r.output);
+    if (!counts || counts.passed > 0) {
+      lines.push(
+        counts
+          ? `${p.file} still fails after the fix attempt (${counts.failed} of ${counts.failed + counts.passed} tests), but ${counts.passed} of its tests pass, so it was kept and not removed. It stays red until the code is fixed: ${p.reason.slice(0, 200)}`
+          : `${p.file} still fails after the fix attempt and the runner's counts could not be read, so it was kept and not removed. It stays red until the code is fixed: ${p.reason.slice(0, 200)}`
+      );
       continue;
     }
     const removal = removeTest(root, p.file);

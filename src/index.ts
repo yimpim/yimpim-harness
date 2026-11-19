@@ -41,7 +41,7 @@ import { ensureDesignSystem } from "./uiDesign.js";
 import { stageDesignImage } from "./designDelivery.js";
 import { parseLenient } from "./jsonRepair.js";
 import { splitJobs, unplannedJobs } from "./jobsList.js";
-import { healTests, renderHealReport, failingTestFiles } from "./testHeal.js";
+import { healTests, renderHealReport, failingTestFiles, failureText } from "./testHeal.js";
 import { renderLog, runSuiteLogged } from "./testLog.js";
 import { fixTaskFor, isFixTask, savePendingFixes, settlePendingFixes } from "./testSettle.js";
 import { checkExistence, existencePlannerSection, renderExistence } from "./existence.js";
@@ -335,7 +335,7 @@ Press Tab after typing a command's start (e.g. "/mo") to complete it.
   /tests log        When each test last ran green or red, and which are unchanged since (what /tests heal skips)
   /tests heal       Bring a red test suite back to green: one worker per failing test file, all at once. Out-of-date tests are updated;
                     one that cannot be is rewritten or removed (with its snapshot and every reference); a real code defect is sent
-                    to the normal pipeline to fix, and its test is removed if it still fails afterwards
+                    to the normal pipeline to fix (a test file is removed afterwards only if nothing in it passes; one that fails in part is kept)
   /pentest          Security audit of this project: code, git history and packages (read-only; nothing is attacked)
   /design <what>    Make a logo, favicon and app icons: several models propose
                     and draw concepts, the best are shown, you pick one
@@ -5124,14 +5124,18 @@ async function main(): Promise<void> {
       console.log("\n🧪 [TESTS] " + renderHealReport(report));
       const bugs = report.results.filter((r) => r.status === "code-bug");
       if (bugs.length > 0) {
+        // What the fix task is told. The diagnosis as the worker wrote it (without the bookkeeping note that says it was reused, which
+        // used to land in the middle of its last sentence), and the failure as a digest: the distinct causes with how often each
+        // happens, the first line of the project's own code each points at and the code around it, and the names of the tests that fail.
+        // Not the tail of the raw output, which is whichever test happened to fail last and is usually not the cause that was diagnosed.
         const items = bugs.map((b) => ({
           file: b.file,
-          reason: b.note,
-          failure: (b.failure ?? "").replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").split(/\r?\n/).filter((l) => l.trim()).slice(-40).join("\n").slice(-4000),
+          reason: b.note.replace(/ \(nothing it depends on changed since it was last diagnosed\)$/, ""),
+          failure: failureText(b.failure ?? "", repoRoot, b.file),
         }));
         savePendingFixes(repoRoot, items);
         pendingTestFixTask = fixTaskFor(items);
-        console.log(`🧪 [TESTS] Sending ${bugs.length} code defect(s) to the normal pipeline to fix. Any of those tests still failing afterwards are removed.`);
+        console.log(`🧪 [TESTS] Sending ${bugs.length} code defect(s) to the normal pipeline to fix. A test file is removed afterwards only if nothing in it passes; one that still fails in part is kept.`);
       }
       return report.after ? report.after.ok : report.before.ok;
     } catch (err: any) {
@@ -5536,7 +5540,9 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
         // as the event loop cycles. Nothing was actually running yet, so
         // reset and give back a normal, working prompt instead.
         if (runControl.isAborted) {
-          console.log(`\n[CONTROL] 🛑 Stopped from phone. Nothing was running yet — back to a fresh prompt.`);
+          // A stop that arrived while nothing was running, said as it was made: from the phone, or typed here.
+          const who = runControl.reason === "phone" || /phone/i.test(runControl.reason) ? "from the phone" : `(${runControl.reason || "requested"})`;
+          console.log(`\n[CONTROL] 🛑 Stopped ${who}. Nothing was running yet — back to a fresh prompt.`);
           runControl.reset();
           continue;
         }
@@ -5975,6 +5981,17 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
       // No map yet (a new project) or an unreadable one: Discovery explores as before.
     }
 
+    // Files the request itself names are where its author says the work is (a fix task from a failing test names the code and the line).
+    // They are the first leads, ahead of a shortlist guessed from the repo map, which on this kind of task picked unrelated files.
+    const namedLeads = (() => {
+      try {
+        const named = userNamedFiles(instructions, repoRoot);
+        return named.length > 0 ? `\n\nThe request names these files, so start with them (read the part it points at, not necessarily all of it): ${named.join(", ")}` : "";
+      } catch {
+        return "";
+      }
+    })();
+
     const discoveryText = `${DISCOVERY_SYSTEM}
 
 Target Task:
@@ -5988,7 +6005,7 @@ ${JSON.stringify(memory, null, 2)}
 Instructions:
 Evaluate if the Existing Codebase Memory and known components provide sufficient context.
 - If YES: Conclude immediately.
-- If NO: Use search_code, get_file_outline, or read_file to find missing targets. Call register_component for any key screens/models you locate.${discoveryShortlist}
+- If NO: Use search_code, get_file_outline, or read_file to find missing targets. Call register_component for any key screens/models you locate.${namedLeads}${discoveryShortlist}
 
 You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DISCOVERY_ROUND_BUDGET} turns your tools are removed and you must write your findings from what you have. Write taskFindings from what you have confirmed, and put what you could not confirm in uncertainties.`;
     const discoveryPrompt = usingDiscoveryVision ? buildUserContent(discoveryText, imageAttachments) : discoveryText;
@@ -6246,7 +6263,9 @@ ${discoveryOutput ?? ""}`,
         "Previous reply was not a parseable plan"
       );
     if (planErrors.length > 0) {
-      console.warn(`[PLANNER] ⚠️ Plan lacks surgical scope; requesting one corrective pass.`);
+      // Says WHY, which it never did: "lacks surgical scope" with no reason is something nobody can act on or learn from.
+      const shown = planErrors.slice(0, 3).map((e) => e.replace(/\s+/g, " ").slice(0, 170));
+      console.warn(`[PLANNER] ⚠️ The first plan was not specific enough, so the Planner is asked once more. Why: ${shown.join(" | ")}${planErrors.length > 3 ? ` (and ${planErrors.length - 3} more)` : ""}`);
       // Capture what the first pass actually read BEFORE resetting the
       // window below — see buildAlreadyInspectedSection's own comment for why
       // handing that content straight to the retry avoids re-paying for the
@@ -7151,6 +7170,9 @@ The user wants you to decide, not ask: ${d.choice}`);
         console.log(
           `Completed phases remain committed. Resume with: ${loopsBackToPrompt ? "/continue" : "yimpim --resume"}`
         );
+        // The stop is reported and over. Leaving the flag set made the idle prompt find it and announce a second stop that never came
+        // (and always blame the phone), after every stop, whoever made it.
+        runControl.reset();
       }
       if (activeUnitId) {
         // The unit is not lost: it stays on the roadmap, and "/roadmap run" tries it again.
