@@ -99,3 +99,16 @@ describe("every command the prompt handles is suggested", () => {
     assert.deepEqual(handled.filter((c) => !listed.has(c)), []);
   });
 });
+
+describe("leaving the session does not leave the pinned rows on screen", () => {
+  test("/exit closes the pinned input before saying goodbye and exiting, and closing erases its rows", async () => {
+    const fsx = await import("node:fs");
+    const index = fsx.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8").replace(/\r\n/g, "\n");
+    const at = index.indexOf('trimmed === "/exit"');
+    const block = index.slice(at, index.indexOf("process.exit(0);", at));
+    assert.ok(block.indexOf("stopPersistentInput();") > 0 && block.indexOf("stopPersistentInput();") < block.indexOf("Session terminated"));
+    const ti = fsx.readFileSync(new URL("../src/terminalInput.ts", import.meta.url), "utf-8").replace(/\r\n/g, "\n");
+    const disposer = ti.slice(ti.indexOf("setup();\n  return () => {"), ti.indexOf("function teardown"));
+    assert.match(disposer, /clearInputArea\(\);[\s\S]*teardown\(\);/);
+  });
+});

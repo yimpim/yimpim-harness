@@ -610,8 +610,12 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
 
       // Early Exit Valve
       if (name === "conclude_task") {
-        console.log(`\n[AGENT EXIT] Status: ${args.status}`);
-        console.log(`[AGENT EXIT] Reason: ${args.explanation}\n`);
+        // The console gets the headline: the full note goes on to the verifier and the repair loop untouched, and the files it names
+        // were already listed as they were patched, so a paragraph here only repeats them.
+        const note = String(args.explanation ?? "").trim();
+        const headline = note.split(/\r?\n/).find((l) => l.trim())?.trim() ?? "";
+        const clipped = headline.length > 160 ? `${headline.slice(0, 157)}…` : headline;
+        console.log(`\n[AGENT EXIT] ${args.status}${clipped ? ` — ${clipped}` : ""}\n`);
 
         if (args.status === "ALREADY_COMPLETED") {
           emitAgentEnd(rounds, "completed");

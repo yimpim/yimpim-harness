@@ -157,6 +157,7 @@ import {
 import { buildRemovalCommand } from "./cleanupCommand.js";
 import { runControl, AbortedError, askAnywhere, askChoice, setQuestionExplainer } from "./remote/control.js";
 import { plainWordsFor } from "./plainWords.js";
+import { terminalView, isVerbose, setVerbose } from "./consoleView.js";
 import { installPersistentInput, registerLiveCommands, printAbove, writeRawAbove, pauseInput, resumeInput, setStatusLine, setModelStrip, openPanel, refreshPanel } from "./terminalInput.js";
 import { ModelQueue, renderModelStrip } from "./modelQueue.js";
 import { ModelPanel } from "./modelPanel.js";
@@ -4369,12 +4370,14 @@ async function main(): Promise<void> {
   for (const level of ["log", "warn", "error"] as const) {
     const original = console[level].bind(console);
     console[level] = (...consoleArgs: unknown[]) => {
+      // What the TERMINAL shows is decided here (see consoleView.ts); the phone below still gets every line as written.
+      const shown = terminalView(level, consoleArgs);
       // printAbove clears the pinned input line, lets the real write happen
       // (real terminal scrollback, not a fake viewport), then redraws the
       // prompt + whatever the user has half-typed — a no-op passthrough when
       // the persistent input isn't installed (non-TTY/piped), so this works
       // unchanged either way.
-      printAbove(() => {
+      if (shown) printAbove(() => {
         // Markdown-lite (`` `code` `` / **bold**, see richText.ts) becomes real
         // ANSI for whoever's actually watching a terminal here — the phone
         // branch below still forwards the RAW consoleArgs, markdown markers
@@ -4383,7 +4386,7 @@ async function main(): Promise<void> {
         // only ever touches a leading "[ROLE]" tag, never the markdown-derived
         // content that follows it.
         original(
-          ...consoleArgs.map((a) =>
+          ...shown.map((a) =>
             typeof a === "string" ? linkifyFilePaths(colorizeRoleTag(toAnsi(a)), [repoRoot, process.cwd()]) : a,
           ),
         );
@@ -4798,12 +4801,17 @@ async function main(): Promise<void> {
 
   // Offers the roadmap's next unit, the way a queued task is offered. "no" leaves
   // the roadmap exactly as it is; "yes to all" runs through the rest unasked.
-  /** Asked once per roadmap: a roadmap spends money on its own, and nothing here limits it. Unattended, it is said and the run goes on. */
+  const ROADMAP_SPEND_NOTICE =
+    "A roadmap runs many model calls on its own and can cost real money. YimPim does not limit spend. Set a spending limit on your OpenRouter key before you continue.";
+  /**
+   * Asked once per roadmap: a roadmap spends money on its own, and nothing here limits it. Unattended, it is said and the run goes on.
+   * Normally it never appears as its own question: the notice rides on the first "yes next / yes to all" (see offerNextUnit), and
+   * answering yes there is the acknowledgment. This stands alone only for "/roadmap run" and similar, where no such question is asked.
+   */
   const confirmRoadmapSpend = async (): Promise<boolean> => {
     const rm = loadRoadmap(repoRoot);
     if (!rm || rm.costNoticeAckedAt) return true;
-    const notice =
-      "A roadmap runs many model calls on its own and can cost real money. YimPim does not limit spend. Set a spending limit on your OpenRouter key before you continue.";
+    const notice = ROADMAP_SPEND_NOTICE;
     if (!(isInteractive() || remote?.connected)) {
       console.log("[ROADMAP] " + notice);
       return true;
@@ -4833,24 +4841,34 @@ async function main(): Promise<void> {
     if (!rm || !nxt) return;
     const pr = roadmapProgress(rm);
     let go = roadmapAutoContinue;
+    // Not acknowledged yet: the spending notice is part of THIS question, so one answer settles both.
+    const noticeHere = !rm.costNoticeAckedAt;
     if (!go) {
       const answer = (
         await askAnywhere(
           {
             id: `roadmap_${runId}_${Date.now()}`,
             kind: "blocking",
-            prompt: `Roadmap: ${pr.done}/${pr.total} done. Next is ${nxt.id} "${nxt.title}". Continue?`,
+            prompt: `Roadmap: ${pr.done}/${pr.total} done. Next is ${nxt.id} "${nxt.title}". Continue?${noticeHere ? `\n\n${ROADMAP_SPEND_NOTICE}` : ""}`,
             choices: ["yes next", "yes to all", "no"],
             fallback: "no",
             askedAt: new Date().toISOString(),
           },
-          `Roadmap ${pr.done}/${pr.total} done — next: ${nxt.id} "${nxt.title}". [yes next / yes to all / no] `
+          `Roadmap ${pr.done}/${pr.total} done — next: ${nxt.id} "${nxt.title}".${noticeHere ? `\n${ROADMAP_SPEND_NOTICE}\n` : " "}[yes next / yes to all / no] `
         )
       );
       const understood = parseContinueAnswer(answer);
       if (understood !== "no") {
         roadmapAutoContinue = understood === "all";
         go = true;
+        if (noticeHere) {
+          // Saying yes to a question that carried the spending notice IS the acknowledgment; it is not asked again.
+          const fresh = loadRoadmap(repoRoot);
+          if (fresh && !fresh.costNoticeAckedAt) {
+            fresh.costNoticeAckedAt = new Date().toISOString();
+            saveRoadmap(repoRoot, fresh);
+          }
+        }
         console.log(understood === "all" ? "[ROADMAP] Understood: yes to all. I will not ask again for this roadmap; a failed unit or a \"no\" stops it." : "[ROADMAP] Understood: yes, just the next one.");
       } else {
         roadmapAutoContinue = false;
@@ -5271,6 +5289,11 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
     }
     remote = await connectRemote(config, repoRoot, runId, remote, (p: string) => { pendingAttachments.push(p); }, taskRunning);
   });
+  // The terminal hides routine bookkeeping (successful model calls, files read, gates that passed); the phone still gets every line.
+  const stopVerboseCommand = registerLiveCommands(["/verbose"], () => {
+    setVerbose(!isVerbose());
+    console.log(isVerbose() ? "[DISPLAY] Showing every line. Type /verbose again to hide routine detail." : "[DISPLAY] Routine detail hidden. Type /verbose to show every line.");
+  });
   // Models can be changed while a task runs: the change waits until that role next starts (see modelQueue.ts), the models in
   // use stay on a pinned row, and /model opens a small picker in the pinned area while the stream keeps scrolling above it.
   const modelQueue = new ModelQueue(config.models as Record<string, any>, PERSONAS.map((p) => p.key));
@@ -5344,6 +5367,7 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
   );
   const stopInputListener = () => {
     stopModelCommand();
+    stopVerboseCommand();
     stopLiveCommands();
     stopPersistentInput();
   };
@@ -5674,6 +5698,9 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
           // a signal handler, nothing forces this process to die before the
           // await resolves.
           if (remote?.connected) await remote.stop("desktop exited");
+          // Close the pinned input first: it erases its own rows, so the shell prompt that follows is not left sitting on the
+          // models row. The goodbye line is then an ordinary line.
+          stopPersistentInput();
           console.log("[YIMPIM] 👋 Session terminated.");
           process.exit(0);
         } else if (trimmed === "/ask" || trimmed.startsWith("/ask ")) {
@@ -6564,8 +6591,10 @@ The user wants you to decide, not ask: ${d.choice}`);
     // instruction hadn't gotten to yet.
     // A request that lists numbered jobs must not shrink to the first one: any job the plan does not cover is queued, whatever
     // the Planner wrote in its assumptions.
+    // Not for a roadmap unit: its prompt carries the WHOLE goal (every job) for context, so every other job would read as "dropped from
+    // this plan" and be queued again as a duplicate unit, and the unit's own prompt as one more. A unit is one job by definition.
     try {
-      const dropped = unplannedJobs(instructions, activePlan);
+      const dropped = activeUnitId ? [] : unplannedJobs(instructions, activePlan);
       if (dropped.length > 0) {
         activePlan.followUpTasks = [...(activePlan.followUpTasks ?? []), ...dropped];
         console.log(`[PLANNER] The request listed several jobs and this plan covers only part of them. ${dropped.length} job(s) were queued after it so they are not lost.`);
