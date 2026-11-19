@@ -147,6 +147,37 @@ export const SETTINGS: SettingDef[] = [
       "How OpenRouter picks a backend per call. 'throughput' avoids providers that are currently slow " +
       "or stalled instead of just picking the cheapest one.",
   },
+  {
+    key: "deepseek.sort",
+    type: "enum",
+    choices: ["default", "throughput", "price", "latency"],
+    group: "Models",
+    description:
+      "DeepSeek models only. DeepSeek is served by several providers at different speeds, so calls go to the fastest one " +
+      "(throughput) that is still under the price caps below. Overrides provider.sort for DeepSeek.",
+  },
+  {
+    key: "deepseek.maxPromptPrice",
+    type: "number",
+    group: "Models",
+    description: "DeepSeek models only. The most you will pay per million prompt tokens, in dollars. A provider above it is not used. 0 = no ceiling.",
+  },
+  {
+    key: "deepseek.maxCompletionPrice",
+    type: "number",
+    group: "Models",
+    description:
+      "DeepSeek models only. The most you will pay per million completion tokens, in dollars. If no provider is under both caps the call " +
+      "fails with a message saying so (and moves to the backup model). 0 = no ceiling.",
+  },
+  {
+    key: "deepseek.reasoningOff",
+    type: "string[]",
+    group: "Models",
+    description:
+      "DeepSeek models only. Agents (by name) that do not think before answering. Thinking is billed as output tokens. Default: " +
+      "DISCOVERY and EDITOR. Add REPAIR to turn it off there too; empty leaves the model's own default everywhere.",
+  },
 
   // ---- Cost and loop control ----------------------------------------------
   {

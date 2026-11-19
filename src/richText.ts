@@ -43,17 +43,39 @@ export function stripAnsi(s: string): string {
 // span at a glance. Deliberately NOT reusing green/red — those already carry
 // pass/fail meaning elsewhere (diff +/- stats, QA verdicts) and coloring the
 // tag itself the same way would suggest a status that isn't there.
+// The first five are the original ones and keep their exact codes. The rest are 256-colour so that every persona that speaks has a hue
+// of its own (VERIFIER and EXISTENCE had none). Red is left out on purpose: it already means failure. Infrastructure tags ([API],
+// [CONTROL], [REMOTE], [MODELS] ...) are not here and stay plain.
 const ROLE_TAG_COLORS: Record<string, string> = {
   DISCOVERY: "\x1b[34m", // blue
   PLANNER: "\x1b[35m", // magenta
   EDITOR: "\x1b[96m", // bright cyan
   REPAIR: "\x1b[33m", // yellow
   QA: "\x1b[32m", // green
+  VERIFIER: "\x1b[38;5;42m", // spring green
+  "VERIFIER-NAV": "\x1b[38;5;36m", // teal green
+  "VERIFIER-VISUAL": "\x1b[38;5;79m", // aqua
+  EXISTENCE: "\x1b[38;5;208m", // orange
+  EXISTS: "\x1b[38;5;208m", // orange (the audit's own tag)
+  REPAIR_PLANNER: "\x1b[38;5;179m", // gold
+  TESTABILITY_PLANNER: "\x1b[38;5;141m", // lavender
+  ROADMAP_PLANNER: "\x1b[38;5;171m", // orchid
+  ROADMAP: "\x1b[38;5;147m", // periwinkle
+  ADVISOR: "\x1b[38;5;111m", // sky blue
+  SETUP: "\x1b[38;5;250m", // light grey
+  DESIGNER: "\x1b[38;5;205m", // pink
+  SECURITY: "\x1b[38;5;99m", // violet
+  TESTS: "\x1b[38;5;37m", // teal
 };
 // Leading newlines (group 1) are common — most of these calls open with
 // "\n[EDITOR] ..." for a blank-line separator before the tag — and must stay
 // OUTSIDE the color codes so they still function as plain line breaks.
-const ROLE_TAG_RE = /^(\n*)\[(DISCOVERY|PLANNER|EDITOR|REPAIR|QA)\]/;
+// Longest names first, so "REPAIR_PLANNER" is not read as "REPAIR".
+const ROLE_TAG_RE = new RegExp(
+  `^(\\n*)\\[(${Object.keys(ROLE_TAG_COLORS)
+    .sort((a, b) => b.length - a.length)
+    .join("|")})\\]`,
+);
 
 /**
  * Colors a leading `[ROLE]` tag (DISCOVERY/PLANNER/EDITOR/REPAIR/QA) so
@@ -67,6 +89,7 @@ const ROLE_TAG_RE = /^(\n*)\[(DISCOVERY|PLANNER|EDITOR|REPAIR|QA)\]/;
  * appearing mid-message is left alone too.
  */
 export function colorizeRoleTag(text: string): string {
+  if (process.env.NO_COLOR) return text;
   const m = ROLE_TAG_RE.exec(text);
   if (!m) return text;
   const [whole, leadingNewlines, role] = m;

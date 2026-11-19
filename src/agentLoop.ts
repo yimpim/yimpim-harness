@@ -615,7 +615,10 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
         const note = String(args.explanation ?? "").trim();
         const headline = note.split(/\r?\n/).find((l) => l.trim())?.trim() ?? "";
         const clipped = headline.length > 160 ? `${headline.slice(0, 157)}…` : headline;
-        console.log(`\n[AGENT EXIT] ${args.status}${clipped ? ` — ${clipped}` : ""}\n`);
+        // Said under the persona that is finishing, like every other line it prints, so it takes that persona's colour.
+        const outcome =
+          args.status === "FINISHED_PATCHING" ? "✔ Finished patching" : args.status === "ALREADY_COMPLETED" ? "✔ Already satisfied" : "⚠ Could not locate the change";
+        console.log(`\n[${displayName}] ${outcome}${clipped ? ` — ${clipped}` : ""}\n`);
 
         if (args.status === "ALREADY_COMPLETED") {
           emitAgentEnd(rounds, "completed");

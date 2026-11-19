@@ -157,9 +157,10 @@ import {
 import { buildRemovalCommand } from "./cleanupCommand.js";
 import { runControl, AbortedError, askAnywhere, askChoice, setQuestionExplainer } from "./remote/control.js";
 import { plainWordsFor } from "./plainWords.js";
-import { terminalView, isVerbose, setVerbose } from "./consoleView.js";
-import { installPersistentInput, registerLiveCommands, printAbove, writeRawAbove, pauseInput, resumeInput, setStatusLine, setModelStrip, openPanel, refreshPanel } from "./terminalInput.js";
-import { ModelQueue, renderModelStrip } from "./modelQueue.js";
+import { terminalView, isVerbose, setVerbose, setStatusAvailable, wrapForTerminal } from "./consoleView.js";
+import { composeStatus, liveCallCount } from "./liveCalls.js";
+import { installPersistentInput, registerLiveCommands, printAbove, writeRawAbove, pauseInput, resumeInput, setStatusLine, setModelStrip, hasPinnedInput, openPanel, refreshPanel } from "./terminalInput.js";
+import { ModelQueue } from "./modelQueue.js";
 import { ModelPanel } from "./modelPanel.js";
 import { provisionRelay, RelayUnavailable, ProvisionedRelay } from "./remote/autoRelay.js";
 import { executeLinkFlow, getValidProToken } from "./remote/auth.js";
@@ -4387,7 +4388,10 @@ async function main(): Promise<void> {
         // content that follows it.
         original(
           ...shown.map((a) =>
-            typeof a === "string" ? linkifyFilePaths(colorizeRoleTag(toAnsi(a)), [repoRoot, process.cwd()]) : a,
+            typeof a === "string"
+              ? // Wrapped at word boundaries, continued under the text, before file paths become links (a link is long and invisible).
+                linkifyFilePaths(wrapForTerminal(colorizeRoleTag(toAnsi(a)), process.stdout.isTTY ? process.stdout.columns || 0 : 0), [repoRoot, process.cwd()])
+              : a,
           ),
         );
       });
@@ -4506,6 +4510,16 @@ async function main(): Promise<void> {
   });
 
   const runningAgentLabels: string[] = [];
+  // The one live line under the stream: what the run is on, and what model calls are being waited on right now, with moving dots.
+  // The wait is shown here and not as a line per call every 20 seconds, which, with several workers at once, was a wall of text.
+  const refreshStatus = () => setStatusLine(composeStatus(runningAgentLabels[runningAgentLabels.length - 1], Date.now(), (process.stdout.columns || 80) - 4));
+  setStatusAvailable(hasPinnedInput);
+  let liveBefore = 0;
+  setInterval(() => {
+    const now = liveCallCount();
+    if (now > 0 || liveBefore > 0) refreshStatus();
+    liveBefore = now;
+  }, 500).unref();
     events.onEmit((event) => {
     if (event.type === "phase.end" && taskRunning && currentTaskId) {
       usageLedger().endPhase(
@@ -4525,15 +4539,14 @@ async function main(): Promise<void> {
       lastWorkerId = currentWorkerId;
       const phase = currentPhaseForEvents ? `${currentPhaseForEvents.name} · ` : "";
       runningAgentLabels.push(`${phase}${event.agent}`);
-      setStatusLine(`${runningAgentLabels[runningAgentLabels.length - 1]} running…`);
+      refreshStatus();
     }
     // The line says what is running NOW. When an agent ends it goes, or shows the one still running; it used to stay until the
     // whole task finished, so "DISCOVERY running…" sat there through the planner, the editor and the idle prompt.
     if (event.type === "agent.end") {
       const ended = runningAgentLabels.findIndex((l) => l.endsWith(`${event.agent}`));
       if (ended >= 0) runningAgentLabels.splice(ended, 1);
-      const left = runningAgentLabels[runningAgentLabels.length - 1];
-      setStatusLine(left ? `${left} running…` : undefined);
+      refreshStatus();
     }
 
     if (remote?.connected) {
@@ -5297,8 +5310,9 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
   // Models can be changed while a task runs: the change waits until that role next starts (see modelQueue.ts), the models in
   // use stay on a pinned row, and /model opens a small picker in the pinned area while the stream keeps scrolling above it.
   const modelQueue = new ModelQueue(config.models as Record<string, any>, PERSONAS.map((p) => p.key));
-  const STRIP_ROLES = ["discovery", "planner", "editor", "repair", "verifier"];
-  const refreshModelStrip = () => setModelStrip(renderModelStrip(modelQueue, PERSONAS, STRIP_ROLES));
+  // The models row under the prompt is gone: every call already says which persona and model it used, and /model lists them all.
+  // Switching while a task runs still works; only the permanent row is cleared.
+  const refreshModelStrip = () => setModelStrip(undefined);
   const roleLabel = (role: string) => PERSONAS.find((p) => p.key === role)?.label ?? role;
   modelQueue.onChange((c) => {
     refreshModelStrip();
