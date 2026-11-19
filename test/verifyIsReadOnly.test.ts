@@ -17,3 +17,13 @@ describe("verify is read-only", () => {
     assert.match(p, /it is "audit"; when they want the missing part built it is "task"/);
   });
 });
+
+describe("a REPAIR call during verification is explained", () => {
+  test("the verifier says which tests were already failing, and that this phase did not cause them, before the workers start", () => {
+    const text = src("verifierTools.ts").replace(/\r\n/g, "\n");
+    const say = text.indexOf("were already failing before this phase:");
+    const heal = text.indexOf("await healTests({", say);
+    assert.ok(say > 0 && heal > say, "the explanation comes before healTests runs");
+    assert.match(text.slice(say, say + 260), /This phase did not cause/);
+  });
+});

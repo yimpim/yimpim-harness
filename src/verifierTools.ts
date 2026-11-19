@@ -29,7 +29,8 @@ import { createSerialHooks } from "./qaFirmware.js";
 import { extractTestFailureReport } from "./testReport.js";
 import { selectTests, failsBefore } from "./testGraph.js";
 import { failingTestFiles, healTests, type HealCall } from "./testHeal.js";
-import { runSuiteLogged, selectUnverified, loadLog, staleSince } from "./testLog.js";
+import { runSuiteLogged, selectUnverified, loadLog, staleSince, healParked } from "./testLog.js";
+import { digestFailure } from "./failureDigest.js";
 import { passingTestFiles } from "./testRun.js";
 import { isEvidenceNoise } from "./roadmap.js";
 
@@ -2649,27 +2650,52 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
 
     let stillRed: string[] = [];
     if (already.length > 0) {
+      // A test that automatic healing has already failed to fix is not paid for again in every phase: it is reported, and
+      // "/tests heal" (or editing the test) tries it again.
+      const parked = already.filter((f) => healParked(this.repoRoot, f));
+      const retry = already.filter((f) => !parked.includes(f));
+      if (parked.length > 0) {
+        console.log(
+          `[VERIFIER] ${parked.length} test file(s) already failing before this phase are not retried: ${parked.join(", ")}. ` +
+            `REPAIR could not fix ${parked.length === 1 ? "it" : "them"} earlier, and this phase did not cause ${parked.length === 1 ? "it" : "them"}. "/tests heal" tries again.`
+        );
+        stillRed.push(...parked.map((f) => `${f} (known red: automatic healing failed earlier and is not repeated each phase)`));
+      }
+      if (retry.length > 0) {
+        // Said before the workers start, so a REPAIR call in the middle of verification is never unexplained.
+        console.log(
+          `[VERIFIER] ${retry.length} test file(s) were already failing before this phase: ${retry.join(", ")}. ` +
+            `Asking REPAIR to bring ${retry.length === 1 ? "it" : "them"} up to date. This phase did not cause ${retry.length === 1 ? "it" : "them"}.`
+        );
+      }
       const models = this.config.models.repair ?? this.config.models.editor;
       const call: HealCall = async (messages, _label, _json) => {
         const m = await this.client.complete(models, messages, { temperature: 0, agent: "REPAIR", jsonMode: true });
         return m?.content ?? m?.choices?.[0]?.message?.content ?? "";
       };
       try {
-        const healed = await healTests({ repoRoot: this.repoRoot, files: already, call, log: (l) => console.log(`[TESTS] ${l}`) });
-        stillRed = healed.results.filter((r) => r.status !== "healed" && r.status !== "already-green").map((r) => `${r.file} (${r.status}: ${r.note})`);
+        if (retry.length === 0) throw new Error("nothing to retry");
+        const healed = await healTests({ repoRoot: this.repoRoot, files: retry, call, log: (l) => console.log(`[TESTS] ${l}`) });
+        stillRed.push(...healed.results.filter((r) => r.status !== "healed" && r.status !== "already-green").map((r) => `${r.file} (${r.status}: ${r.note})`));
         const fixed = healed.results.filter((r) => r.status === "healed").length;
         if (fixed > 0) {
           ledger.add({ tier: "build", gate: "red tests in this area healed", method: "executed", status: "pass", blocking: false, detail: `${fixed} test file(s) were already failing before this phase and were out of date; they were updated to match the code` });
         }
       } catch {
-        stillRed = already;
+        // Nothing to retry is not a failure; a heal that threw leaves what it was asked about red.
+        if (retry.length > 0) stillRed.push(...retry);
       }
     }
     if (stillRed.length > 0) {
       ledger.add({ tier: "build", gate: "red tests already failing before this phase", method: "executed", status: "inconclusive", blocking: false, detail: `${stillRed.join("; ")}. Not caused by this phase.` });
     }
     if (caused.length > 0) {
-      const report = extractTestFailureReport(run.output, 8000) ?? run.output.split(/\r?\n/).slice(-40).join("\n").slice(0, 4000);
+      const raw = extractTestFailureReport(run.output, 8000) ?? run.output.split(/\r?\n/).slice(-40).join("\n").slice(0, 4000);
+      // What REPAIR reads first: how many failures, how many DISTINCT causes, and the first line of the project's own code each points
+      // at, with the code around it. Eighty tests dying on one missing function are one cause, not eighty traces. The curated output
+      // follows for anything the digest leaves out.
+      const digest = digestFailure(run.output, this.repoRoot, caused[0]);
+      const report = digest.text ? `${digest.text}\n\nTEST OUTPUT (start)\n${raw.slice(0, 3500)}` : raw;
       ledger.add({
         tier: "build", gate, method: "executed", status: "fail", blocking: true,
         detail: `${caused.length} test file(s) passed before this phase and fail now (${scope}): ${caused.join(", ")}${before ? "" : " (the earlier state could not be checked, so every failure is assumed to be this phase's)"}\n${report}`,
