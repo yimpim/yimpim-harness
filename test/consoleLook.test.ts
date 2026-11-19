@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { terminalView, setVerbose, setStatusAvailable, plainTagEmoji, wrapForTerminal, visibleWidth } from "../src/consoleView.js";
 import { colorizeRoleTag, stripAnsi } from "../src/richText.js";
-import { trackCall, describeLiveCalls, liveCallCount, composeStatus, dots } from "../src/liveCalls.js";
+import { trackCall, describeLiveCalls, liveCallCount, composeStatus, dots, resetStep } from "../src/liveCalls.js";
 
 afterEach(() => {
   setVerbose(false);
   setStatusAvailable(() => false);
+  resetStep();
 });
 const view = (s: string): string => (terminalView("log", [s]) as string[])[0];
 
@@ -135,7 +136,7 @@ describe("what is being waited on, on one line", () => {
     const a = trackCall("REPAIR", "deepseek/deepseek-v4.1-flash-1017");
     const b = trackCall("REPAIR", "deepseek/deepseek-v4.1-flash-1017");
     try {
-      assert.match(describeLiveCalls() as string, /^REPAIR ×2 · deepseek-v4\.1-flash-1017 · (\d+m )?\d+s · waiting$/);
+      assert.equal(describeLiveCalls(), "REPAIR ×2 · deepseek-v4.1-flash-1017");
       const line = composeStatus("1/9 Extend vocabulary · QA", 0) as string;
       assert.match(line, /^1\/9 Extend vocabulary · QA running · calling REPAIR ×2 · deepseek-v4\.1-flash-1017/);
     } finally {
@@ -163,7 +164,7 @@ describe("what is being waited on, on one line", () => {
     const a = trackCall("REPAIR", "x/one");
     const b = trackCall("VERIFIER", "x/two");
     try {
-      assert.match(describeLiveCalls() as string, /^REPAIR, VERIFIER · (\d+m )?\d+s · waiting$/);
+      assert.equal(describeLiveCalls(), "REPAIR, VERIFIER");
     } finally {
       a();
       b();
@@ -195,7 +196,9 @@ describe("the wiring", () => {
   test("a model call is counted while it is in flight and ended where its ticker stops", () => {
     const src = read("../src/openrouter.ts");
     assert.match(src, /const endCall = trackCall\(agent, model\);/);
-    assert.equal(src.split("endCall();").length - 1, 3);
+    // Two failure paths end it as an estimate; the success path ends it with the provider's exact count.
+    assert.equal(src.split("endCall();").length - 1, 2);
+    assert.ok(src.includes("endCall.done(usage?.completion);"));
   });
   test("the exit note is said under the persona that is finishing", () => {
     const src = read("../src/agentLoop.ts");
@@ -213,7 +216,7 @@ describe("the wiring", () => {
   });
   test("the status line animates only while calls are in flight", () => {
     const src = read("../src/index.ts");
-    assert.match(src, /if \(now > 0 \|\| liveBefore > 0\) refreshStatus\(\);/);
+    assert.match(src, /if \(liveCallCount\(\) > 0 \|\| stepActive\(\)\) refreshStatus\(\);/);
   });
 });
 
