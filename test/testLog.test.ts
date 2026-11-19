@@ -167,3 +167,26 @@ describe("a phase that changed nothing still runs tests", () => {
     assert.deepEqual(selectUnverified(dir).selected, ["__tests__/a.test.ts"]);
   });
 });
+
+import { staleSince } from "../src/testLog.js";
+
+describe("tests gone stale outside the current change are found now", () => {
+  test("a test never logged is not stale: a first run is not 'everything'", () => {
+    assert.deepEqual(staleSince(dir), []);
+  });
+  test("a logged test whose source changed since it last ran is stale; one that did not change is not", () => {
+    allGreen();
+    write("src/a.ts", "export const a = 2;");
+    assert.deepEqual(staleSince(dir), ["__tests__/a.test.ts"]);
+  });
+  test("a red test whose dependencies changed since (it may be fixed) is stale; a red one that did not change is not", () => {
+    recordRun(dir, [], { ok: false, output: "FAIL __tests__/a.test.ts\nFAIL __tests__/b.test.ts" });
+    write("src/b.ts", "export const b = 2;");
+    assert.deepEqual(staleSince(dir), ["__tests__/b.test.ts"]);
+  });
+  test("tests the change already selects are not listed twice", () => {
+    allGreen();
+    write("src/a.ts", "export const a = 2;");
+    assert.deepEqual(staleSince(dir, ["__tests__/a.test.ts"]), []);
+  });
+});
