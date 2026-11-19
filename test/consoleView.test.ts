@@ -11,7 +11,10 @@ describe("routine bookkeeping is not drawn on the terminal", () => {
     assert.ok(hidden("\r\x1b[K[API] deepseek/deepseek-v4-flash-0731 (REPAIR) ✔ (6.2s)"));
     assert.ok(!hidden("[API] deepseek/x (EDITOR) (retry 2/3) ✔ (4.0s)"), "a call that needed a retry is worth seeing");
     assert.ok(!hidden("[API] deepseek/x (EDITOR) ❌ (30.1s)"));
-    assert.ok(!hidden("[API] Still waiting on deepseek/x (EDITOR) — 60s elapsed"));
+    assert.ok(hidden("[API] Still waiting on deepseek/x (EDITOR) — 20s elapsed"), "the 20s and 40s ticks are not drawn");
+    assert.ok(hidden("[API] Still waiting on deepseek/x (EDITOR) — 80s elapsed"));
+    assert.ok(!hidden("[API] Still waiting on deepseek/x (EDITOR) — 60s elapsed"), "once a minute it shows the call is alive");
+    assert.ok(!hidden("[API] Still waiting on deepseek/x (EDITOR) — 180s elapsed"));
   });
   test("files read, searches, memory saves, the environment report and passing gates are hidden", () => {
     for (const l of [
