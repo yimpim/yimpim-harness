@@ -252,9 +252,25 @@ export function openPanel(p: PinnedPanel): () => void {
   return () => closePanel(p);
 }
 
+/**
+ * What an Esc press does. Esc closes the picker, and that must never also stop the run: an Esc that arrives just after the picker
+ * closed (a second press, or the same key seen twice) is ignored. With something typed, Esc clears it. Only on an empty prompt does
+ * it ask to stop, and it takes a second press to do it, so one stray key cannot throw a run away.
+ */
+export const ESC_GRACE_MS = 800;
+export const ESC_CONFIRM_MS = 2000;
+export function decideEscape(s: { now: number; panelClosedAt: number; line: string; armedAt: number }): "ignore" | "clear" | "arm" | "abort" {
+  if (s.now - s.panelClosedAt < ESC_GRACE_MS) return "ignore";
+  if (s.line.length > 0) return "clear";
+  return s.now - s.armedAt < ESC_CONFIRM_MS ? "abort" : "arm";
+}
+let panelClosedAt = 0;
+let escArmedAt = 0;
+
 function closePanel(p?: PinnedPanel): void {
   if (!panel || (p && panel !== p)) return;
   panel = undefined;
+  panelClosedAt = Date.now();
   if (rl) {
     (rl as any).line = panelSavedLine;
     (rl as any).cursor = panelSavedLine.length;
@@ -567,11 +583,21 @@ function setup(): void {
       return;
     }
     if (key?.name === "escape") {
-      // Bonus path, not load-bearing: /stop is now the primary way to
-      // interrupt from the keyboard, reachable regardless of whether raw
-      // keypress detection behaves in a given terminal. Esc still works
-      // wherever it already did.
-      runControl.requestAbort("keyboard (Esc)");
+      // /stop is the primary way to interrupt from the keyboard, reachable whether or not raw keypress detection behaves in a
+      // given terminal. Esc also works, but only deliberately: see decideEscape.
+      const now = Date.now();
+      const act = decideEscape({ now, panelClosedAt, line: rl?.line ?? "", armedAt: escArmedAt });
+      if (act === "clear" && rl) {
+        (rl as any).line = "";
+        (rl as any).cursor = 0;
+        refreshInputArea();
+      } else if (act === "arm") {
+        escArmedAt = now;
+        console.log("[CONTROL] Press Esc again within 2 seconds to stop the run, or type /stop.");
+      } else if (act === "abort") {
+        escArmedAt = 0;
+        runControl.requestAbort("keyboard (Esc)");
+      }
       return;
     }
     if (key?.ctrl && key.name === "c") {

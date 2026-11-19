@@ -3277,6 +3277,10 @@ Test hook just added: ${hookHowTo}` : hookHowTo;
     }
 
     if (result.passed) {
+      // A run stopped while it was being verified did not finish verifying: every reviewer call failed with "Run aborted", which
+      // the verdict reads as "reviewer unavailable" and still passes. That is not a pass and must not be committed. The edits stay
+      // in the working tree, and "/continue" picks the phase up again.
+      if (runControl.isAborted) throw new AbortedError(runControl.reason);
       // Nothing left to remember once the phase actually passes.
       if (phase.id) savePhaseRepairContext(repoRoot, phase.id, undefined);
 
