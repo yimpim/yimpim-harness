@@ -67,6 +67,25 @@ describe("runs that need no approval", () => {
     const r = project();
     assert.equal(decide(r, "node a.test.js", { files: [".hook.js"], dirs: [] }), "ask");
   });
+  test("but reading the repository never asks, hidden files or not: git cannot load them", () => {
+    const r = project();
+    const made = { files: [".jest-summary.cjs", ".jest-dashboard-report.json"], dirs: [] };
+    for (const c of ["git status", "git status --short", "git show HEAD:app/dashboard.tsx", "git diff --stat", "git log --oneline -5", "git rev-parse HEAD", "git ls-files", "git blame app/a.ts"]) {
+      assert.equal(decide(r, c, made), "allow", c);
+      assert.equal(decide(r, c), "allow", c);
+    }
+  });
+  test("a git command that changes anything still asks, however many hidden files exist", () => {
+    const r = project();
+    const made = { files: [".jest-summary.cjs"], dirs: [] };
+    for (const c of ["git stash push -- app/a.ts", "git checkout main", "git reset --hard", "git commit -m x", "git clean -fd", "git diff --output=out.txt", "git push"]) {
+      assert.notEqual(decide(r, c, made), "allow", c);
+    }
+  });
+  test("running the agent's own script from a hidden file still asks", () => {
+    const r = project();
+    assert.equal(decide(r, "node .jest-summary.cjs", { files: [".jest-summary.cjs"], dirs: [] }), "ask");
+  });
   test("the helper itself", () => {
     const r = project();
     assert.equal(isAutoSafeRun(argv("node a.test.js"), r, r), true);

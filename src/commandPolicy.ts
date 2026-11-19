@@ -659,9 +659,13 @@ export function evaluateCommand(command: string, opts: EvaluateOptions): Command
     (opts.approvals?.isFamilyApproved(repoRoot, cwdRel, fingerprint, (a) => isProjectTestRun(a, cwd)) ?? false);
   // A test or check that only runs the project's own code needs no approval, unless the agent created files this run would
   // load on its own (hidden files, setup hooks): those still bind the fingerprint and ask.
+  // Reading the repository's state or history (git status, diff, log, show...) is the exception: it loads none of those files, so a hidden
+  // file the agent made cannot change what it does, and asking about it only trains a person to click yes. Every other safe run keeps the rule.
+  const readsOnly = executableName(argv[0]) === "git" && isReadOnlyGit(argv.slice(1));
   const autoSafe =
-    isAutoSafeRun(argv, cwd, repoRoot) &&
-    fingerprint === commandFingerprint(argv, cwd, repoRoot, { files: [], dirs: [], trusted: opts.agentCreated?.trusted });
+    readsOnly ||
+    (isAutoSafeRun(argv, cwd, repoRoot) &&
+      fingerprint === commandFingerprint(argv, cwd, repoRoot, { files: [], dirs: [], trusted: opts.agentCreated?.trusted }));
   const remembered = autoSafe || testFamilyApproved || (opts.approvals?.isApproved(repoRoot, argv, cwdRel, fingerprint) ?? false);
   const changedSinceApproval =
     !remembered && (opts.approvals?.approvedBeforeWithDifferentFiles(repoRoot, argv, cwdRel) ?? false);
