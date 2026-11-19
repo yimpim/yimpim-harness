@@ -161,7 +161,9 @@ export class OpenRouterClient {
     response: Response,
     controller: AbortController,
     idleTimeoutMs: number,
-    onFirstChunk?: () => void
+    onFirstChunk?: () => void,
+    /** Told how many characters the model has produced so far (answer, thinking and tool arguments), for the live status line. */
+    onProgress?: (chars: number) => void
   ): Promise<{ message: ChatMessage; usage?: TokenUsage }> {
     if (!response.body) {
       throw new Error("Streaming response carried no body to read.");
@@ -269,6 +271,11 @@ export class OpenRouterClient {
       if (typeof delta.thought_signature === "string") thoughtSignature = delta.thought_signature;
 
       if (Array.isArray(delta.tool_calls)) for (const tc of delta.tool_calls) mergeToolCallDelta(tc);
+      if (onProgress) {
+        let chars = content.length + reasoning.length + thought.length;
+        for (const tc of toolCalls) chars += tc?.function?.arguments?.length ?? 0;
+        onProgress(chars);
+      }
 
       for (const [key, value] of Object.entries(delta)) {
         if (ASSEMBLED_DELTA_KEYS.has(key) || value == null) continue;
@@ -648,8 +655,12 @@ export class OpenRouterClient {
             // here would leave a 30s generation looking frozen, and would print
             // the "✔ (0.4s)" line as if the call had already finished. The
             // elapsed time on that line must keep meaning "this whole call".
-            const { message, usage } = await this.readStreamedCompletion(response, controller, idleStreamTimeoutMs, () =>
-              clearTimeout(firstChunkTimer)
+            const { message, usage } = await this.readStreamedCompletion(
+              response,
+              controller,
+              idleStreamTimeoutMs,
+              () => clearTimeout(firstChunkTimer),
+              endCall.progress
             );
 
             clearInterval(ticker);
