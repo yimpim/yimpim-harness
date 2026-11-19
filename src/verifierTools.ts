@@ -29,7 +29,7 @@ import { createSerialHooks } from "./qaFirmware.js";
 import { extractTestFailureReport } from "./testReport.js";
 import { selectTests, failsBefore } from "./testGraph.js";
 import { failingTestFiles, healTests, type HealCall } from "./testHeal.js";
-import { runSuiteLogged, selectUnverified, loadLog } from "./testLog.js";
+import { runSuiteLogged, selectUnverified, loadLog, staleSince } from "./testLog.js";
 import { passingTestFiles } from "./testRun.js";
 import { isEvidenceNoise } from "./roadmap.js";
 
@@ -2586,6 +2586,7 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
    */
   private async selectedTestGate(change: ChangeSet | undefined, ledger: EvidenceLedger): Promise<void> {
     let sel: ReturnType<typeof selectTests>;
+    let staleCount = 0;
     // Files the tools themselves write (build logs, caches, review notes) are not changes to the code under test. A verify-only phase
     // whose only "change" is the export log its own build gate wrote is still a phase that changed nothing.
     const touched = change
@@ -2595,6 +2596,15 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
     try {
       if (!nothingChanged) {
         sel = selectTests(this.repoRoot, touched);
+        // Tests whose dependencies changed since they last ran (an earlier task that stopped mid-edit, a rename by an editor) are not
+        // reached by THIS change but are stale all the same: run them now, so one red test is found now and not eighteen later.
+        if (!sel.everything) {
+          const stale = staleSince(this.repoRoot, sel.selected);
+          if (stale.length > 0) {
+            sel = { ...sel, selected: [...sel.selected, ...stale], skipped: sel.skipped.filter((t) => !stale.includes(t)) };
+            staleCount = stale.length;
+          }
+        }
       } else {
         // Nothing changed, so there is nothing to select by. Every test runs except those the log shows unchanged since green.
         sel = selectUnverified(this.repoRoot);
@@ -2609,7 +2619,7 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
       ? `no code changed; ${sel.skipped.length} test file(s) are unchanged since their last green run`
       : sel.everything
         ? "project-wide config changed, so every test runs"
-        : `${sel.skipped.length} skipped: they do not reach any changed file${sel.uncertain.length ? `; ${sel.uncertain.length} run because their imports could not all be resolved` : ""}`;
+        : `${sel.skipped.length} skipped: they do not reach any changed file${sel.uncertain.length ? `; ${sel.uncertain.length} run because their imports could not all be resolved` : ""}${staleCount ? `; ${staleCount} run because what they depend on changed since they last ran` : ""}`;
     if (sel.selected.length === 0) {
       if (nothingChanged) {
         const log = loadLog(this.repoRoot).files;

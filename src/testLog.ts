@@ -164,6 +164,23 @@ export function selectUnverified(root: string): { selected: string[]; skipped: s
   return { selected: all.filter((t) => !same.has(t)), skipped: all.filter((t) => same.has(t)), uncertain: [], everything: false };
 }
 
+/**
+ * Tests the log has run before whose dependencies are different now from when they last ran (green or red): an earlier task that
+ * stopped mid-edit, an editor that renamed something, a change by hand. A phase selects tests by what IT changed, so these would
+ * stay stale until the full suite. A test never logged is not here (nothing says it was ever known), so a first run is not "everything".
+ */
+export function staleSince(root: string, exclude: string[] = []): string[] {
+  const log = loadLog(root);
+  const skip = new Set(exclude.map(posix));
+  const known = listTestFiles(root).map(posix).filter((t) => log.files[t] && !skip.has(t));
+  if (known.length === 0) return [];
+  const fps = fingerprints(root, known);
+  return known.filter((t) => {
+    const f = fps.get(t);
+    return !f || !f.trusted || f.fp !== log.files[t].fingerprint;
+  });
+}
+
 /** The stored diagnosis of a red test, if nothing it depends on has changed since and the healing logic is the same. */
 export function verdictFor(root: string, file: string): StoredVerdict | undefined {
   const e = loadLog(root).files[posix(file)];
