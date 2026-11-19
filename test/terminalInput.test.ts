@@ -112,3 +112,21 @@ describe("leaving the session does not leave the pinned rows on screen", () => {
     assert.match(disposer, /clearInputArea\(\);[\s\S]*teardown\(\);/);
   });
 });
+
+import { statusRepaintSequence } from "../src/terminalInput.js";
+
+describe("the status row is rewritten in place, in one write", () => {
+  test("up to the row, clear it, write it, back down, and to the cursor's own column", () => {
+    assert.equal(statusRepaintSequence("▸ REPAIR running", 3, 11), "\u001b[3A\r\u001b[2K▸ REPAIR running\u001b[3B\u001b[12G");
+  });
+  test("it is a single string, so the terminal never shows the row half done", () => {
+    assert.equal(typeof statusRepaintSequence("x", 2, 0), "string");
+  });
+  test("setStatusLine uses it only when just the words changed, and otherwise redraws everything as before", () => {
+    const src = fs.readFileSync(new URL("../src/terminalInput.ts", import.meta.url), "utf-8").replace(/\r\n/g, "\n");
+    assert.match(src, /if \(hadRow && text !== undefined && paintStatusInPlace\(text\)\) return;\n\s+clearInputArea\(\);\n\s+redrawInputArea\(\);/);
+    // Only with certain geometry: a one-row prompt, the cursor on it, the status row present, no paste in progress.
+    assert.match(src, /lastStatusRows !== 1 \|\| lastPromptRows !== 1/);
+    assert.match(src, /pos\.rows !== 0/);
+  });
+});

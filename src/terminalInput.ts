@@ -219,10 +219,36 @@ function clearInputArea(): void {
  */
 export function setStatusLine(text: string | undefined): void {
   if (text === statusLine) return;
+  const hadRow = statusLine !== undefined;
   statusLine = text;
   if (!rl) return;
+  // The line moves every half second while a step runs (its time, its tokens, the dots). Clearing and redrawing the whole pinned area for
+  // that makes some terminals flash. When only the words on the status row change, that one row is rewritten where it is.
+  if (hadRow && text !== undefined && paintStatusInPlace(text)) return;
   clearInputArea();
   redrawInputArea();
+}
+
+/**
+ * The bytes that rewrite one row `up` rows above the cursor and put the cursor back where it was: up, to column 1, clear the row, the
+ * text, back down, and to the cursor's own column. One string, written once, so there is no frame in which the row is half done.
+ */
+export function statusRepaintSequence(text: string, up: number, cursorCol: number): string {
+  return `\x1b[${up}A\r\x1b[2K${text}\x1b[${up}B\x1b[${cursorCol + 1}G`;
+}
+
+/**
+ * Rewrites the status row without touching anything else. Only done when the geometry is certain (a one-row prompt, the cursor on it,
+ * the status row present); otherwise it says so and the caller redraws everything, as it always did.
+ */
+function paintStatusInPlace(text: string): boolean {
+  if (!rl || !process.stdout.isTTY || paste.pasting || lastStatusRows !== 1 || lastPromptRows !== 1) return false;
+  const pos = (rl as any).getCursorPos?.() as { rows: number; cols: number } | undefined;
+  if (!pos || pos.rows !== 0) return false;
+  const up = totalReservedRows() - 1; // the same distance clearInputArea travels to reach the top row
+  if (up < 2) return false;
+  process.stdout.write(statusRepaintSequence(renderStatusLine(text), up, pos.cols));
+  return true;
 }
 
 /** The models-in-use row, pinned under the status line. */
