@@ -631,6 +631,15 @@ export function installPersistentInput(): () => void {
   installed = true;
   setup();
   return () => {
+    // Leaving for good: erase the pinned area (status, divider, prompt, the models row under it) so the shell's own prompt starts
+    // on a clean row. Left on screen, the models row looks like text typed at the shell prompt, and typing over it garbles both.
+    if (rl && process.stdout.isTTY) {
+      try {
+        clearInputArea();
+      } catch {
+        // a terminal that cannot move the cursor keeps what it has
+      }
+    }
     installed = false;
     teardown();
   };

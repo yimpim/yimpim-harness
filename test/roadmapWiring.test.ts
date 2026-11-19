@@ -122,3 +122,21 @@ describe("the model decides, and what it chose is checked", () => {
     assert.ok(!/parseRoadmapPhrase/.test(src));
   });
 });
+
+describe("the spending notice is not a second question", () => {
+  test("it rides on the first 'yes next / yes to all' and answering yes acknowledges it, so it is not asked again", () => {
+    const block = src.slice(src.indexOf("const offerNextUnit = async"), src.indexOf("const handleProgram = async"));
+    assert.match(block, /const noticeHere = !rm\.costNoticeAckedAt;/);
+    assert.ok(block.includes("${noticeHere ?") && block.includes("${ROADMAP_SPEND_NOTICE}"), "the notice is part of the question text");
+    const yes = block.indexOf("if (noticeHere) {");
+    const spend = block.indexOf("confirmRoadmapSpend()");
+    assert.ok(yes > 0 && spend > yes, "the acknowledgment is saved before the standalone check runs");
+    assert.match(block, /fresh\.costNoticeAckedAt = new Date\(\)\.toISOString\(\)/);
+  });
+});
+
+describe("a roadmap unit does not re-queue the jobs its own prompt mentions", () => {
+  test("the 'jobs the plan does not cover' safety net is skipped while a unit runs", () => {
+    assert.match(src, /const dropped = activeUnitId \? \[\] : unplannedJobs\(instructions, activePlan\);/);
+  });
+});

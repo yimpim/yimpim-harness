@@ -57,6 +57,7 @@ export const DESKTOP_SLASH_COMMANDS: SlashCommand[] = [
   { cmd: "/branches", desc: "List branches in this repo" },
   { cmd: "/merge", desc: "Merge a branch into the default branch" },
   { cmd: "/memory", desc: "What YIMPIM has learned about this repo" },
+  { cmd: "/verbose", desc: "Show or hide routine detail (model calls, files read, passing gates)" },
   { cmd: "/stop", desc: "Stop safely at the next boundary — works any time" },
   { cmd: "/continue", desc: "Resume the last plan a Stop interrupted" },
   { cmd: "/resume", desc: "Alias for /continue", alias: true },
