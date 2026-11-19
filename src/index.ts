@@ -157,6 +157,7 @@ import {
 import { buildRemovalCommand } from "./cleanupCommand.js";
 import { runControl, AbortedError, askAnywhere, askChoice, setQuestionExplainer } from "./remote/control.js";
 import { plainWordsFor } from "./plainWords.js";
+import { commitOnly } from "./gitCommit.js";
 import { terminalView, isVerbose, setVerbose, setStatusAvailable, wrapForTerminal } from "./consoleView.js";
 import { composeStatus, liveCallCount } from "./liveCalls.js";
 import { installPersistentInput, registerLiveCommands, printAbove, writeRawAbove, pauseInput, resumeInput, setStatusLine, setModelStrip, hasPinnedInput, openPanel, refreshPanel } from "./terminalInput.js";
@@ -1352,13 +1353,10 @@ async function reviewAndResolvePendingChanges(
       return;
     }
     const label = verdict === "complete" ? "reviewed as complete work" : `flagged as likely incomplete — ${reason}`;
-    await repo.git(["add", "-A", "--", ...existing]);
-    await repo.git([
-      "commit",
-      "-m",
-      `${config.git.commitPrefix}: carry over ${existing.length} pre-existing uncommitted change(s) (${label})`,
-    ]);
-    console.log(`[GIT] ✔ Committed — working tree is clean, nothing left lying around.`);
+    // Each path on its own: one that cannot be staged (an ignored log file, say) is skipped, where `git add` of them all at once
+    // failed the whole commit.
+    const done = await commitOnly(repo.git, existing, `${config.git.commitPrefix}: carry over ${existing.length} pre-existing uncommitted change(s) (${label})`, (l) => console.warn(l));
+    console.log(done.length > 0 ? `[GIT] ✔ Committed ${done.length} file(s).` : `[GIT] Nothing could be committed — your files are exactly as they were.`);
   } catch (err: any) {
     console.error(`[GIT] ✗ Could not commit: ${err.message}`);
     console.error(`[GIT] Nothing was changed — your files are exactly as they were.`);
@@ -2566,18 +2564,7 @@ async function runSetupPhaseInPipeline(
   if (result.edited.length > 0 && config.git?.autoCommit) {
     const touched = await agentTouchedPaths(repo, preExistingDirty);
     if (touched.length > 0) {
-      for (const rel of touched) {
-        try {
-          await repo.git(["add", "--", rel]);
-        } catch (e: any) {
-          console.warn(`[GIT WARNING] Could not stage ${rel}: ${e.message}`);
-        }
-      }
-      await repo.git([
-        "commit",
-        "-m",
-        `${config.git.commitPrefix}: completed phase - ${phaseName}\n\nSETUP: ${result.summary}`,
-      ]);
+      await commitOnly(repo.git, touched, `${config.git.commitPrefix}: completed phase - ${phaseName}\n\nSETUP: ${result.summary}`, (l) => console.warn(l));
     }
   }
   return true;
@@ -3466,18 +3453,13 @@ Test hook just added: ${hookHowTo}` : hookHowTo;
           console.log(`[GIT] Nothing new to commit for this phase.`);
         } else {
           console.log(`[GIT] 📦 Committing ${touched.length} agent-modified file(s)...`);
-          for (const rel of touched) {
-            try {
-              await repo.git(["add", "--", rel]);
-            } catch (e: any) {
-              console.warn(`[GIT WARNING] Could not stage ${rel}: ${e.message}`);
-            }
-          }
-          await repo.git([
-            "commit",
-            "-m",
+          // Only this phase's own files: anything else already staged is left staged, not swept into this commit.
+          await commitOnly(
+            repo.git,
+            touched,
             `${config.git.commitPrefix}: completed phase - ${phaseName}\n\nQA confidence: ${confidence}`,
-          ]);
+            (l) => console.warn(l),
+          );
 
           if (config.git.autoPush) {
             try {
