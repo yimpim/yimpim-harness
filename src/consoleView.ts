@@ -58,6 +58,9 @@ export function terminalView(level: "log" | "warn" | "error", args: unknown[]): 
   const first = args[0];
   const head = (first.replace(ANSI, "").split("\n").find((l) => l.trim()) ?? "").trim();
   if (ROUTINE.some((re) => re.test(head))) return null;
+  // A slow call says so every 20 seconds, and parallel workers each do: once a minute is enough to show it is still alive.
+  const waiting = /^\[API\] Still waiting on .* — (\d+)s elapsed/.exec(head);
+  if (waiting && Number(waiting[1]) % 60 !== 0) return null;
   if (/Evidence collected:/.test(first)) return [withoutEvidenceList(first), ...args.slice(1)];
   return args;
 }
