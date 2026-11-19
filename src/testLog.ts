@@ -225,11 +225,18 @@ export function healParked(root: string, file: string): boolean {
   return !e.strikeFileHash || e.strikeFileHash === fileHash(root, f, new Map());
 }
 
-/** The stored diagnosis of a red test, if nothing it depends on has changed since and the healing logic is the same. */
+/**
+ * The stored diagnosis of a red test, if nothing it depends on has changed since. It must also come from the same healing logic, EXCEPT a
+ * finding that the CODE is wrong: that is a statement about the project (this code, this line, is the cause), found by reading the failing
+ * output, and it is as true after the worker's logic changes as before. Throwing it away only forces the same investigation again, and a
+ * newer worker has been seen to walk the other way and start rewriting the test. What an older worker could NOT settle (unclear, unhealed)
+ * says more about that worker than about the test, so those are tried again.
+ */
 export function verdictFor(root: string, file: string): StoredVerdict | undefined {
   const e = loadLog(root).files[posix(file)];
   const v = e?.verdict;
-  if (!v || v.version !== HEAL_LOGIC_VERSION) return undefined;
+  if (!v) return undefined;
+  if (v.version !== HEAL_LOGIC_VERSION && v.status !== "code-bug") return undefined;
   const fp = fingerprints(root, [posix(file)]).get(posix(file));
   return fp && fp.fp === v.fingerprint ? v : undefined;
 }

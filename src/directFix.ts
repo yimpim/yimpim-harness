@@ -67,7 +67,11 @@ export function directFixFor(instructions: string, repoRoot: string): DirectFix 
     return {
       id: `phase-${n + 1}`,
       name: `Fix the code so ${path.basename(item.file)} passes`,
-      goal: `Fix the CODE so every test in ${item.file} passes. The test is right and must not be edited, skipped or deleted.`,
+      goal:
+        `Fix the CODE so every test in ${item.file} passes. Its assertions are right: never edit, skip, delete or loosen one. ` +
+        `The one thing you may change in a test is a MOCK or setup that your change now makes out of date: if another test's jest.mock of a module ` +
+        `lacks a function your code now calls, add it there (keep the real module underneath with requireActual), because a change owes the mocks of ` +
+        `what it changed an update. Check who else mocks a module before you start calling more of it.`,
       executor: "EDITOR",
       files: own.length > 0 ? own : all,
       newFiles: [] as string[],

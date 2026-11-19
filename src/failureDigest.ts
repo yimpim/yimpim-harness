@@ -40,6 +40,8 @@ export interface Cluster {
   signature: string;
   /** The error line as first printed. */
   message: string;
+  /** The lines that follow it (Jest prints "Expected" and "Received" there), so what the failure compared can be read. */
+  detail?: string;
   count: number;
   /** The first line of the project's own code the stack points at, when it can be found. */
   frame?: Frame;
@@ -180,7 +182,7 @@ export function digestFailure(output: string, repoRoot: string, testFile?: strin
     const test = testFile ? posix(testFile) : undefined;
     const frame = frames.find((f) => f.file !== test) ?? frames[0];
     const testFrame = test ? frames.find((f) => f.file === test && f !== frame) : undefined;
-    return { signature, message: g.message, count: g.count, frame, testFrame };
+    return { signature, message: g.message, detail: block.slice(0, 14).join("\n"), count: g.count, frame, testFrame };
   });
 
   const parts: string[] = [];

@@ -86,7 +86,8 @@ export function listTestFiles(repoRoot: string, opts: { includeFocus?: boolean }
         walk(path.join(dir, e.name));
       } else if (e.isFile()) {
         const rel = posix(path.relative(repoRoot, path.join(dir, e.name)));
-        if (CODE_EXT.test(rel) && isTestPath(rel) && (opts.includeFocus || !isFocusPath(rel))) out.push(rel);
+        // A probe copy (healEdits.runProbe) that a crash left behind is not a test of the project's.
+        if (CODE_EXT.test(rel) && isTestPath(rel) && (opts.includeFocus || !isFocusPath(rel)) && !/(^|\/)zz_probe_/.test(rel)) out.push(rel);
       }
     }
   };
@@ -537,7 +538,9 @@ export interface CoverageProblem {
  */
 export function checkMainSuiteCoverage(
   repoRoot: string,
-  change: { modified: string[]; added: string[] }
+  change: { modified: string[]; added: string[] },
+  /** A test the change is FOR (a fix made to satisfy it): it is the spec, so it is not expected to change along with the code. */
+  isFixTarget: (testRel: string) => boolean = () => false
 ): CoverageProblem[] {
   const modified = change.modified.map(posix);
   const added = change.added.map(posix);
@@ -548,7 +551,7 @@ export function checkMainSuiteCoverage(
   const stale: string[] = [];
   for (const src of modified.filter(isSourceCodePath)) {
     const owners = findOwningTests(src, allTests);
-    if (owners.length > 0 && !owners.some((o) => touched.has(o))) stale.push(`${src} (owned by ${owners.join(", ")})`);
+    if (owners.length > 0 && !owners.some((o) => touched.has(o) || isFixTarget(o))) stale.push(`${src} (owned by ${owners.join(", ")})`);
   }
   if (stale.length > 0) {
     problems.push({
