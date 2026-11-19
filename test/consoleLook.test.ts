@@ -135,7 +135,7 @@ describe("what is being waited on, on one line", () => {
     const a = trackCall("REPAIR", "deepseek/deepseek-v4.1-flash-1017");
     const b = trackCall("REPAIR", "deepseek/deepseek-v4.1-flash-1017");
     try {
-      assert.equal(describeLiveCalls(), "REPAIR ×2 · deepseek-v4.1-flash-1017");
+      assert.match(describeLiveCalls() as string, /^REPAIR ×2 · deepseek-v4\.1-flash-1017 · (\d+m )?\d+s · waiting$/);
       const line = composeStatus("1/9 Extend vocabulary · QA", 0) as string;
       assert.match(line, /^1\/9 Extend vocabulary · QA running · calling REPAIR ×2 · deepseek-v4\.1-flash-1017/);
     } finally {
@@ -148,8 +148,8 @@ describe("what is being waited on, on one line", () => {
     const a = trackCall("REPAIR", "deepseek/deepseek-v4.1-flash-1017");
     const b = trackCall("REPAIR", "deepseek/deepseek-v4.1-flash-1017");
     try {
-      const line = composeStatus("1/9 Extend WorkerType vocabulary and labels · QA", 1500, 76) as string;
-      assert.ok(line.length <= 76, `${line.length} columns`);
+      const line = composeStatus("1/9 Extend WorkerType vocabulary and labels · QA", 1500, 95) as string;
+      assert.ok(line.length <= 95, `${line.length} columns`);
       assert.ok(line.endsWith("..."), "the dots are still there");
       assert.match(line, /…  ?running · calling REPAIR ×2/);
       // Too narrow for any of the phase name: the live part alone.
@@ -163,7 +163,7 @@ describe("what is being waited on, on one line", () => {
     const a = trackCall("REPAIR", "x/one");
     const b = trackCall("VERIFIER", "x/two");
     try {
-      assert.equal(describeLiveCalls(), "REPAIR, VERIFIER");
+      assert.match(describeLiveCalls() as string, /^REPAIR, VERIFIER · (\d+m )?\d+s · waiting$/);
     } finally {
       a();
       b();
