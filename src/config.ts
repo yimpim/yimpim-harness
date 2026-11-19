@@ -273,6 +273,19 @@ export const ConfigSchema = z.object({
       sort: z.enum(["default", "throughput", "price", "latency"]).default("default"),
     })
     .prefault({}),
+  /**
+   * Settings for DeepSeek models only (see requestTuning.ts): they are served by several providers at different speeds and prices, so
+   * calls go to the fastest one under a price cap. Prices are dollars per million tokens; 0 means no ceiling.
+   */
+  deepseek: z
+    .object({
+      sort: z.enum(["default", "throughput", "price", "latency"]).default("throughput"),
+      maxPromptPrice: z.number().min(0).default(0.3),
+      maxCompletionPrice: z.number().min(0).default(0.75),
+      // Agents (name prefix) that do not need the model to think first. Reasoning tokens are billed as output.
+      reasoningOff: z.array(z.string()).default(["DISCOVERY", "EDITOR"]),
+    })
+    .prefault({}),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

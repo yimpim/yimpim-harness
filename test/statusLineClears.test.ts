@@ -7,7 +7,9 @@ const t = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
 
 test("an ending agent removes its line, or shows the one still running", () => {
   assert.match(t, /if \(event\.type === "agent\.end"\) \{\s*const ended = runningAgentLabels\.findIndex/);
-  assert.match(t, /setStatusLine\(left \? `\$\{left\} running…` : undefined\)/);
+  // The line is composed from the agent still running and the model calls in flight (liveCalls.ts): with neither it is cleared.
+  assert.match(t, /const refreshStatus = \(\) => setStatusLine\(composeStatus\(runningAgentLabels\[runningAgentLabels\.length - 1\], Date\.now\(\), /);
+  assert.match(t, /splice\(ended, 1\);\s*refreshStatus\(\);/);
 });
 test("a finished or aborted task forgets agents that never reported an end", () => {
   assert.equal((t.match(/runningAgentLabels\.length = 0;/g) ?? []).length, 2);

@@ -2,6 +2,8 @@ import { AgentConfig } from "./config.js";
 import { events, TokenUsage } from "./events.js";
 import { runControl, AbortedError } from "./remote/control.js";
 import { hasPinnedInput, writeRawAbove } from "./terminalInput.js";
+import { trackCall } from "./liveCalls.js";
+import { tuneRequest, isReasoningRejected, isPriceCapMiss } from "./requestTuning.js";
 
 export interface FunctionTool {
   type: "function";
@@ -413,6 +415,8 @@ export class OpenRouterClient {
       // Set when this model cannot read images at all: a fact about the model, not a failure, so it is neither retried nor
       // counted against its health for the text-only calls that follow.
       let cannotReadImages = false;
+      // Set when this model refused `reasoning: none` (its thinking cannot be turned off): then it is sent without, once.
+      let reasoningRejected = false;
       for (let attempt = 1; attempt <= maxRetriesPerModel; attempt++) {
         const startTime = Date.now();
         const retrySuffix = attempt > 1 ? ` (retry ${attempt}/${maxRetriesPerModel})` : "";
@@ -444,6 +448,8 @@ export class OpenRouterClient {
         };
         renderTick();
         const ticker = setInterval(renderTick, 1000);
+        // Counted for the terminal's one live status line ("calling REPAIR ×2 …"); ended wherever the ticker is stopped.
+        const endCall = trackCall(agent, model);
 
         try {
           const bodyPayload: Record<string, any> = {
@@ -477,10 +483,10 @@ export class OpenRouterClient {
             bodyPayload.response_format = { type: "json_object" };
           }
 
-          const providerSort = this.config?.provider?.sort;
-          if (providerSort && providerSort !== "default") {
-            bodyPayload.provider = { sort: providerSort };
-          }
+          // Backend choice, price ceiling and reasoning (DeepSeek's own settings first, then the global sort): see requestTuning.ts.
+          const tuned = tuneRequest(model, agent, this.config, { reasoningRejected });
+          if (tuned.provider) bodyPayload.provider = tuned.provider;
+          if (tuned.reasoning) bodyPayload.reasoning = tuned.reasoning;
 
           // One dedicated controller for this attempt, rather than
           // AbortSignal.any([AbortSignal.timeout(...), runControl.signal]):
@@ -544,6 +550,7 @@ export class OpenRouterClient {
 
             if (!response.ok) {
               clearInterval(ticker);
+              endCall();
               const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
               const errorBody = await response.text();
               console.log(`${clearLine}[API] ${model} (${agent})${retrySuffix} ❌ (${elapsed}s)`);
@@ -616,6 +623,23 @@ export class OpenRouterClient {
                 );
               }
 
+              // The model refused `reasoning: none` (its thinking cannot be turned off): say so once and send the call again without it,
+              // rather than failing an agent over a cost setting. Not counted against the attempt budget or the model's health.
+              if (bodyPayload.reasoning && !reasoningRejected && isReasoningRejected(response.status, errorBody)) {
+                reasoningRejected = true;
+                console.log(`[${agent}] ${model} will not turn its thinking off. Sending the call again with its default.`);
+                attempt--;
+                continue;
+              }
+              // No provider is under the price cap, so OpenRouter did not run the call: say why, and the next model in the chain is tried.
+              const cap = (bodyPayload.provider as { max_price?: { prompt?: number; completion?: number } } | undefined)?.max_price;
+              if (isPriceCapMiss(response.status, errorBody, !!cap)) {
+                console.log(
+                  `[${agent}] No provider for ${model} is under your price cap (${cap?.prompt ?? "no cap"} prompt / ${cap?.completion ?? "no cap"} completion, dollars per million tokens). ` +
+                    `Raise deepseek.maxPromptPrice and deepseek.maxCompletionPrice, or set them to 0 for no cap.`
+                );
+              }
+
               throw new Error(`HTTP ${response.status}: ${errorBody}`);
             }
 
@@ -629,6 +653,7 @@ export class OpenRouterClient {
             );
 
             clearInterval(ticker);
+            endCall();
             const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
             console.log(`${clearLine}[API] ${model} (${agent})${retrySuffix} ✔ (${elapsed}s)`);
 
@@ -657,6 +682,7 @@ export class OpenRouterClient {
           }
         } catch (err: any) {
           clearInterval(ticker);
+          endCall();
           const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
           console.log(`${clearLine}[API] ${model} (${agent})${retrySuffix} ❌ (${elapsed}s)`);
 
