@@ -31,6 +31,7 @@ import { selectTests, failsBefore } from "./testGraph.js";
 import { failingTestFiles, healTests, type HealCall } from "./testHeal.js";
 import { runSuiteLogged, selectUnverified, loadLog, staleSince, healParked } from "./testLog.js";
 import { digestFailure } from "./failureDigest.js";
+import { isMustPass } from "./directFix.js";
 import { passingTestFiles } from "./testRun.js";
 import { isEvidenceNoise } from "./roadmap.js";
 
@@ -2645,7 +2646,8 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
       return;
     }
     const before = await failsBefore({ repoRoot: this.repoRoot, files: failing });
-    const already = before ? failing.filter((f) => before.has(f)) : [];
+    // A test the fix in progress is FOR is red on purpose: it is not excused as "already failing", it is the thing that has to pass.
+    const already = before ? failing.filter((f) => before.has(f) && !isMustPass(f)) : [];
     const caused = failing.filter((f) => !already.includes(f));
 
     let stillRed: string[] = [];
@@ -2696,10 +2698,17 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
       // follows for anything the digest leaves out.
       const digest = digestFailure(run.output, this.repoRoot, caused[0]);
       const report = digest.text ? `${digest.text}\n\nTEST OUTPUT (start)\n${raw.slice(0, 3500)}` : raw;
-      ledger.add({
-        tier: "build", gate, method: "executed", status: "fail", blocking: true,
-        detail: `${caused.length} test file(s) passed before this phase and fail now (${scope}): ${caused.join(", ")}${before ? "" : " (the earlier state could not be checked, so every failure is assumed to be this phase's)"}\n${report}`,
-      });
+      // The tests a fix is FOR were red before it started and must be green after: that is the whole job, so they block, and they are not
+      // described as something the phase broke.
+      const target = caused.filter((f) => isMustPass(f));
+      const broke = caused.filter((f) => !isMustPass(f));
+      const said = [
+        ...(target.length > 0 ? [`the test file(s) this fix is for still fail: ${target.join(", ")}. The fix is not done until they pass.`] : []),
+        ...(broke.length > 0
+          ? [`${broke.length} test file(s) passed before this phase and fail now (${scope}): ${broke.join(", ")}${before ? "" : " (the earlier state could not be checked, so every failure is assumed to be this phase's)"}`]
+          : []),
+      ].join(" ");
+      ledger.add({ tier: "build", gate, method: "executed", status: "fail", blocking: true, detail: `${said}\n${report}` });
     } else if (already.length > 0) {
       ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: true, detail: `nothing this phase changed broke a test. Passing now: ${passedList(run.output, sel.selected).replace(/^all passed: /, "")} (${scope})` });
     }

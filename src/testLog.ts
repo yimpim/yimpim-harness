@@ -19,7 +19,10 @@ import { reachMany, GLOBAL_CONFIG } from "./testGraph.js";
 import { listTestFiles } from "./focusTests.js";
 
 /** Bump when healing logic changes enough that an old diagnosis should be made again. */
-export const HEAL_LOGIC_VERSION = 4;
+// Raised whenever the worker's logic changes (what it is shown, how it answers, what it accepts): a diagnosis stored by an older worker is
+// then not reused. 5: the failure digest, edit-style answers, lookups, and cut-off replies asked for again (an old diagnosis could be cut
+// off mid-sentence).
+export const HEAL_LOGIC_VERSION = 5;
 
 const posix = (p: string) => p.replace(/\\/g, "/");
 

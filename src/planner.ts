@@ -359,6 +359,8 @@ export interface PlanResult {
   plan: Plan;
   /** True when structured parsing failed and we fell back to one phase. */
   degraded: boolean;
+  /** Why it failed, when it did: no JSON in the reply, JSON that did not parse (often cut off), or JSON of the wrong shape (with what was wrong). */
+  degradedReason?: string;
   /** The planner's raw text, preserved for PROGRESS.md and the editor prompt. */
   raw: string;
   /** How many phases the model actually proposed, when that was more than
@@ -531,6 +533,7 @@ export function parsePlan(raw: string, fallbackGoal: string): PlanResult {
         phases: [fallbackPhase],
       },
       degraded: true,
+      degradedReason: reason,
       raw,
       // The degraded plan IS its own full proposal — there was never a larger
       // proposal to consolidate, so this stays consistent with plan.phases.
@@ -549,7 +552,10 @@ export function parsePlan(raw: string, fallbackGoal: string): PlanResult {
   }
 
   const result = PlanSchema.safeParse(parsedJson);
-  if (!result.success) return singlePhase("JSON did not match the plan shape");
+  if (!result.success) {
+    const issues = result.error.issues.slice(0, 3).map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+    return singlePhase(`JSON did not match the plan shape: ${issues}`);
+  }
 
   // Guard against a model that returns an absurd number of phases. The capped
   // slice is what actually executes, but the COMPLETE proposal is kept on
