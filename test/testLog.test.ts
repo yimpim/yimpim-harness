@@ -131,12 +131,29 @@ describe("heal uses the log", () => {
     assert.ok(calls > callsAfterFirst, "diagnosed again once the code changed");
   });
 
-  test("a diagnosis from older healing logic is not trusted", () => {
-    saveVerdict(dir, "__tests__/a.test.ts", { status: "code-bug", note: "n" });
+  test("a diagnosis that could not settle it, from older healing logic, is not trusted: it says more about that worker than the test", () => {
+    saveVerdict(dir, "__tests__/a.test.ts", { status: "unclear", note: "n" });
     assert.ok(verdictFor(dir, "__tests__/a.test.ts"));
     const log = loadLog(dir);
     log.files["__tests__/a.test.ts"].verdict!.version = 0;
     fs.writeFileSync(path.join(dir, ".agent", "test-log.json"), JSON.stringify(log));
+    assert.equal(verdictFor(dir, "__tests__/a.test.ts"), undefined);
+  });
+
+  test("a finding that the CODE is wrong is kept across worker versions: it is about the project, and redoing it can walk the other way", () => {
+    saveVerdict(dir, "__tests__/a.test.ts", { status: "code-bug", note: "src/a.ts:9 drops the id" });
+    const log = loadLog(dir);
+    log.files["__tests__/a.test.ts"].verdict!.version = 0;
+    fs.writeFileSync(path.join(dir, ".agent", "test-log.json"), JSON.stringify(log));
+    assert.equal(verdictFor(dir, "__tests__/a.test.ts")?.status, "code-bug");
+  });
+
+  test("but a code-bug finding is dropped as soon as anything the test depends on changes, whatever the version", () => {
+    saveVerdict(dir, "__tests__/a.test.ts", { status: "code-bug", note: "src/a.ts:9 drops the id" });
+    const log = loadLog(dir);
+    log.files["__tests__/a.test.ts"].verdict!.version = 0;
+    fs.writeFileSync(path.join(dir, ".agent", "test-log.json"), JSON.stringify(log));
+    write("src/a.ts", "export const a = 12345;");
     assert.equal(verdictFor(dir, "__tests__/a.test.ts"), undefined);
   });
 

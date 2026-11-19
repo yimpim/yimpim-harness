@@ -12,6 +12,7 @@ import {
   describeLiveCalls,
   composeStatus,
   resetStep,
+  enterStep,
   stepActive,
   liveCallCount,
   estimateTokens,
@@ -65,9 +66,9 @@ describe("the total time", () => {
     assert.equal(stepActive(), true);
     assert.match(describeTotals(T0 + 20_000) as string, /^20s · ↓ ~300 tokens/);
   });
-  test("starts again only when the step is over", () => {
+  test("starts again only when the task is over", () => {
     trackCall("REPAIR", "deepseek/x", T0).done(300);
-    resetStep(T0 + 50_000);
+    resetStep();
     assert.equal(stepActive(), false);
     assert.equal(describeTotals(T0 + 51_000), undefined);
     const b = trackCall("REPAIR", "deepseek/x", T0 + 60_000);
@@ -77,14 +78,80 @@ describe("the total time", () => {
       b();
     }
   });
-  test("a call still in flight when the step changes is counted from then", () => {
+  test("the end of the task clears the totals, even with a call still in flight", () => {
     const a = trackCall("REPAIR", "deepseek/x", T0);
     try {
-      resetStep(T0 + 30_000);
-      assert.match(describeTotals(T0 + 40_000) as string, /^10s ·/);
+      resetStep();
+      assert.equal(describeTotals(T0 + 40_000), undefined);
     } finally {
       a();
     }
+  });
+});
+
+describe("the totals are kept across attempts, for the whole task", () => {
+  const LABEL = "Add DESIGNER and SECURITY · REPAIR";
+
+  test("the time is summed over every stretch the persona ran, and not counted while something else ran", () => {
+    enterStep(LABEL, T0); // repair attempt 1
+    enterStep(undefined, T0 + 60_000); // 1m 00s of repair, then the verifier runs
+    enterStep(LABEL, T0 + 150_000); // repair attempt 2, after 1m 30s of something else
+    assert.match(describeTotals(T0 + 180_000) as string, /^1m 30s/, "60s + 30s, not 3m");
+  });
+  test("it does not go back to zero when an attempt ends and the next begins: the case that kept resetting", () => {
+    enterStep(LABEL, T0);
+    const a = trackCall("REPAIR", "deepseek/x", T0 + 1000);
+    a.progress(8000, T0 + 2000);
+    a.done(2100);
+    enterStep(undefined, T0 + 30_000); // attempt 1 ends
+    enterStep(LABEL, T0 + 40_000); // attempt 2 begins
+    const line = describeTotals(T0 + 50_000) as string;
+    assert.match(line, /^40s/, "30s + 10s");
+    assert.match(line, /↓ ~2\.1k tokens/, "the tokens of attempt 1 are still counted");
+  });
+  test("tokens from a second attempt are added to the first's", () => {
+    enterStep(LABEL, T0);
+    trackCall("REPAIR", "deepseek/x", T0).done(1000);
+    enterStep(undefined, T0 + 5000);
+    enterStep(LABEL, T0 + 9000);
+    trackCall("REPAIR", "deepseek/x", T0 + 9000).done(500);
+    assert.match(describeTotals(T0 + 10_000) as string, /↓ ~1\.5k tokens/);
+  });
+  test("each persona keeps its own totals, and they are not mixed", () => {
+    enterStep("Phase 2 · EDITOR", T0);
+    trackCall("EDITOR", "x/m", T0).done(4000);
+    enterStep("Phase 2 · REPAIR", T0 + 20_000);
+    trackCall("REPAIR", "x/m", T0 + 20_000).done(300);
+    assert.match(describeTotals(T0 + 25_000) as string, /^5s · ↓ ~300 tokens/, "the repair's own");
+    enterStep("Phase 2 · EDITOR", T0 + 30_000);
+    assert.match(describeTotals(T0 + 31_000) as string, /^21s · ↓ ~4\.0k tokens/, "the editor's, where it left off, plus the time since");
+  });
+  test("paused between attempts, it keeps what it had and the line has nothing to show", () => {
+    enterStep(LABEL, T0);
+    trackCall("REPAIR", "x/m", T0).done(900);
+    enterStep(undefined, T0 + 10_000);
+    assert.equal(describeTotals(T0 + 20_000), undefined);
+    assert.equal(stepActive(), false, "nothing is running, so the status line is not being redrawn");
+  });
+  test("with no persona running, a call still gets totals", () => {
+    const a = trackCall("REPAIR", "x/m", T0);
+    try {
+      assert.equal(stepActive(), true);
+      assert.match(describeTotals(T0 + 3000) as string, /^3s · waiting/);
+    } finally {
+      a();
+    }
+  });
+  test("between calls it does not say 'waiting': nothing is out", () => {
+    enterStep(LABEL, T0);
+    assert.equal(describeTotals(T0 + 4000), "4s");
+  });
+  test("a new task starts from nothing", () => {
+    enterStep(LABEL, T0);
+    trackCall("REPAIR", "x/m", T0).done(900);
+    resetStep();
+    enterStep(LABEL, T0 + 100_000);
+    assert.equal(describeTotals(T0 + 101_000), "1s");
   });
 });
 
@@ -217,10 +284,25 @@ describe("the wiring", () => {
     assert.ok(src.includes("endCall.done(usage?.completion);"));
     assert.ok(src.includes("let chars = content.length + reasoning.length + thought.length;"));
   });
-  test("a new persona, or none, starts a new step; the redraw runs while a step is under way, not only during a call", () => {
+  test("a change of persona only hands the line over: its totals are kept, and only the END OF THE TASK clears them", () => {
     const src = read("../src/index.ts");
     assert.ok(src.includes("if (base !== statusBase || (!base && liveCallCount() === 0)) {"));
-    assert.ok(src.includes("resetStep();"));
+    // The change of label enters a step (keeps the totals); it must not reset them.
+    const at = src.indexOf("if (base !== statusBase || (!base && liveCallCount() === 0)) {");
+    assert.ok(src.slice(at, at + 160).includes("enterStep(base);"));
+    assert.ok(!src.slice(at, at + 160).includes("resetStep();"), "no reset when the label changes");
+    // Cleared in the two places a task ends (finished, and stopped or failed).
+    assert.equal(src.split("statusBase = undefined;\n    resetStep();").length - 1 + src.split("statusBase = undefined;\n      resetStep();").length - 1, 2);
     assert.ok(src.includes("if (liveCallCount() > 0 || stepActive()) refreshStatus();"));
+  });
+});
+
+describe("calls made before the persona's label appears", () => {
+  test("join it when it does, so the count does not start again from zero", () => {
+    const a = trackCall("REPAIR", "x/m", T0); // no persona yet: counted under a placeholder
+    a.progress(8000, T0 + 1000);
+    a.done(2000);
+    enterStep("REPAIR", T0 + 20_000); // the label shows up
+    assert.match(describeTotals(T0 + 25_000) as string, /^25s · ↓ ~2\.0k tokens/, "the 20s and the 2.0k tokens from before the label are kept");
   });
 });

@@ -72,7 +72,10 @@ describe("the plan built from a diagnosis", () => {
   test("it carries the diagnosis as the change, says the test must not be edited, and checks that the test passes", () => {
     const phase = JSON.parse(make().plan).phases[0];
     assert.ok(phase.changes[0].includes("Stop is never offered"));
-    assert.match(phase.goal, /must not be edited, skipped or deleted/);
+    assert.match(phase.goal, /never edit, skip, delete or loosen one/);
+    // ...but a mock that the fix itself makes out of date is the fix's to update (the case where the change broke another test's mock).
+    assert.match(phase.goal, /a MOCK or setup that your change now makes out of date/);
+    assert.match(phase.goal, /requireActual/);
     assert.match(phase.verification[0], /__tests__\/dashboard\.test\.ts passes/);
   });
   test("the test file that must pass is reported", () => {
@@ -163,5 +166,21 @@ describe("the wiring", () => {
     const v = read("../src/verifierTools.ts");
     assert.ok(v.includes("before.has(f) && !isMustPass(f)"));
     assert.ok(v.includes("the test file(s) this fix is for still fail"));
+  });
+});
+
+describe("what the console says on the direct path", () => {
+  const index = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8").replace(/\r\n/g, "\n");
+  test("it does not claim the Planner was given anything or produced anything: no Planner ran", () => {
+    assert.ok(index.includes("if (userFiles.length > 0 && !direct) {"));
+    assert.ok(index.includes("[FIX] The fix is ${activePlan.phases.length} phase(s), built from the diagnosis."));
+  });
+});
+
+describe("what the verifier shows REPAIR for a test the phase broke", () => {
+  test("it includes the evidence, so a stale mock is seen as a stale mock", () => {
+    const v = fs.readFileSync(new URL("../src/verifierTools.ts", import.meta.url), "utf-8").replace(/\r\n/g, "\n");
+    assert.ok(v.includes("evidence = digest.text ? evidenceText(this.repoRoot, caused[0], digest) : \"\";"));
+    assert.ok(v.includes("EVIDENCE (collected from the repository, not guessed)"));
   });
 });

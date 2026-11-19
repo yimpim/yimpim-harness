@@ -178,6 +178,26 @@ describe("main-suite coverage check", () => {
     );
   });
 
+  test("the test a fix is FOR is the spec: the code was changed to match it, so it is not owed an update", () => {
+    const r = repo(base);
+    const forThisFix = (t: string) => t === "__tests__/dashboard.test.ts";
+    assert.deepEqual(checkMainSuiteCoverage(r, { modified: ["app/dashboard.tsx"], added: [] }, forThisFix), []);
+  });
+
+  test("but another changed file whose test is NOT the one being fixed is still flagged", () => {
+    const r = repo({ ...base, "app/other.tsx": "x", "__tests__/other.test.ts": "t" });
+    const forThisFix = (t: string) => t === "__tests__/dashboard.test.ts";
+    const p = checkMainSuiteCoverage(r, { modified: ["app/dashboard.tsx", "app/other.tsx"], added: [] }, forThisFix);
+    assert.equal(p.length, 1);
+    assert.match(p[0].message, /app\/other\.tsx/);
+    assert.doesNotMatch(p[0].message, /app\/dashboard\.tsx/);
+  });
+
+  test("the gate passes the fix targets in", () => {
+    const v = fs.readFileSync(new URL("../src/verifierTools.ts", import.meta.url), "utf-8").replace(/\r\n/g, "\n");
+    assert.ok(v.includes("(t) => isMustPass(t))"));
+  });
+
   test("a file with no test owner demands nothing", () => {
     const r = repo(base);
     assert.deepEqual(checkMainSuiteCoverage(r, { modified: ["app/untested.tsx"], added: [] }), []);

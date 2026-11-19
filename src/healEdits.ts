@@ -11,6 +11,7 @@ import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { excerptAround, type Digest } from "./failureDigest.js";
+import { isTestPath } from "./focusTests.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -127,3 +128,50 @@ export async function searchRepo(repoRoot: string, pattern: string): Promise<str
 }
 
 export { excerptAround };
+
+// ------------------------------------------------------------------------------------------------------------------------------ probe
+
+export type RunTests = (root: string, files: string[]) => Promise<{ ok: boolean; output: string }>;
+
+/**
+ * Reads a value at run time the way a person does: a throwaway COPY of the test with one console.log inserted before a line, run once, and
+ * deleted. The real test file is never touched. `log` is a single expression, so a probe can look at a value and cannot do anything else.
+ */
+export async function runProbe(run: RunTests, repoRoot: string, spec: { file?: unknown; before?: unknown; log?: unknown }): Promise<string> {
+  const rel = String(spec.file ?? "").replace(/\\/g, "/").replace(/^\.\//, "");
+  const before = String(spec.before ?? "").trim();
+  const log = String(spec.log ?? "").trim();
+  const head = `--- probe ${rel} before "${before.slice(0, 60)}" (printing ${log.slice(0, 80)})`;
+  if (!rel || !SAFE(rel) || !isTestPath(rel)) return `${head}\n(probe refused: it needs a test file inside the project)`;
+  if (!before || before.length > 200) return `${head}\n(probe refused: "before" must be the text of one line, up to 200 characters)`;
+  if (!log || log.length > 300 || /[;\n\r`]/.test(log)) return `${head}\n(probe refused: "log" must be a single expression, with no semicolon, backtick or line break)`;
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(repoRoot, rel), "utf-8");
+  } catch {
+    return `${head}\n(probe refused: ${rel} cannot be read)`;
+  }
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((l) => l.includes(before));
+  if (at < 0) return `${head}\n(probe found no line containing that text)`;
+  const indent = /^\s*/.exec(lines[at])?.[0] ?? "";
+  lines.splice(at, 0, `${indent}console.log('PROBE', ${log});`);
+  const copyRel = posixJoin(path.posix.dirname(rel), `zz_probe_${Date.now().toString(36)}_${path.posix.basename(rel)}`);
+  const copyAbs = path.join(repoRoot, copyRel);
+  try {
+    fs.writeFileSync(copyAbs, lines.join(eol));
+    const result = await run(repoRoot, [copyRel]);
+    const printed = [...new Set(result.output.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").split(/\r?\n/).map((l) => l.trim()).filter((l) => /^PROBE\b/.test(l)))].slice(0, 12);
+    if (printed.length === 0) return `${head}\n(the probe printed nothing: that line was not reached, or the expression threw)`;
+    return `${head}\n${printed.join("\n")}`;
+  } finally {
+    try {
+      fs.rmSync(copyAbs, { force: true });
+    } catch {
+      // a leftover copy is skipped by the test listing, and removed with the project's temp files
+    }
+  }
+}
+
+const posixJoin = (dir: string, name: string) => (dir === "." ? name : `${dir}/${name}`);

@@ -160,7 +160,7 @@ import { runControl, AbortedError, askAnywhere, askChoice, setQuestionExplainer 
 import { plainWordsFor } from "./plainWords.js";
 import { commitOnly } from "./gitCommit.js";
 import { terminalView, isVerbose, setVerbose, setStatusAvailable, wrapForTerminal } from "./consoleView.js";
-import { composeStatus, liveCallCount, resetStep, stepActive } from "./liveCalls.js";
+import { composeStatus, enterStep, liveCallCount, resetStep, stepActive } from "./liveCalls.js";
 import { installPersistentInput, registerLiveCommands, printAbove, writeRawAbove, pauseInput, resumeInput, setStatusLine, setModelStrip, hasPinnedInput, openPanel, refreshPanel } from "./terminalInput.js";
 import { ModelQueue } from "./modelQueue.js";
 import { ModelPanel } from "./modelPanel.js";
@@ -4504,9 +4504,11 @@ async function main(): Promise<void> {
     const base = runningAgentLabels[runningAgentLabels.length - 1];
     // A different persona (or none) is a different step: its totals of time and tokens start again. Within a step they only go up, across
     // every call and every file, which is what a person watching wants; a per-call timer reset with each call.
+    // Totals are kept for the whole TASK per persona: a different persona takes over the line, and this one's time and tokens wait for it,
+    // so the next repair attempt continues the count instead of starting from zero. Only the end of the task clears them (below).
     if (base !== statusBase || (!base && liveCallCount() === 0)) {
       statusBase = base;
-      resetStep();
+      enterStep(base);
     }
     setStatusLine(composeStatus(base, Date.now(), (process.stdout.columns || 80) - 4));
   };
@@ -6110,7 +6112,7 @@ You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DI
     // Files the request itself names (a brief, a spec) go to the Planner whatever
     // Discovery chose to list: always readable, and a document is in its prompt.
     const userFiles = mergeUnique(userNamedFiles(instructions, repoRoot), turnDocuments);
-    if (userFiles.length > 0) {
+    if (userFiles.length > 0 && !direct) {
       console.log(`[PLANNER] 📎 Giving the Planner the file(s) your request names: ${userFiles.join(", ")}`);
     }
     const userDocsSection = renderUserDocuments(userFiles, repoRoot);
@@ -6400,7 +6402,8 @@ ${discoveryOutput ?? ""}`,
           `(Esc to stop first if this has already started implementing).`
       );
     } else {
-      console.log(`[PLANNER] Produced ${activePlan.phases.length} phase(s).`);
+      // No Planner ran for a diagnosed fix: the plan was built from the diagnosis, and the line must not say otherwise.
+      console.log(direct ? `[FIX] The fix is ${activePlan.phases.length} phase(s), built from the diagnosis.` : `[PLANNER] Produced ${activePlan.phases.length} phase(s).`);
       if (parsed.truncatedFromPhaseCount) {
         console.warn(
           `[PLANNER] ⚠️ The model actually proposed ${parsed.truncatedFromPhaseCount} phases — capped at 12; ` +
@@ -6809,6 +6812,9 @@ The user wants you to decide, not ask: ${d.choice}`);
   const finish = (ok: boolean) => {
     setStatusLine(undefined);
     runningAgentLabels.length = 0;
+    // The task is over: the time and tokens counted for its personas end with it.
+    statusBase = undefined;
+    resetStep();
     // Scoped to just this task, not this whole (possibly multi-task, thanks
     // to looping back to the prompt) process — see currentTaskUsageStart above.
     const taskUsage = events.usageDelta(currentTaskUsageStart);
@@ -7187,6 +7193,8 @@ The user wants you to decide, not ask: ${d.choice}`);
       if (!(err instanceof AbortedError) && !(err instanceof TaskFailedError)) throw err;
       setStatusLine(undefined);
       runningAgentLabels.length = 0;
+      statusBase = undefined;
+      resetStep();
 
       // Both a Stop and a task not completing (phase exhausted its repair
       // budget, empty instructions, a bad attachment, ...) are expected

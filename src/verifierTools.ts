@@ -31,6 +31,7 @@ import { selectTests, failsBefore } from "./testGraph.js";
 import { failingTestFiles, healTests, type HealCall } from "./testHeal.js";
 import { runSuiteLogged, selectUnverified, loadLog, staleSince, healParked } from "./testLog.js";
 import { digestFailure } from "./failureDigest.js";
+import { evidenceText } from "./failureEvidence.js";
 import { isMustPass } from "./directFix.js";
 import { passingTestFiles } from "./testRun.js";
 import { isEvidenceNoise } from "./roadmap.js";
@@ -2697,7 +2698,15 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
       // at, with the code around it. Eighty tests dying on one missing function are one cause, not eighty traces. The curated output
       // follows for anything the digest leaves out.
       const digest = digestFailure(run.output, this.repoRoot, caused[0]);
-      const report = digest.text ? `${digest.text}\n\nTEST OUTPUT (start)\n${raw.slice(0, 3500)}` : raw;
+      // With the facts the repository answers: a test this phase broke is very often one whose MOCK lacks something the phase's code now
+      // calls, and "that mock is out of date" in front of REPAIR sends it to the mock and not to the code.
+      let evidence = "";
+      try {
+        evidence = digest.text ? evidenceText(this.repoRoot, caused[0], digest) : "";
+      } catch {
+        // evidence is a help, never a reason to fail
+      }
+      const report = digest.text ? `${digest.text}${evidence ? `\n\nEVIDENCE (collected from the repository, not guessed)\n${evidence}` : ""}\n\nTEST OUTPUT (start)\n${raw.slice(0, 3500)}` : raw;
       // The tests a fix is FOR were red before it started and must be green after: that is the whole job, so they block, and they are not
       // described as something the phase broke.
       const target = caused.filter((f) => isMustPass(f));
@@ -2723,7 +2732,8 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
   private mainSuiteGate(goal: string, change: ChangeSet, ledger: EvidenceLedger): void {
     let problems: ReturnType<typeof checkMainSuiteCoverage>;
     try {
-      problems = checkMainSuiteCoverage(this.repoRoot, { modified: change.modified, added: change.added });
+      // A fix made to satisfy a test does not also owe that test an update: the test is what the code was changed to match.
+      problems = checkMainSuiteCoverage(this.repoRoot, { modified: change.modified, added: change.added }, (t) => isMustPass(t));
     } catch {
       return;
     }

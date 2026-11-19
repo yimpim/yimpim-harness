@@ -23,7 +23,8 @@ import { runSuiteLogged, unchangedGreen, verdictFor, saveVerdict, recordHealOutc
 import { listTestFiles } from "./focusTests.js";
 import { reachableFiles } from "./testGraph.js";
 import { digestFailure } from "./failureDigest.js";
-import { applyEdits, parseEdits, presentLargeFile, readRange, searchRepo, LARGE_FILE_LINES } from "./healEdits.js";
+import { evidenceText } from "./failureEvidence.js";
+import { applyEdits, parseEdits, presentLargeFile, readRange, searchRepo, runProbe, LARGE_FILE_LINES } from "./healEdits.js";
 import { removeTest, renderRemoval, recordRemoved } from "./testSettle.js";
 
 export { runSuite, failingTestFiles, type SuiteRun };
@@ -40,6 +41,11 @@ export interface HealResult {
   /** The last output of this file's failing run (set when it was not healed). */
   failure?: string;
   attempts: number;
+  /**
+   * Set when the test-side causes were fixed and what still fails is the CODE: the file keeps those fixes, and `failure` is what is left,
+   * which is what a fix task is for. Without it a file that is part stale test and part real bug could be neither healed nor handed on.
+   */
+  partial?: boolean;
 }
 
 export type HealCall = (messages: { role: "system" | "user" | "assistant"; content: string }[], label: string, json: boolean) => Promise<string>;
@@ -114,7 +120,7 @@ async function gitHistory(repoRoot: string, files: string[]): Promise<string> {
 }
 
 /** A lookup result that carries nothing: a search that matched nothing or could not run. */
-const NO_RESULT = /\n\((no matches|search text too short|the search could not run)\)$/;
+const NO_RESULT = /\n\((no matches|search text too short|the search could not run|the probe printed nothing[^)]*|probe refused[^)]*|probe found no line[^)]*)\)$/;
 
 /** Lines added plus lines removed between two versions (order is ignored: it is a count of what is different, not a diff). */
 export function changedLines(a: string, b: string): number {
@@ -146,15 +152,27 @@ export function gutted(before: string, after: string): string | undefined {
   return undefined;
 }
 
-const SYSTEM = `You repair a failing test file. A project's tests went red because the code changed and the tests were not updated with it.
-You decide WHO is wrong:
-- "stale-test": the code's new behaviour is intended and the test still asserts the old one (renamed export, changed output, new argument, moved file, changed text). It ALSO covers a broken test ENVIRONMENT: a native module that needs a mock in Jest (storage, device or platform modules, framework internals), a mock that no longer provides something the code now uses, a provider or wrapper the component now needs. Fix those inside the test file. A module that fails to load under a test runner is NOT a code bug.
-Start from the FAILURE section: it lists the distinct causes with how many times each happens and the first line of the project's own code each points at. Many failures usually share ONE cause; fix the cause, not each test. If a mock is missing something, look at how other tests in the project mock the same module (search for it) and match them.
-- "code-bug": ONLY when the code's behaviour is wrong: the test asserts something sensible and the code now does something else that is a regression. Do NOT change the test. Say what is broken in the code and where.
-- "need": you cannot decide without more. Ask for it: {"need":["path/one",{"path":"path/two","from":120,"to":260},{"search":"someName"}]}. A string is a whole file, an object with a path is a range of lines, and a search finds where a name is defined, used or mocked across the project. Ask instead of guessing.
-- "unclear": only after you have asked for what you need and it still does not settle it.
-Rules for a stale test: keep every case that is still meaningful, update expected values and calls to match the code you were shown, never delete assertions or skip tests to make it pass, never loosen an assertion into one that cannot fail. Mock only what the test already mocked, plus what the code now needs.
-Answer with JSON only: {"verdict":"stale-test|code-bug|unclear","reason":"one or two sentences: what is wrong and where (file:line)","edits":[{"find":"exact existing text","replace":"new text"}]} or {"need":[...]}.
+const SYSTEM = `You repair a failing test file. Tests and code drifted apart. Failures usually come from a FEW causes, so handle each CAUSE, not each test.
+
+Work like this.
+1. Read the FAILURE section: the distinct causes with how many tests each breaks, the first line of the project's own code each points at, and the EVIDENCE: facts taken from the repository, not guessed (what exists, which test mocks lack what, which commit changed what and whether it touched the test).
+2. Decide each cause on its own. Who is wrong?
+   - STALE TEST: the test is out of date. A mock (jest.mock) that lacks something the code now calls. Setup the code now needs (a provider, a mocked module, an AppState or timer value, a flag). An expectation about text, labels or structure that the app changed ON PURPOSE (the evidence shows the commit, or the app no longer contains the old text anywhere). Fix these in the test file. A module that fails to load under a test runner is NOT a code bug.
+   - CODE DEFECT: the code is wrong. The test asserts documented or sensible behaviour (its comments often cite a spec section) and the code does something else: a regression. Do NOT change the test for these. Say what is wrong and where, as file:line.
+   - UNSURE: say so for that cause. Never bend a test to match code that looks wrong, and never change code to match a test that looks old.
+3. Check a hunch instead of guessing. You may ask to see lines, to search the project, or to run a probe (below).
+4. Make the SMALLEST edits that fix the test-side causes. If the mock lacks something, look at how other tests mock the same module and match them.
+Rules for edits: keep every case that is still meaningful, update expected values and calls to match the code, never delete assertions or skip tests to make them pass, never loosen an assertion into one that cannot fail. Mock only what the test already mocked, plus what the code now needs.
+
+Answer with JSON only, one of:
+ {"verdict":"stale-test","reason":"one or two sentences: what was wrong","edits":[{"find":"exact existing text","replace":"new text"}]}
+     every cause is test-side, and these edits fix them.
+ {"verdict":"mixed","reason":"...","edits":[...],"codeBugs":["path:line what is wrong", ...]}
+     some causes are test-side (the edits fix them) and the rest are code defects, each named with its file and line.
+ {"verdict":"code-bug","reason":"path:line what is wrong"}      every cause is a code defect; the test is not changed.
+ {"verdict":"unclear","reason":"..."}                          only after you have looked and it still does not settle it.
+ {"need":["path/one",{"path":"path/two","from":120,"to":260},{"search":"someName"},{"probe":{"file":"__tests__/x.test.ts","before":"the line to print before","log":"String(AppState.currentState)"}}]}
+     a string is a whole file; {"path","from","to"} is a range of lines; {"search"} finds where a name is defined, used or mocked; {"probe"} runs a throwaway COPY of the test with one console.log inserted before the line that contains "before", where "log" is a single expression, and shows what it printed. Use it when you need to know a value at run time (is this guard true, what does this mock return). The real test file is never changed by it. Ask instead of guessing.
 "edits" are applied in order; each "find" is copied EXACTLY from the file (never the line-number prefix), as short as it can be while matching once. For a test file under ${LARGE_FILE_LINES} lines you may instead return the complete corrected file as "test"; for a longer one ALWAYS use edits and never return the whole file.`;
 
 function matchEol(original: string, next: string): string {
@@ -185,7 +203,15 @@ async function healOne(opts: HealOptions, file: string): Promise<HealResult> {
 export function failureText(output: string, repoRoot: string, file: string): string {
   const clean = output.replace(ANSI, "");
   const digest = digestFailure(clean, repoRoot, file);
-  return digest.text ? `${digest.text}\n\nRAW OUTPUT (start)\n${clean.slice(0, 3000)}` : clean.slice(-14_000);
+  if (!digest.text) return clean.slice(-14_000);
+  // Facts the repository can answer (what exists, which mocks lack what, which commit changed what), so they are not rediscovered or guessed.
+  let evidence = "";
+  try {
+    evidence = evidenceText(repoRoot, file, digest);
+  } catch {
+    // evidence is a help, never a reason to fail
+  }
+  return `${digest.text}${evidence ? `\n\nEVIDENCE (collected from the repository, not guessed)\n${evidence}` : ""}\n\nRAW OUTPUT (start)\n${clean.slice(0, 3000)}`;
 }
 
 async function healOneInner(opts: HealOptions, file: string, trace: { output: string }): Promise<HealResult> {
@@ -326,6 +352,9 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
           blocks.push(body);
         } else if (n && typeof n === "object" && typeof (n as any).search === "string") {
           blocks.push(await searchRepo(repoRoot, (n as any).search));
+        } else if (n && typeof n === "object" && (n as any).probe && typeof (n as any).probe === "object") {
+          // A value at run time, read the way a person would: a throwaway copy of the test with one console.log in it, run once and deleted.
+          blocks.push(await runProbe(run, repoRoot, (n as any).probe));
         } else if (n && typeof n === "object" && typeof (n as any).path === "string") {
           const body = readRange(repoRoot, (n as any).path, (n as any).from, (n as any).to);
           if (body) blocks.push(body);
@@ -351,11 +380,16 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     }
     const verdict = String(parsed?.verdict ?? "");
     const reason = String(parsed?.reason ?? "").trim() || "no reason given";
-    if (verdict === "code-bug") {
+    // "mixed": some causes are test-side (its edits fix them) and the rest are code defects, each named by the worker.
+    const mixed = verdict === "mixed";
+    const codeBugs: string[] = Array.isArray(parsed?.codeBugs) ? parsed.codeBugs.map((c: unknown) => String(c).trim()).filter(Boolean) : [];
+    const hasChange = Boolean(parseEdits(parsed?.edits)) || (typeof parsed?.test === "string" && parsed.test.trim().length > 0);
+    // A "mixed" answer with nothing to change in the test is simply a code defect.
+    if (verdict === "code-bug" || (mixed && !hasChange)) {
       fs.writeFileSync(abs, original);
-      return { file, status: "code-bug", note: reason, attempts };
+      return { file, status: "code-bug", note: [reason, ...codeBugs].join(" ").slice(0, 2000), attempts };
     }
-    if (verdict !== "stale-test") {
+    if (verdict !== "stale-test" && !mixed) {
       fs.writeFileSync(abs, original);
       return { file, status: "unclear", note: reason, attempts };
     }
@@ -416,6 +450,22 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       // one this was is for the person reading the report (and the diff) to see, not for a fixed number to decide.
       const changed = changedLines(original, next);
       return { file, status: "healed", note: `${reason} (${changed} line${changed === 1 ? "" : "s"} changed)`, attempts };
+    }
+    // Mixed: the test-side causes are fixed and what still fails is what the worker called code defects. Handing that on is only right if
+    // fixing the test side actually moved the failure (fewer failing, or a different failure than the one it started with); a "mixed" answer
+    // whose edits changed nothing is not progress, and the loop goes on as it always did.
+    if (mixed && codeBugs.length > 0) {
+      const now = digestFailure(current.output.replace(ANSI, ""), repoRoot, file).total;
+      if (now < digest0.total || failureKey(current.output) !== failureKey(first.output)) {
+        const changed = changedLines(original, next);
+        return {
+          file,
+          status: "code-bug",
+          partial: true,
+          note: `${reason} What is left is the code (${now} failing): ${codeBugs.join("; ")} (the test's out-of-date parts were fixed: ${changed} line${changed === 1 ? "" : "s"} changed)`.slice(0, 2400),
+          attempts,
+        };
+      }
     }
     messages.push(
       { role: "assistant", content: reply },
@@ -732,7 +782,8 @@ export async function healTests(opts: HealOptions): Promise<HealReport> {
   for (const r of results) {
     // Remembered across phases (see LogEntry.healStrikes), so a test that cannot be healed is not paid for again in every one.
     try {
-      if (r.status !== "already-green") recordHealOutcome(opts.repoRoot, r.file, r);
+      // A partial result fixed what was test-side and handed the rest on: that is progress, not a failed heal, so it earns no strike.
+      if (r.status !== "already-green" && !r.partial) recordHealOutcome(opts.repoRoot, r.file, r);
     } catch {}
     if ((r.status === "code-bug" || r.status === "unclear" || r.status === "unhealed") && !/the model call failed/.test(r.note)) {
       try {
@@ -758,7 +809,10 @@ export function renderHealReport(r: HealReport): string {
     `Test healing: ${r.failing.length} red file(s) before. ${by("healed").length} healed, ${by("already-green").length} already passing alone, ${by("code-bug").length} are code bugs, ${by("rewritten").length} rewritten, ${by("removed").length} removed, ${by("unclear").length + by("unhealed").length} left alone.`,
   ];
   const bugs = by("code-bug");
-  if (bugs.length) lines.push("", "The CODE is wrong here (tests left untouched; a fix is queued; a test file is removed afterwards only if nothing in it passes, one that fails in part is kept):", ...bugs.map((b) => `  - ${b.file}: ${b.note}`));
+  const whole = bugs.filter((b) => !b.partial);
+  const partial = bugs.filter((b) => b.partial);
+  if (partial.length) lines.push("", "Part test, part code. The out-of-date parts of these tests were fixed; what still fails is the CODE, and a fix is queued for it:", ...partial.map((b) => `  - ${b.file}: ${b.note}`));
+  if (whole.length) lines.push("", "The CODE is wrong here (tests left untouched; a fix is queued; a test file is removed afterwards only if nothing in it passes, one that fails in part is kept):", ...whole.map((b) => `  - ${b.file}: ${b.note}`));
   const rewritten = by("rewritten");
   if (rewritten.length) lines.push("", "Rewritten from scratch:", ...rewritten.map((b) => `  - ${b.file}: ${b.note}`));
   const gone = by("removed");
