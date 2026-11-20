@@ -16,7 +16,8 @@ import { SAFE, type RunTests } from "./healEdits.js";
 import { failingNames } from "./healAuthority.js";
 import { OpenRouterClient, type FunctionTool } from "./openrouter.js";
 import type { AgentConfig } from "./config.js";
-import { AgentTools, TOOLS_SCHEMA, RUN_TEST_TOOL } from "./agentTools.js";
+import { AgentTools, TOOLS_SCHEMA, RUN_TEST_TOOL, RECORD_DEVIATION_TOOL } from "./agentTools.js";
+import { validateDeviation, describeDeviation, DEFAULT_DEVIATION_TEST_CAP, type DeviationRecord } from "./healDeviation.js";
 import { runToolAgent, runLabeledCompletion } from "./agentLoop.js";
 import { securityModels } from "./securityPlan.js";
 import { runSuiteLogged } from "./testLog.js";
@@ -334,7 +335,10 @@ export interface SandboxCause {
   tests: string[];
   /** What the first model said about it (it may be wrong). */
   reason: string;
+  /** "code": the first model believed the app is wrong (a spec-versus-app disagreement), which is for THIS model to settle. */
   kind: "unsure" | "code";
+  /** path:line places the first model named, for checking. */
+  refs?: string[];
 }
 
 export interface SandboxResult {
@@ -349,11 +353,23 @@ export interface SandboxResult {
   cost: number;
   /** run_test calls that ran. */
   runs: number;
+  /**
+   * Places where the spec says one thing and the app (which works) does another, that the agent changed the test to follow. Each one passed
+   * validateDeviation against the sandbox; the merge checks them again against the real project, and a test change that comes with none that
+   * hold is not kept.
+   */
+  deviations?: DeviationRecord[];
   /** Every tool call the agent made, in order, so a run that went nowhere can be read afterwards (the benchmark saves it). */
   trace?: { n: number; tool: string; arg: string; fp?: string; resultChars?: number }[];
 }
 
-export type SandboxRun = (args: {
+/** The sandbox pass. `deviationTestCap`: the most tests one deviation verdict may change (read by the merge in testHeal.ts). */
+export interface SandboxRun {
+  (args: SandboxArgs): Promise<SandboxResult>;
+  deviationTestCap?: number;
+}
+
+export type SandboxArgs = {
   repoRoot: string;
   file: string;
   testText: string;
@@ -364,7 +380,7 @@ export type SandboxRun = (args: {
   cause: SandboxCause;
   ledger: string[];
   firstModelNotes: string;
-}) => Promise<SandboxResult>;
+};
 
 // ------------------------------------------------------------------------------------------------------------------------ the tools
 
@@ -373,6 +389,7 @@ export const SANDBOX_TOOL_NAMES = ["read_file", "search_code", "get_file_outline
 export const SANDBOX_TOOLS_SCHEMA: FunctionTool[] = [
   ...TOOLS_SCHEMA.filter((t) => (SANDBOX_TOOL_NAMES as readonly string[]).includes(t.function.name)),
   RUN_TEST_TOOL,
+  RECORD_DEVIATION_TOOL,
 ] as unknown as FunctionTool[];
 
 // ------------------------------------------------------------------------------------------------------------------------ progress, judged by state
@@ -427,22 +444,28 @@ export class StagnationTracker {
 
   /** Called at the top of every round: closes the one before and says whether to stop. */
   check(): string | undefined {
-    if (this.started) this.rounds++;
+    const closing = this.started; // the very first call closes nothing
+    if (closing) this.rounds++;
     this.started = true;
     const c = this.cur;
     this.cur = { edit: false, run: false, read: false, refused: false };
-    if (c.run) {
-      this.editRounds = 0;
-      this.readRounds = 0;
-    } else if (c.edit) {
-      this.editRounds++;
-      this.readRounds = 0;
-    } else if (c.read || c.refused) {
-      this.readRounds++;
+    if (closing) {
+      if (c.run) {
+        this.editRounds = 0;
+        this.readRounds = 0;
+      } else if (c.edit) {
+        this.editRounds++;
+        this.readRounds = 0;
+      } else {
+        // No edit and no test run, whatever else the round held: reading, searching, recording, a refused run, a tool it was not offered. None of that
+        // is an experiment, so none of it can go on forever. (A round of only `record_deviation` calls used to be counted as nothing at all, and a model
+        // that did only that was never stopped.)
+        this.readRounds++;
+      }
     }
     if (this.identical >= this.n) return `stagnation: ${this.identical} test runs in a row gave the same result with no change in between`;
     if (this.editRounds >= this.n) return `stagnation: ${this.editRounds} rounds of edits without running a test`;
-    if (this.readRounds >= this.n * 2) return `stagnation: ${this.readRounds} rounds of reading without running an experiment`;
+    if (this.readRounds >= this.n * 2) return `stagnation: ${this.readRounds} rounds without an edit or a test run (only reading, searching or recording)`;
     return undefined;
   }
 }
@@ -466,7 +489,7 @@ export function fingerprintOf(output: string, root: string): string {
 const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}\n… (cut)` : s);
 
 /** Short on purpose: the agent reads the files it needs with read_file instead of being handed 170k characters of them. */
-export function buildSandboxPrompt(a: { file: string; lineCount: number; cause: SandboxCause; ledger: string[]; firstModelNotes: string; failureDigest: string }): string {
+export function buildSandboxPrompt(a: { file: string; lineCount: number; cause: SandboxCause; ledger: string[]; firstModelNotes: string; failureDigest: string; deviationTestCap?: number }): string {
   const tests = a.cause.tests.slice(0, 30).map((t) => `    - ${t}`).join("\n") + (a.cause.tests.length > 30 ? `\n    … and ${a.cause.tests.length - 30} more` : "");
   const ledger = a.ledger.length > 0 ? a.ledger.slice(0, 20).join("\n") + (a.ledger.length > 20 ? `\n  … and ${a.ledger.length - 20} more fixed causes` : "") : "  (every test not listed above)";
   return [
@@ -476,7 +499,9 @@ export function buildSandboxPrompt(a: { file: string; lineCount: number; cause: 
     `  [${a.cause.count}×] ${a.cause.message}`,
     "  Failing tests:",
     tests,
-    `  What the first model said about it (it may be wrong): ${cut(a.cause.reason, 600)}`,
+    `  What the first model said about it (it may be wrong): ${cut(a.cause.reason, 500)}`,
+    ...(a.cause.kind === "code" ? ["  The first model believed the APP is wrong here (the spec and the app disagree). That is for YOU to settle: see the rule below."] : []),
+    ...(a.cause.refs && a.cause.refs.length > 0 ? [`  Places it named (check them, do not trust them): ${a.cause.refs.join(", ")}`] : []),
     "",
     "WHAT ALREADY PASSES AND MUST KEEP PASSING",
     ledger,
@@ -493,11 +518,20 @@ export function buildSandboxPrompt(a: { file: string; lineCount: number; cause: 
     "  sandbox: experiments cost nothing and are thrown away.",
     "- Only the TEST FILE comes back to the real project, and only if it makes more tests pass without breaking any that pass now. Changes to app",
     "  code are thrown away (they are fine for logging). Remove your console.log lines from the test file before you finish.",
-    "- Fix the TEST when it is out of date. The app's code, its doc comments, the written spec (docs/ or *.md) and recent commits are the authority,",
-    "  in about that order of strength. If the APP is what is wrong, do not bend the test: conclude and say exactly where (file:line) and what shows it.",
+    "- Fix the TEST when it is out of date. The app's code, its doc comments, the written spec (docs/ or *.md) and recent commits are the authority.",
     "- Never delete tests or assertions, never skip tests, never loosen an assertion into one that cannot fail.",
-    "- When the cause's tests pass (run them), or when you are sure the app is at fault, call conclude_task: FINISHED_PATCHING with what you changed",
-    '  and why; or CANNOT_LOCATE with what you found and what is still unknown, starting with "APP BUG:" when the app is wrong.',
+    "",
+    "WHEN THE TEST AND THE APP DISAGREE, decide which of two things it is:",
+    "- DEFECT: the app is wrong in a way that blocks a user, crashes, loses data, or sends or shows WRONG FUNCTIONAL DATA. NEVER bend the test for it.",
+    "  Show it at run time (run_test, console.log), then conclude with CANNOT_LOCATE starting \"APP BUG:\", naming file:line and the output that shows it.",
+    "- DEVIATION: the app WORKS but differs from the spec in a cosmetic way (a label or its casing, wording, order, styling, spacing). Change the TEST to",
+    `  expect what the working app does, so progress goes on, then call record_deviation for each one with the app's file:line and the spec's file:line`,
+    `  (both must exist). Keep every check: change the expected value or the selector, never remove or weaken an assertion. At most ${a.deviationTestCap ?? DEFAULT_DEVIATION_TEST_CAP} tests`,
+    "  may change. A test change that depends on a deviation with no valid record, or with a reference that does not exist, is thrown away.",
+    "- Not sure it is only cosmetic? It is a defect.",
+    "",
+    "When the cause's tests pass (run them), or when you are sure the app is at fault, call conclude_task: FINISHED_PATCHING with what you changed and",
+    'why; or CANNOT_LOCATE with what you found and what is still unknown, starting with "APP BUG:" when the app is wrong.',
   ].join("\n");
 }
 
@@ -556,10 +590,12 @@ export function createSandboxRun(deps: {
   run: RunTests;
   /** The security model, for code the gate flags. */
   securityCall: ReviewCall;
+  /** The most tests one deviation verdict may change: told to the agent, and enforced by the merge (which reads it from the returned function). */
+  deviationTestCap?: number;
   log?: (line: string) => void;
 }): SandboxRun {
   const reviewer = makeCommandReviewer(deps.securityCall);
-  return async (a) => {
+  const fn: SandboxRun = async (a) => {
     const log = deps.log ?? (() => {});
     const empty = (stop: SandboxResult["stop"], conclusion: string): SandboxResult => ({ appFilesTouched: [], conclusion, stop, rounds: 0, cost: 0, runs: 0 });
     let created: SandboxCreate;
@@ -591,6 +627,15 @@ export function createSandboxRun(deps: {
         }
         return r.text;
       });
+      // Deviations the agent records, each checked against the sandbox's own copy of the project at once (so it is told, and can fix the reference).
+      const deviations: DeviationRecord[] = [];
+      tools.bindSandboxDeviation(async (args) => {
+        const checked = validateDeviation(sandbox.root, args);
+        if (!checked.ok) return `Not recorded: ${checked.why}`;
+        const dup = deviations.find((d) => d.appFile === checked.rec.appFile && d.specFile === checked.rec.specFile && d.specLine === checked.rec.specLine);
+        if (!dup) deviations.push(checked.rec);
+        return `Recorded: ${describeDeviation(checked.rec)}. It becomes a follow-up ticket to bring the app to the spec once your test change is kept.`;
+      });
 
       const stopWhen = (): string | undefined => {
         const spent = events.usageDelta(startUsage).totals;
@@ -608,7 +653,7 @@ export function createSandboxRun(deps: {
       let error: Error | undefined;
       try {
         returned = await runToolAgent({
-          prompt: buildSandboxPrompt({ file: a.file, lineCount: a.testText.split(/\r?\n/).length, cause: a.cause, ledger: a.ledger, firstModelNotes: a.firstModelNotes, failureDigest: a.failureDigest }),
+          prompt: buildSandboxPrompt({ file: a.file, lineCount: a.testText.split(/\r?\n/).length, cause: a.cause, ledger: a.ledger, firstModelNotes: a.firstModelNotes, failureDigest: a.failureDigest, deviationTestCap: deps.deviationTestCap }),
           repo: createRepoTools(sandbox.root, deps.config),
           repoRoot: sandbox.root,
           client: deps.client,
@@ -641,11 +686,13 @@ export function createSandboxRun(deps: {
       }
       const touched = changedFiles(sandbox.root).filter((f) => f !== sandbox.file);
       const spent = events.usageDelta(startUsage).totals;
-      return { candidate, appFilesTouched: touched, conclusion: outcome.conclusion, stop: outcome.stop, rounds: tracker.rounds, cost: spent.costKnown ? spent.cost : 0, runs: tracker.runs, trace };
+      return { candidate, appFilesTouched: touched, conclusion: outcome.conclusion, stop: outcome.stop, rounds: tracker.rounds, cost: spent.costKnown ? spent.cost : 0, runs: tracker.runs, trace, ...(deviations.length > 0 ? { deviations } : {}) };
     } finally {
       destroySandbox(sandbox, a.repoRoot);
     }
   };
+  fn.deviationTestCap = deps.deviationTestCap;
+  return fn;
 }
 
 // ------------------------------------------------------------------------------------------------------------------------ the sandbox pass for a heal
@@ -677,6 +724,7 @@ export function sandboxFor(deps: { client: OpenRouterClient; config: AgentConfig
     models: deps.repairModels.slice(1),
     budgetUsd: cfg?.budgetUsd ?? 0.75,
     stagnation: cfg?.stagnation ?? 3,
+    deviationTestCap: cfg?.deviationTestCap ?? DEFAULT_DEVIATION_TEST_CAP,
     run: deps.run ?? runSuiteLogged,
     securityCall,
     log: deps.log,

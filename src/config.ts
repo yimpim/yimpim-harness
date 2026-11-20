@@ -303,6 +303,8 @@ export const ConfigSchema = z.object({
           budgetUsd: z.number().min(0).default(0.75),
           // How many times in a row the same result, edits without a test run, or (twice this many) reads without an experiment end a run that is going nowhere.
           stagnation: z.number().int().min(1).default(3),
+          // The most tests ONE deviation verdict may change. A deviation is a test changed to follow the working app where it differs from the spec in a cosmetic way.
+          deviationTestCap: z.number().int().min(1).default(12),
         })
         .prefault({}),
     })

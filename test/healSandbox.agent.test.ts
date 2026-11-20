@@ -61,7 +61,9 @@ beforeEach(() => {
   fs.mkdirSync(path.join(repo, "__tests__"));
   fs.mkdirSync(path.join(repo, "src"));
   fs.writeFileSync(path.join(repo, FILE), START);
-  fs.writeFileSync(path.join(repo, "src/x.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(repo, "src/x.ts"), "export const x = 1;\nexport const y = 2;\nexport const z = 3;\n");
+  fs.mkdirSync(path.join(repo, "docs"));
+  fs.writeFileSync(path.join(repo, "docs/SPEC.md"), "# Spec\n\nThe buttons are labelled Yes and No.\n\nOther text.\n");
   fs.writeFileSync(path.join(repo, ".gitignore"), "node_modules/\n");
   fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "p", scripts: { test: "jest" } }));
   git(repo, "add", "-A");
@@ -152,7 +154,7 @@ describe("a cause worked in the sandbox", () => {
 
   test("it is offered exactly the sandbox tools, never a command runner, an install, or a question to a person", async () => {
     const { seen } = await go([{ calls: [conclude()] }]);
-    assert.deepEqual([...seen[0].tools].sort(), ["conclude_task", "get_file_outline", "list_files", "patch_file", "read_file", "run_test", "search_code", "write_file"]);
+    assert.deepEqual([...seen[0].tools].sort(), ["conclude_task", "get_file_outline", "list_files", "patch_file", "read_file", "record_deviation", "run_test", "search_code", "write_file"]);
     assert.deepEqual(SANDBOX_TOOLS_SCHEMA.map((t) => t.function.name).sort(), [...seen[0].tools].sort());
     for (const banned of ["run_project_command", "run_dependency_install", "request_dependency", "ask_user", "defer_question", "stage_file_for_deletion", "run_build_check"]) {
       assert.ok(!seen[0].tools.includes(banned), banned);
@@ -198,7 +200,7 @@ describe("what comes back, and what does not", () => {
       { calls: [conclude()] },
     ]);
     assert.deepEqual(result.appFilesTouched, ["src/x.ts"]);
-    assert.equal(fs.readFileSync(path.join(repo, "src/x.ts"), "utf8"), "export const x = 1;\n");
+    assert.equal(fs.readFileSync(path.join(repo, "src/x.ts"), "utf8"), "export const x = 1;\nexport const y = 2;\nexport const z = 3;\n");
   });
 
   test("console.log lines the agent forgot in the test file are removed from the candidate", async () => {
@@ -276,7 +278,7 @@ describe("what stops it: its own word, the user's budget, or no progress. Never 
   test("six rounds of only reading: stagnation; five and then an experiment: it goes on", async () => {
     const six = await go(Array.from({ length: 20 }, () => ({ calls: [read()] })));
     assert.equal(six.result.stop, "stagnation");
-    assert.match(six.result.conclusion, /6 rounds of reading/);
+    assert.match(six.result.conclusion, /6 rounds without an edit or a test run \(only reading, searching or recording\)/);
     const five = await go([...Array.from({ length: 5 }, () => ({ calls: [read()] })), { calls: [runT()] }, { calls: [read()] }, { calls: [conclude()] }]);
     assert.equal(five.result.stop, "concluded");
   });
@@ -359,7 +361,7 @@ describe("StagnationTracker", () => {
     assert.equal(round(t, (x) => x.onRefused()), undefined);
     assert.equal(round(t, (x) => x.onTool("read_file")), undefined);
     assert.equal(round(t, (x) => x.onRefused()), undefined);
-    assert.match(round(t, (x) => x.onTool("search_code")) ?? "", /4 rounds of reading/);
+    assert.match(round(t, (x) => x.onTool("search_code")) ?? "", /4 rounds without an edit or a test run/);
     const u = new StagnationTracker(2);
     u.check();
     round(u, (x) => x.onTool("read_file"));
@@ -419,5 +421,89 @@ describe("buildSandboxPrompt", () => {
       assert.ok(p.includes(part), part);
     }
     assert.ok(!p.includes("x".repeat(5000)), "the long text is cut");
+  });
+});
+
+// ------------------------------------------------------------------------------------------------------------------------ defect or deviation
+
+describe("the rule the stronger model works by: defect or deviation", () => {
+  const prompt = (over: Partial<Parameters<typeof buildSandboxPrompt>[0]> = {}) =>
+    buildSandboxPrompt({ file: FILE, lineCount: 100, cause: CAUSE, ledger: [], firstModelNotes: "", failureDigest: "digest", ...over });
+
+  test("it says what a defect is (never bend the test) and what a deviation is (follow the working app, record both places)", () => {
+    const p = prompt();
+    assert.match(p, /DEFECT: the app is wrong in a way that blocks a user, crashes, loses data, or sends or shows WRONG FUNCTIONAL DATA\. NEVER bend the test/);
+    assert.match(p, /CANNOT_LOCATE starting "APP BUG:"/);
+    assert.match(p, /DEVIATION: the app WORKS but differs from the spec in a cosmetic way \(a label or its casing, wording, order, styling, spacing\)/);
+    assert.match(p, /call record_deviation for each one with the app's file:line and the spec's file:line/);
+    assert.match(p, /never remove or weaken an assertion/);
+    assert.match(p, /Not sure it is only cosmetic\? It is a defect\./);
+  });
+  test("it tells the model the cap on tests one deviation may change: the configured one, else the default", () => {
+    assert.match(prompt({ deviationTestCap: 5 }), /At most 5 tests\s+may change/);
+    assert.match(prompt(), /At most 12 tests\s+may change/);
+  });
+  test("when the first model called the app wrong, the prompt says so and names the places it cited, to be checked not trusted", () => {
+    const p = prompt({ cause: { ...CAUSE, kind: "code", refs: ["src/x.ts:2", "docs/SPEC.md:3"] } });
+    assert.match(p, /The first model believed the APP is wrong here/);
+    assert.match(p, /Places it named \(check them, do not trust them\): src\/x\.ts:2, docs\/SPEC\.md:3/);
+    assert.doesNotMatch(prompt(), /believed the APP is wrong/);
+  });
+  test("it is still short with the rule in it, even with huge inputs", () => {
+    const big = "x".repeat(50_000);
+    const p = prompt({ cause: { ...CAUSE, kind: "code", refs: Array.from({ length: 8 }, (_, i) => `src/file${i}.ts:${i}`), tests: Array.from({ length: 100 }, (_, i) => `t${i}`), reason: big }, ledger: Array.from({ length: 100 }, (_, i) => `  - fixed ${i}`), firstModelNotes: big, failureDigest: big });
+    assert.ok(p.length < 8000, `prompt is ${p.length} characters`);
+  });
+});
+
+describe("record_deviation: evidence is checked the moment it is given", () => {
+  const rec = (args: Record<string, unknown>): Call => ({ name: "record_deviation", args });
+  const good = { app: "src/x.ts:2", spec: "docs/SPEC.md:3", summary: "The spec says Yes/No; the app shows yes/no." };
+  const lastToolReply = (seen: { messages: any[] }[], at: number) => seen[at].messages.filter((m: any) => m.role === "tool").pop().content as string;
+
+  test("a real app file:line and a real spec file:line are recorded, and come back in the result", async () => {
+    const { result, seen } = await go([{ calls: [rec(good)] }, { calls: [conclude()] }]);
+    assert.match(lastToolReply(seen, 1), /^Recorded: app src\/x\.ts:2 vs spec docs\/SPEC\.md:3: The spec says Yes\/No/);
+    assert.deepEqual(result.deviations, [{ appFile: "src/x.ts", appLine: 2, specFile: "docs/SPEC.md", specLine: 3, summary: "The spec says Yes/No; the app shows yes/no." }]);
+  });
+  test("a reference that does not exist is refused WITH the reason, so the model can fix it, and is not in the result", async () => {
+    const { result, seen } = await go([{ calls: [rec({ ...good, app: "src/nope.ts:2" })] }, { calls: [rec({ ...good, spec: "docs/SPEC.md:99" })] }, { calls: [rec({ ...good, app: FILE + ":1" })] }, { calls: [conclude()] }]);
+    assert.match(lastToolReply(seen, 1), /^Not recorded: app: src\/nope\.ts does not exist in the project/);
+    assert.match(lastToolReply(seen, 2), /^Not recorded: spec: docs\/SPEC\.md has 5 lines, so line 99 does not exist/);
+    assert.match(lastToolReply(seen, 3), /^Not recorded: app: __tests__\/p\.test\.ts is a test file/);
+    assert.equal(result.deviations, undefined);
+  });
+  test("the same deviation recorded twice is one", async () => {
+    const { result } = await go([{ calls: [rec(good)] }, { calls: [rec({ ...good, app: "src/x.ts:3", summary: "worded differently here" })] }, { calls: [conclude()] }]);
+    assert.equal(result.deviations?.length, 1);
+  });
+  test("a different spec place is another", async () => {
+    const { result } = await go([{ calls: [rec(good)] }, { calls: [rec({ ...good, spec: "docs/SPEC.md:5" })] }, { calls: [conclude()] }]);
+    assert.equal(result.deviations?.length, 2);
+  });
+  test("a model that only records, round after round, is stopped: recording is not an experiment (it used to loop forever)", async () => {
+    const { result, count } = await go(Array.from({ length: 20 }, () => ({ calls: [rec(good)] })));
+    assert.equal(result.stop, "stagnation");
+    assert.match(result.conclusion, /6 rounds without an edit or a test run/);
+    assert.equal(count(), 6);
+  });
+  test("so is a model that keeps calling a tool it was never offered", async () => {
+    const { result, count } = await go(Array.from({ length: 20 }, () => ({ calls: [{ name: "run_project_command", args: { command: "node -v" } }] })));
+    assert.equal(result.stop, "stagnation");
+    assert.equal(count(), 6);
+  });
+  test("recording between real experiments does not count against it", async () => {
+    const { result } = await go([{ calls: [runT()] }, { calls: [fixLine("A1")] }, { calls: [runT()] }, { calls: [rec(good)] }, { calls: [fixLine("A2")] }, { calls: [runT()] }, { calls: [conclude()] }]);
+    assert.equal(result.stop, "concluded");
+  });
+  test("outside a heal sandbox the tool does not exist", async () => {
+    const { AgentTools } = await import("../src/agentTools.js");
+    const tools = new AgentTools(repo, config);
+    assert.equal(await tools.recordDeviation(good), "record_deviation is only available in a heal sandbox");
+  });
+  test("it is not among the default tools, so no ordinary agent is offered it", async () => {
+    const { TOOLS_SCHEMA, RECORD_DEVIATION_TOOL } = await import("../src/agentTools.js");
+    assert.ok(!TOOLS_SCHEMA.some((t: any) => t.function.name === "record_deviation"));
+    assert.deepEqual(RECORD_DEVIATION_TOOL.function.parameters.required, ["app", "spec", "summary"]);
   });
 });

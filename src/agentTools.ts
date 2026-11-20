@@ -714,6 +714,31 @@ export const RUN_TEST_TOOL = {
   },
 };
 
+/**
+ * Record a place where the spec says one thing and the working app does another, in a heal sandbox. Not in TOOLS_SCHEMA, for the same reason as RUN_TEST_TOOL.
+ * What it records is checked against the project when it is called (the files and lines must exist), and again when the test change is merged.
+ */
+export const RECORD_DEVIATION_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "record_deviation",
+    description:
+      "Record ONE place where the written spec says one thing and the app works but does another (a label, its casing, wording, order, styling): call it for each, " +
+      "after you changed the test to expect what the working app does. Both places must really exist. A deviation that is not recorded, or whose references do " +
+      "not exist, makes your whole test change be thrown away. Never use it for an app that is WRONG (crashes, blocks a user, loses data, sends or shows wrong " +
+      "functional data): that is a defect, and the test is not bent for it.",
+    parameters: {
+      type: "object",
+      properties: {
+        app: { type: "string", description: "The app code the test now follows, as path:line, e.g. src/components/DashboardTimeline.tsx:1247. Not a test file." },
+        spec: { type: "string", description: "Where the spec says otherwise, as path:line, e.g. docs/PHONE_SPEC.md:461 (or the spec's own words, 20+ characters, if you cannot give a line)." },
+        summary: { type: "string", description: "One sentence: what the spec requires and what the app does instead." },
+      },
+      required: ["app", "spec", "summary"],
+    },
+  },
+};
+
 export const PLANNER_TOOLS_SCHEMA = [
   {
     type: "function" as const,
@@ -1063,6 +1088,16 @@ export class AgentTools {
   private sandboxRunTest?: (args: Record<string, unknown>) => Promise<string>;
   public bindSandboxRunTest(fn: ((args: Record<string, unknown>) => Promise<string>) | undefined): void {
     this.sandboxRunTest = fn;
+  }
+  /** Set only on the AgentTools of a heal sandbox: what `record_deviation` does. */
+  private sandboxDeviation?: (args: Record<string, unknown>) => Promise<string>;
+  public bindSandboxDeviation(fn: ((args: Record<string, unknown>) => Promise<string>) | undefined): void {
+    this.sandboxDeviation = fn;
+  }
+  /** `record_deviation`: only a heal sandbox binds it. */
+  public async recordDeviation(args: Record<string, unknown>): Promise<string> {
+    if (!this.sandboxDeviation) return "record_deviation is only available in a heal sandbox";
+    return this.sandboxDeviation(args);
   }
   /** `run_test`: only a heal sandbox binds it; anywhere else it is refused, so no ordinary agent can run tests this way. */
   public async runTest(args: Record<string, unknown>): Promise<string> {
