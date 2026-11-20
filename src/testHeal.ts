@@ -396,7 +396,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   // Lookups the worker has asked for in this heal, so a repeat is not answered twice.
   let asked = new Set<string>();
   // One conversation with one model. It ends with a result, or with "parked-out": every cause that still fails has been parked.
-  const converse = async (callFn: HealCall): Promise<HealResult | "parked-out"> => {
+  const converse = async (callFn: HealCall, stage: "first" | "strong"): Promise<HealResult | "parked-out"> => {
   for (;;) {
     if (!retryUnchanged) {
       const key = failureKey(current.output);
@@ -528,6 +528,17 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
 
     // A "mixed" answer with nothing to change in the test is simply a code defect.
     if (verdict === "code-bug" || deviation || (mixed && !hasChange)) {
+      // The first model's claim that what is left is the CODE's is a claim, and it has been wrong before (a faulty test helper called an app defect). Before a
+      // fix task changes product code on its word, the stronger model looks: every cause still failing is handed over, marked as "it believes the app is wrong".
+      // The stronger model's own verdict is final.
+      if (stage === "first" && opts.escalate) {
+        const rest = causesOf(current.output).filter((c) => !parked.has(c.key));
+        if (rest.length > 0) {
+          const why = [reason, ...codeBugs].join(" ").replace(/\s+/g, " ").slice(0, 600);
+          for (const c of rest) parked.set(c.key, { kind: "code", reason: why, message: c.message, count: c.count });
+          return "parked-out";
+        }
+      }
       // Having ALREADY fixed the test-side causes and then been shown what still fails, the worker says what is left is the code: the test
       // edits stay (they moved the failure), and only the code defect is handed on. With no progress made, the file goes back as it was.
       const left = digestFailure(current.output.replace(ANSI, ""), repoRoot, file).total;
@@ -711,7 +722,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   }
   };
 
-  let outcome = await converse(opts.call);
+  let outcome = await converse(opts.call, "first");
   if (outcome === "parked-out" && opts.escalate && parked.size > 0) {
     // What the first model could not settle goes to the stronger one, in a fresh conversation that begins by saying what is ALREADY FIXED. The ratchet
     // enforces it: an edit that breaks any test that passes now is undone, so the stronger model cannot go backwards.
@@ -745,7 +756,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
           `OTHER FILES IT REACHES (ask for any you need)\n${others.length ? others.join("\n") : "(none)"}\n\nRECENT GIT HISTORY\n${history || "(none)"}${focusTail()}`,
       },
     ];
-    outcome = await converse(opts.escalate);
+    outcome = await converse(opts.escalate, "strong");
   }
   if (outcome !== "parked-out") return outcome;
 

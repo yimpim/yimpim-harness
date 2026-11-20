@@ -248,3 +248,41 @@ describe("what the stronger model is handed about the first model's work", () =>
     assert.match(h, /It brought the passing tests from 0 to 9\./);
   });
 });
+
+describe("the first model's claim that the rest is the code's gets a second look before a fix task changes product code", () => {
+  const codeBug = (reason: string) => answer({ verdict: "code-bug", reason, codeBugs: [reason] });
+  test("with a stronger model available the claim is handed over, marked as a belief, and the stronger model can refute it", async () => {
+    const cheap = model(edits("A1", "A2", "A3"), codeBug("src/x.ts:1 renders the wrong thing for B and C"));
+    const strong = model(edits("B1", "B2", "C1"));
+    const report = await heal(cheap.call, strong.call);
+    assert.equal(cheap.count(), 2);
+    assert.equal(strong.count(), 1, "the stronger model was called");
+    assert.match(strong.shown[0], /THE FIRST MODEL COULD NOT SETTLE THESE[^\n]*:\n {2}- \[2×\] Error: cause B broke — it believed the app is wrong: src\/x\.ts:1 renders the wrong thing for B and C/);
+    assert.match(strong.shown[0], /- \[1×\] Error: cause C broke — it believed the app is wrong/);
+    assert.equal(report.results[0].status, "healed", "it was a test-side problem after all: no fix task, no product code touched");
+    assert.equal(read(), "test-A1 OK\ntest-A2 OK\ntest-A3 OK\ntest-B1 OK\ntest-B2 OK\ntest-C1 OK\n");
+  });
+  test("when the stronger model agrees, ITS verdict is the one reported, with what was fixed kept", async () => {
+    const cheap = model(edits("A1", "A2", "A3"), codeBug("src/x.ts:1 is wrong (first model)"));
+    const strong = model(codeBug("src/x.ts:1 really is wrong (checked by the stronger model)"));
+    const r = (await heal(cheap.call, strong.call)).results[0];
+    assert.equal(r.status, "code-bug");
+    assert.equal(r.partial, true);
+    assert.match(r.note, /really is wrong \(checked by the stronger model\)/);
+    assert.doesNotMatch(r.note, /\(first model\)/);
+    assert.match(read(), /^test-A1 OK\ntest-A2 OK\ntest-A3 OK\ntest-B1 BAD/);
+  });
+  test("with no stronger model the first model's code-defect verdict stands, as before", async () => {
+    const r = (await heal(model(edits("A1", "A2", "A3"), codeBug("src/x.ts:1 is wrong")).call)).results[0];
+    assert.equal(r.status, "code-bug");
+    assert.match(r.note, /src\/x\.ts:1 is wrong/);
+  });
+  test("a stronger model asked to confirm a claim made with NOTHING fixed first still sees an untouched file and is not told anything was fixed", async () => {
+    const strong = model(codeBug("confirmed"));
+    const r = (await heal(model(codeBug("src/x.ts:1 is wrong")).call, strong.call)).results[0];
+    assert.equal(r.status, "code-bug");
+    assert.equal(r.partial, undefined);
+    assert.equal(read(), START, "no progress, so the file is as it was");
+    assert.match(strong.shown[0], /ALREADY FIXED[^\n]*:\n {2}\(nothing yet\)/);
+  });
+});
