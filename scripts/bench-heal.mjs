@@ -243,13 +243,20 @@ async function runModel() {
     if (!key) throw new Error("No OpenRouter key: run `yimpim setup`.");
     const client = new OpenRouterClient(key, config);
     const models = config.models.repair ?? config.models.editor;
-    const trace = { calls: 0, refusedNoCite: 0, refusedBadCite: 0, madeWorse: 0, callMs: [], steps: [] };
+    const trace = { calls: 0, refusedNoCite: 0, refusedBadCite: 0, madeWorse: 0, callMs: [], steps: [], batches: [], nothingNew: 0, alreadyResent: 0 };
     const log = [];
     const call = async (messages, label, json) => {
       const last = String(messages[messages.length - 1]?.content ?? "");
       if (/Not applied: every answer that changes the test/.test(last)) trace.refusedNoCite++;
       if (/could not be verified/.test(last)) trace.refusedBadCite++;
       if (/made it WORSE/.test(last)) trace.madeWorse++;
+      // How the previous batch of edits was applied, read from what the worker is told about it: some skipped, some already in the file.
+      const partial = /Of your (\d+) edits: (\d+) applied now; (\d+) already in the file[^;]*; (\d+) SKIPPED/.exec(last);
+      if (partial) {
+        trace.batches.push({ total: Number(partial[1]), applied: Number(partial[2]), already: Number(partial[3]), skipped: Number(partial[4]) });
+        trace.alreadyResent += Number(partial[3]);
+      }
+      if (/Nothing new to apply/.test(last)) trace.nothingNew++;
       const t = Date.now();
       const reply = await runLabeledCompletion({ client, models, messages, agentName: "REPAIR", jsonMode: json, reason: label });
       trace.calls++;
@@ -301,6 +308,9 @@ async function runModel() {
       refusedBadCite: trace.refusedBadCite,
       madeWorse: trace.madeWorse,
       steps: trace.steps,
+      partialBatches: trace.batches,
+      nothingNew: trace.nothingNew,
+      alreadyResent: trace.alreadyResent,
       slowestCallSeconds: Math.round(Math.max(0, ...trace.callMs) / 1000),
       tokens: usage.totals.total,
       cost: usage.totals.costKnown ? usage.totals.cost : null,
@@ -315,6 +325,7 @@ async function runModel() {
       for (const st of trace.steps) kinds[st.answered] = (kinds[st.answered] ?? 0) + 1;
       console.log(`  what it answered, by kind: ${JSON.stringify(kinds)}`);
     }
+    console.log(`  batches with skipped edits: ${trace.batches.length}${trace.batches.length ? " (" + trace.batches.map((b) => `${b.applied} new / ${b.already} already / ${b.skipped} skipped`).join(", ") + ")" : ""}; already-applied edits resent: ${trace.alreadyResent}; \"nothing new\" turns: ${trace.nothingNew}`);
     console.log(`  refused for no citation: ${trace.refusedNoCite}, bad citation: ${trace.refusedBadCite}, undone as worse: ${trace.madeWorse}, app-deviations: ${result.deviations.length}`);
     for (const p of scored.integrity.problems) console.log("  INTEGRITY: " + p);
     for (const w of scored.integrity.warnings) console.log("  warning: " + w);
@@ -334,6 +345,7 @@ function summary(results, harnessRev) {
     `  seconds, min / median / max: ${span(nums((r) => r.seconds))}`,
     `  cost $, min / median / max: ${span(nums((r) => (r.cost === null ? undefined : Number(r.cost.toFixed(3)))))}`,
     `  integrity failures: ${results.filter((r) => !r.integrity.ok).length}`,
+    `  edits applied / skipped across partial batches: ${results.flatMap((r) => r.partialBatches ?? []).reduce((a, b) => a + b.applied, 0)} / ${results.flatMap((r) => r.partialBatches ?? []).reduce((a, b) => a + b.skipped, 0)}; already-applied edits resent: ${results.reduce((a, r) => a + (r.alreadyResent ?? 0), 0)}`,
   ];
   console.log("\n" + lines.join("\n"));
   fs.writeFileSync(path.join(BENCH, "results", `summary-${stamp()}.txt`), lines.join("\n") + "\n");

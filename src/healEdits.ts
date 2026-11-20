@@ -33,11 +33,57 @@ export function parseEdits(v: unknown): Edit[] | undefined {
   return out;
 }
 
-const countOf = (text: string, find: string): number => {
+export const countOf = (text: string, find: string): number => {
   let n = 0;
   for (let at = text.indexOf(find); at >= 0; at = text.indexOf(find, at + find.length)) n++;
   return n;
 };
+
+/**
+ * Applies each edit on its own: one that does not match (or matches more than one place) is SKIPPED and reported, and every other edit is
+ * applied. A batch of thirteen good edits is not thrown away because the tenth is ambiguous. Whether the result is any good is not decided
+ * here: the test run and the made-it-worse check decide that.
+ */
+export function applyEditsLenient(
+  content: string,
+  edits: Edit[],
+  /**
+   * For each replacement this worker has had applied: how many copies of it the file must hold for the change to still be in. That is the number the
+   * file had BEFORE the first such edit, plus one per time it was applied, so a copy of the same line that was always elsewhere in the file cannot make a
+   * reverted or never-applied edit look applied.
+   */
+  required: ReadonlyMap<string, number> = new Map()
+): { text: string; applied: number; already: number; required: Map<string, number>; skipped: { n: number; find: string; error: string }[] } {
+  let text = content.replace(/\r\n/g, "\n");
+  let applied = 0;
+  let already = 0;
+  const req = new Map(required);
+  const skipped: { n: number; find: string; error: string }[] = [];
+  for (const [i, e] of edits.entries()) {
+    const count = countOf(text, e.find);
+    if (count === 0) {
+      // Its text is gone because THIS worker's earlier answer already made that same change: an edit sent again, not one that failed. It counts only if
+      // the file holds as many copies of the replacement as that change accounts for (see `required`); a copy elsewhere in the file proves nothing.
+      const need = req.get(e.replace);
+      if (e.replace.trim().length > 0 && e.find !== e.replace && need !== undefined && countOf(text, e.replace) >= need) {
+        already++;
+        continue;
+      }
+      skipped.push({ n: i + 1, find: e.find.slice(0, 160), error: `edit ${i + 1}: the text to find was not found (copy it exactly as it is in the file, without the line-number prefix).` });
+      continue;
+    }
+    if (count > 1) {
+      skipped.push({ n: i + 1, find: e.find.slice(0, 160), error: `edit ${i + 1}: the text to find matches ${count} places (include more of the surrounding lines so it matches exactly once).` });
+      continue;
+    }
+    const at = text.indexOf(e.find);
+    const before = req.get(e.replace) ?? countOf(text, e.replace);
+    text = text.slice(0, at) + e.replace + text.slice(at + e.find.length);
+    applied++;
+    req.set(e.replace, before + 1);
+  }
+  return { text, applied, already, required: req, skipped };
+}
 
 /** Applies the edits in order. Each must match exactly once; if any does not, nothing is applied and the reply says which and why. */
 export function applyEdits(content: string, edits: Edit[]): { ok: true; text: string } | { ok: false; error: string } {
