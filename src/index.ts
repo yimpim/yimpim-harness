@@ -5142,6 +5142,8 @@ async function main(): Promise<void> {
       const report = await healTests({
         repoRoot,
         all,
+        // A test is only stale if something stronger than the test says so; every edit must cite it, and the citation must exist.
+        requireCites: true,
         call: (messages, label, json) => runLabeledCompletion({ client, models: healModels, messages: messages as any, agentName: "REPAIR", jsonMode: json, reason: label }),
         log: (line) => console.log("🧪 [TESTS] " + line),
       });

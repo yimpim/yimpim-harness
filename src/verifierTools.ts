@@ -2678,7 +2678,7 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
       };
       try {
         if (retry.length === 0) throw new Error("nothing to retry");
-        const healed = await healTests({ repoRoot: this.repoRoot, files: retry, call, log: (l) => console.log(`[TESTS] ${l}`) });
+        const healed = await healTests({ repoRoot: this.repoRoot, files: retry, call, requireCites: true, log: (l) => console.log(`[TESTS] ${l}`) });
         stillRed.push(...healed.results.filter((r) => r.status !== "healed" && r.status !== "already-green").map((r) => `${r.file} (${r.status}: ${r.note})`));
         const fixed = healed.results.filter((r) => r.status === "healed").length;
         if (fixed > 0) {
