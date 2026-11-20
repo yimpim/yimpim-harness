@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { execFile } from "child_process";
 import type { ReviewRequest, ReviewOutcome } from "./commandReview.js";
 import { cleanScratch, scratchTarget, SCRATCH_DIR } from "./scratch.js";
+import { staleTestReferences, renderReferences, referencesKey, type Reference } from "./testReferences.js";
 import {
   CommandApprovals,
   describeBinary,
@@ -415,6 +416,18 @@ export const TOOLS_SCHEMA = [
         "to know. Takes no arguments. Build/typecheck only — it does not run tests, launch the app, or " +
         "check runtime/visual behavior; those still need QA. Returns a plain unavailability notice " +
         "(not a failure) when no build/typecheck command applies to this project.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "find_test_references",
+      description:
+        "After you remove or change something a person can see or call (a button or its label, a message, a route, an exported component or function), " +
+        "list every test in the project that still names it. It reads YOUR edits so far, takes the texts, test ids, routes and exported names on the lines you " +
+        "removed, drops anything the code still contains, and searches the whole test folder once. Returns file:line for each place. Call it before concluding " +
+        "and update those lines to match your change, in this same phase. Takes no arguments. Finds literal text only.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -1087,6 +1100,7 @@ export class AgentTools {
    */
   public beginPhase(plannedFiles: string[] = [], maxFiles?: number, phaseName?: string): void {
     this.filesWritten.clear();
+    this.referencesShown.clear();
     this.filesInspected.clear();
     this.dependencyInstallMemo.clear();
     this.approvedInstallPlans.clear();
@@ -1896,6 +1910,42 @@ export class AgentTools {
       changeId,
     });
     return `Successfully patched ${filePath}`;
+  }
+
+  /** Lists already handed to the agent this phase (by key), so the same list is never sent back twice. */
+  private referencesShown = new Set<string>();
+
+  /** Tests that still name something this phase's edits removed or changed (see testReferences.ts). */
+  public currentTestReferences(): Reference[] {
+    try {
+      return staleTestReferences(this.repoRoot, this.filesWrittenThisPhase(), [...this.filesPendingDeletion]);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Backs the find_test_references tool. */
+  public findTestReferences(): string {
+    const refs = this.currentTestReferences();
+    if (refs.length === 0) {
+      return "No test names anything your edits removed or changed (searched the whole test suite for the texts, routes and names on the lines you removed). Tests that build a label from a variable are not found by this: the QA gate still runs them.";
+    }
+    this.referencesShown.add(referencesKey(refs));
+    return (
+      renderReferences(refs) +
+      "\n\nUpdate only the lines that refer to what you changed, to match the change you made. Do not weaken or delete an assertion about behaviour that should stay the same. " +
+      "If a test is the SPEC for a fix you were asked to make (it fails today and must pass), your change is what is wrong, not the test."
+    );
+  }
+
+  /** At the point the agent says it is finished: the list, if there is one it has not yet been shown (shown once per distinct list). */
+  public unseenTestReferences(): string | undefined {
+    const refs = this.currentTestReferences();
+    if (refs.length === 0) return undefined;
+    const key = referencesKey(refs);
+    if (this.referencesShown.has(key)) return undefined;
+    this.referencesShown.add(key);
+    return renderReferences(refs) + "\n\nUpdate the lines that refer to what you changed, then conclude again.";
   }
 
   public setBuildCheckRunner(fn: (agentLabel: string) => Promise<string>): void {

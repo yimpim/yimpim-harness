@@ -737,6 +737,12 @@ MANDATORY RULES:
     appearance, and test suites are still QA's job alone, not something to self-certify. Skip it for a
     change a compiler can't meaningfully judge (pure copy/string/styling edits, a markdown file) — it would
     only add a wait with nothing new to tell you.
+10a. TESTS THAT NAME WHAT YOU CHANGED: When you remove or change something a person can see or call (a button or its label,
+    a message, a route, an exported component or function), call find_test_references BEFORE you conclude. It reads your own
+    edits and lists every test that still names it. Update those lines in this same phase, to match your change: you know
+    exactly what you changed, and later stages only see a failing assertion and have to work backwards. Change only the
+    lines that refer to what you changed; never weaken or delete an assertion about behaviour that should stay the same. If a
+    test is the spec for a fix you were asked to make, your change is wrong, not the test.
 10b. RUNNING OTHER COMMANDS: run_project_command runs one command of your choosing — a test run, a code
     generator, a version check, a build step run_build_check does not cover. You decide what to run from
     what the project actually contains (its scripts, wrapper, lockfile); do not assume. One plain command

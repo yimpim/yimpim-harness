@@ -10,6 +10,7 @@ import { events } from "./events.js";
 import { runControl, AbortedError } from "./remote/control.js";
 import { sanitizeAssertionDeltas, encodeAssertionDeltas } from "./assertionAudit.js";
 import { encodeTestsNotNeeded } from "./focusTests.js";
+import { anyMustPass } from "./directFix.js";
 import { promptView } from "./repoMap.js";
 import { designSystemForPrompt, detectUiStack } from "./uiDesign.js";
 import { coreRulesBlock } from "./uiKnowledge.js";
@@ -661,6 +662,17 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
           continue;
         }
 
+        // What the change left behind in the tests, found from its own diff. The Editor knows what it just removed; later stages only see a failing
+        // assertion. Handed back once per distinct list (never in a loop), and not for a fix whose tests are the spec: there the test is right.
+        if (EDITING_AGENTS.has(agentName) && args.status === "FINISHED_PATCHING" && !anyMustPass()) {
+          const pending = agentTools.unseenTestReferences();
+          if (pending) {
+            console.log(`[${displayName}] 🔎 The change left tests naming what it removed or changed: sending it back to update them.`);
+            messages.push({ role: "tool", tool_call_id: call.id, name, content: `NOT YET: ${pending}` });
+            continue;
+          }
+        }
+
         // The Editor is the only agent that ever knows this for certain — it
         // just wrote the behavior. Folded into the marker section (parsed
         // back out by extractHowToVerify) rather than a separate return
@@ -826,6 +838,10 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
           // call here simply leaves the streak exactly where it already was.
           console.log(`[${displayName}] 🔎 Running a build/typecheck self-check before concluding...`);
           toolOutput = await agentTools.runBuildCheck();
+        } else if (name === "find_test_references") {
+          // Read-only: neither an inspection nor an edit, so the read streak is left where it is.
+          console.log(`[${displayName}] 🔎 Searching the tests for what this change removed or changed...`);
+          toolOutput = agentTools.findTestReferences();
         } else if (name === "run_dependency_install") {
           // Same reasoning as run_build_check above: neither an inspection
           // nor an edit, so readOrSearchStreak is deliberately left untouched.
