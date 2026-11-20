@@ -17,7 +17,9 @@ import { failingNames } from "./healAuthority.js";
 import { OpenRouterClient, type FunctionTool } from "./openrouter.js";
 import type { AgentConfig } from "./config.js";
 import { AgentTools, TOOLS_SCHEMA, RUN_TEST_TOOL } from "./agentTools.js";
-import { runToolAgent } from "./agentLoop.js";
+import { runToolAgent, runLabeledCompletion } from "./agentLoop.js";
+import { securityModels } from "./securityPlan.js";
+import { runSuiteLogged } from "./testLog.js";
 import { createRepoTools } from "./repoTools.js";
 import { events } from "./events.js";
 import { AbortedError } from "./remote/control.js";
@@ -347,6 +349,8 @@ export interface SandboxResult {
   cost: number;
   /** run_test calls that ran. */
   runs: number;
+  /** Every tool call the agent made, in order, so a run that went nowhere can be read afterwards (the benchmark saves it). */
+  trace?: { n: number; tool: string; arg: string; fp?: string; resultChars?: number }[];
 }
 
 export type SandboxRun = (args: {
@@ -569,14 +573,22 @@ export function createSandboxRun(deps: {
     const tracker = new StagnationTracker(Math.max(1, deps.stagnation));
     const startUsage = events.usageReport();
     let costWarned = false;
+    const trace: NonNullable<SandboxResult["trace"]> = [];
     try {
       const session = createRunTestSession({ root: sandbox.root, base: sandbox.base, gate: { review: reviewer }, fallbackRun: deps.run });
       const tools = new AgentTools(sandbox.root, deps.config, async (_q, fallback) => fallback); // never waits on a person
       tools.beginPhase([], 1_000_000, "heal sandbox"); // the per-phase file cap is for a phase that must stay small: a sandbox is thrown away
       tools.bindSandboxRunTest(async (args) => {
         const r = await session.run(args);
-        if (r.refused) tracker.onRefused();
-        else tracker.onRun(fingerprintOf(r.output, sandbox.root));
+        const entry = [...trace].reverse().find((t) => t.tool === "run_test" && t.resultChars === undefined);
+        if (entry) entry.resultChars = r.text.length;
+        if (r.refused) {
+          tracker.onRefused();
+        } else {
+          const fp = fingerprintOf(r.output, sandbox.root);
+          if (entry) entry.fp = fp.slice(0, 10);
+          tracker.onRun(fp);
+        }
         return r.text;
       });
 
@@ -607,7 +619,10 @@ export function createSandboxRun(deps: {
           tools: SANDBOX_TOOLS_SCHEMA,
           maxRoundsOverride: Number.MAX_SAFE_INTEGER, // budget and stagnation decide, not a round count
           stopWhen,
-          onToolCall: (name) => tracker.onTool(name),
+          onToolCall: (name, args) => {
+            tracker.onTool(name);
+            trace.push({ n: trace.length + 1, tool: name, arg: JSON.stringify(args ?? {}).slice(0, 160) });
+          },
           reason: `heal sandbox: ${a.cause.message.slice(0, 60)}`,
         });
       } catch (e: any) {
@@ -626,9 +641,44 @@ export function createSandboxRun(deps: {
       }
       const touched = changedFiles(sandbox.root).filter((f) => f !== sandbox.file);
       const spent = events.usageDelta(startUsage).totals;
-      return { candidate, appFilesTouched: touched, conclusion: outcome.conclusion, stop: outcome.stop, rounds: tracker.rounds, cost: spent.costKnown ? spent.cost : 0, runs: tracker.runs };
+      return { candidate, appFilesTouched: touched, conclusion: outcome.conclusion, stop: outcome.stop, rounds: tracker.rounds, cost: spent.costKnown ? spent.cost : 0, runs: tracker.runs, trace };
     } finally {
       destroySandbox(sandbox, a.repoRoot);
     }
   };
+}
+
+// ------------------------------------------------------------------------------------------------------------------------ the sandbox pass for a heal
+
+/**
+ * The sandbox pass for a heal, or undefined when there is none to give: it is switched off (heal.sandbox.enabled: false) or the repair chain has
+ * no model after the first to hand a cause to. The caller then keeps the JSON stronger-model pass it already had. One place decides this so the
+ * CLI, the phase gate and the benchmark cannot disagree.
+ *
+ * The security reviewer is the project's security model chain, so code the agent writes that could run a program, delete files or send data
+ * out is judged by a model other than the one that wrote it before a test run starts.
+ */
+export function sandboxFor(deps: { client: OpenRouterClient; config: AgentConfig; repairModels: string[]; run?: RunTests; log?: (line: string) => void }): SandboxRun | undefined {
+  const cfg = deps.config.heal?.sandbox;
+  if (cfg && cfg.enabled === false) return undefined;
+  if (deps.repairModels.length < 2) return undefined;
+  const securityCall: ReviewCall = (messages) =>
+    runLabeledCompletion({
+      client: deps.client,
+      models: securityModels(deps.config.models),
+      messages: messages as any,
+      agentName: "SECURITY",
+      jsonMode: true,
+      reason: "Security: reviewing code before a sandbox test run",
+    });
+  return createSandboxRun({
+    client: deps.client,
+    config: deps.config,
+    models: deps.repairModels.slice(1),
+    budgetUsd: cfg?.budgetUsd ?? 0.75,
+    stagnation: cfg?.stagnation ?? 3,
+    run: deps.run ?? runSuiteLogged,
+    securityCall,
+    log: deps.log,
+  });
 }

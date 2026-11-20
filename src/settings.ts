@@ -181,6 +181,31 @@ export const SETTINGS: SettingDef[] = [
 
   // ---- Cost and loop control ----------------------------------------------
   {
+    key: "heal.sandbox.enabled",
+    type: "boolean",
+    group: "Limits",
+    description:
+      "When tests fail and the cheap model cannot fix some of them, a stronger model (the next one in your repair list) tries in a throwaway copy of your project, " +
+      "where it can add logging, change a wait and run one test, like a person at a terminal. Only the test file ever comes back, and only if more tests pass and none break. " +
+      "Off = it gets the same text conversation the cheap model had.",
+  },
+  {
+    key: "heal.sandbox.budgetUsd",
+    type: "number",
+    group: "Limits",
+    common: true,
+    description:
+      "The most to spend on the stronger model for ONE stubborn group of failing tests, in dollars. When it is reached, that group is reported for a person and the run goes on. 0 = no dollar limit.",
+  },
+  {
+    key: "heal.sandbox.stagnation",
+    type: "number",
+    group: "Limits",
+    description:
+      "How patient the stronger model is before it is stopped for going nowhere: this many test runs in a row with the same result and nothing changed, this many rounds of edits without " +
+      "running a test, or twice this many rounds of only reading. A new result is progress and starts the count again.",
+  },
+  {
     key: "limits.maxToolRounds",
     type: "number",
     group: "Limits",

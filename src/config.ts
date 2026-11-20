@@ -289,6 +289,24 @@ export const ConfigSchema = z.object({
       reasoningOff: z.array(z.string()).default(["DISCOVERY", "EDITOR"]),
     })
     .prefault({}),
+  /**
+   * Healing a red test suite. What the first (cheap) model parks goes, when there is a stronger model after it in the repair chain, to a SANDBOX: a
+   * disposable copy of the project where that model can run experiments the way a person does (see healSandbox.ts).
+   */
+  heal: z
+    .object({
+      sandbox: z
+        .object({
+          // Off = the stronger model gets the same JSON conversation the first one had.
+          enabled: z.boolean().default(true),
+          // The most to spend on the stronger model for ONE stubborn group of failing tests, in dollars. 0 = no dollar stop (the no-progress rules still apply).
+          budgetUsd: z.number().min(0).default(0.75),
+          // How many times in a row the same result, edits without a test run, or (twice this many) reads without an experiment end a run that is going nowhere.
+          stagnation: z.number().int().min(1).default(3),
+        })
+        .prefault({}),
+    })
+    .prefault({}),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
