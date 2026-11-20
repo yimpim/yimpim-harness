@@ -251,15 +251,15 @@ describe("what the stronger model is handed about the first model's work", () =>
 
 describe("the first model's claim that the rest is the code's gets a second look before a fix task changes product code", () => {
   const codeBug = (reason: string) => answer({ verdict: "code-bug", reason, codeBugs: [reason] });
-  test("with a stronger model available the claim is handed over, marked as a belief, and the stronger model can refute it", async () => {
-    const cheap = model(edits("A1", "A2", "A3"), codeBug("src/x.ts:1 renders the wrong thing for B and C"));
-    const strong = model(edits("B1", "B2", "C1"));
+  test("a code-defect claim parks ONLY the cause it was about; the worker carries on with the rest, and the stronger model checks the claim", async () => {
+    const cheap = model(edits("A1", "A2", "A3"), codeBug("src/x.ts:1 renders the wrong thing for B"), edits("C1"));
+    const strong = model(edits("B1", "B2"));
     const report = await heal(cheap.call, strong.call);
-    assert.equal(cheap.count(), 2);
-    assert.equal(strong.count(), 1, "the stronger model was called");
-    assert.match(strong.shown[0], /THE FIRST MODEL COULD NOT SETTLE THESE[^\n]*:\n {2}- \[2×\] Error: cause B broke — it believed the app is wrong: src\/x\.ts:1 renders the wrong thing for B and C/);
-    assert.match(strong.shown[0], /- \[1×\] Error: cause C broke — it believed the app is wrong/);
-    assert.equal(report.results[0].status, "healed", "it was a test-side problem after all: no fix task, no product code touched");
+    assert.equal(cheap.count(), 3, "the worker went on to C after parking B");
+    assert.equal(strong.count(), 1, "the stronger model was called, for B only");
+    assert.match(strong.shown[0], /THE FIRST MODEL COULD NOT SETTLE THESE[^\n]*:\n {2}- \[2×\] Error: cause B broke — it believed the app is wrong: src\/x\.ts:1 renders the wrong thing for B/);
+    assert.doesNotMatch(strong.shown[0], /cause C broke — it believed/, "C was fixed by the worker, not claimed as the app's");
+    assert.equal(report.results[0].status, "healed", "a test-side problem after all: no fix task, no product code touched");
     assert.equal(read(), "test-A1 OK\ntest-A2 OK\ntest-A3 OK\ntest-B1 OK\ntest-B2 OK\ntest-C1 OK\n");
   });
   test("when the stronger model agrees, ITS verdict is the one reported, with what was fixed kept", async () => {
