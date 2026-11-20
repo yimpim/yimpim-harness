@@ -575,3 +575,58 @@ describe("a model that cannot read images", () => {
     }
   });
 });
+
+describe("OpenRouterClient.complete — a call the provider ends with no answer", () => {
+  const ended = (native: string) =>
+    sseResponse([frame({ choices: [{ delta: { role: "assistant", reasoning: "thinking" } }] }), frame({ choices: [{ delta: {}, finish_reason: "error", native_finish_reason: native }] }), "data: [DONE]\n\n"]);
+  const answered = () => sseResponse([frame({ choices: [{ delta: { role: "assistant", content: '{"verdict":"stale-test"}' } }] }), frame({ choices: [{ delta: {}, finish_reason: "stop" }] }), "data: [DONE]\n\n"]);
+
+  test("MALFORMED_FUNCTION_CALL with no text is retried with a different reasoning effort each time, and the answer comes through", async () => {
+    const originalFetch = globalThis.fetch;
+    const sent: any[] = [];
+    let n = 0;
+    (globalThis as any).fetch = async (_url: string, init: any) => {
+      sent.push(JSON.parse(init.body));
+      return ++n < 3 ? ended("MALFORMED_FUNCTION_CALL") : answered();
+    };
+    try {
+      const client = new OpenRouterClient("test-key");
+      const reply = await quietly(() => client.complete(["google/gemini-4-hydrogen"], [{ role: "user", content: "hi" }], { agent: "REPAIR", jsonMode: true }));
+      assert.equal(reply.content, '{"verdict":"stale-test"}');
+      assert.equal(sent.length, 3);
+      assert.equal(sent[0].reasoning, undefined, "the first try is the model's own default");
+      assert.deepEqual(sent[1].reasoning, { effort: "low" });
+      assert.deepEqual(sent[2].reasoning, { effort: "medium" });
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+    }
+  });
+
+  test("if every attempt ends that way the empty answer is returned as before, not thrown", async () => {
+    const originalFetch = globalThis.fetch;
+    let n = 0;
+    (globalThis as any).fetch = async () => (++n, ended("MALFORMED_FUNCTION_CALL"));
+    try {
+      const client = new OpenRouterClient("test-key");
+      const reply = await quietly(() => client.complete(["google/gemini-4-hydrogen"], [{ role: "user", content: "hi" }], { agent: "REPAIR" }));
+      assert.equal(reply.content, null);
+      assert.equal(n, 3, "three attempts, no more");
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+    }
+  });
+
+  test("a stop with no text is NOT retried (a model with nothing to say is not a malformed call)", async () => {
+    const originalFetch = globalThis.fetch;
+    let n = 0;
+    (globalThis as any).fetch = async () => (++n, sseResponse([frame({ choices: [{ delta: { role: "assistant" }, finish_reason: "stop" }] }), "data: [DONE]\n\n"]));
+    try {
+      const client = new OpenRouterClient("test-key");
+      const reply = await quietly(() => client.complete(["google/gemini-4-hydrogen"], [{ role: "user", content: "hi" }], { agent: "REPAIR" }));
+      assert.equal(reply.content, null);
+      assert.equal(n, 1);
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+    }
+  });
+});

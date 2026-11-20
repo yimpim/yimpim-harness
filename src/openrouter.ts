@@ -33,6 +33,11 @@ export interface CompleteOptions {
   jsonSchema?: { name: string; schema: any };
   /** Plain `{"type":"json_object"}` mode, for callers with no schema to enforce. */
   jsonMode?: boolean;
+  /**
+   * The JSON reply is held to this schema for Google models (response_format json_schema); every other model gets plain `json_object` mode.
+   * For callers whose reply looks like an action, which Gemini otherwise sometimes tries to emit as a native function call.
+   */
+  structured?: { name: string; schema: unknown };
   temperature?: number;
   /** Agent role, recorded against token usage so tiering can be measured. */
   agent?: string;
@@ -164,7 +169,7 @@ export class OpenRouterClient {
     onFirstChunk?: () => void,
     /** Told how many characters the model has produced so far (answer, thinking and tool arguments), for the live status line. */
     onProgress?: (chars: number) => void
-  ): Promise<{ message: ChatMessage; usage?: TokenUsage }> {
+  ): Promise<{ message: ChatMessage; usage?: TokenUsage; finish?: { reason?: string; native?: string } }> {
     if (!response.body) {
       throw new Error("Streaming response carried no body to read.");
     }
@@ -192,6 +197,10 @@ export class OpenRouterClient {
     ]);
     const passthrough: Record<string, any> = {};
     let usagePayload: any;
+    // Why the provider ended the answer: a call that produced nothing is told apart from one with nothing to say by this (Google ends a call that
+    // tried to emit a malformed function call as `error` / `MALFORMED_FUNCTION_CALL`, with no text at all).
+    let finishReason: string | undefined;
+    let nativeFinish: string | undefined;
     let sawFirstChunk = false;
 
     /** Tool-call deltas are keyed by `index`, never by array position — one
@@ -248,6 +257,8 @@ export class OpenRouterClient {
       if (parsed?.usage) usagePayload = parsed.usage;
 
       const choice = parsed?.choices?.[0];
+      if (typeof choice?.finish_reason === "string") finishReason = choice.finish_reason;
+      if (typeof choice?.native_finish_reason === "string") nativeFinish = choice.native_finish_reason;
       // `message` rather than `delta` covers providers that emit the assembled
       // message in their last frame instead of a delta.
       const delta = choice?.delta ?? choice?.message;
@@ -378,7 +389,7 @@ export class OpenRouterClient {
       usage = { prompt: 0, completion, total: completion };
     }
 
-    return { message, usage };
+    return { message, usage, finish: { reason: finishReason, native: nativeFinish } };
   }
 
   async complete(
@@ -424,6 +435,10 @@ export class OpenRouterClient {
       let cannotReadImages = false;
       // Set when this model refused `reasoning: none` (its thinking cannot be turned off): then it is sent without, once.
       let reasoningRejected = false;
+      // Set when the provider ended a call with NO text because the model tried to emit a malformed function call (Gemini does this when its
+      // answer is JSON that looks like a call, e.g. a lookup request). The same request fails the same way, so each retry asks for a different
+      // amount of reasoning instead: that is what made the answer come through when it was tried by hand.
+      let malformedTries = 0;
       for (let attempt = 1; attempt <= maxRetriesPerModel; attempt++) {
         const startTime = Date.now();
         const retrySuffix = attempt > 1 ? ` (retry ${attempt}/${maxRetriesPerModel})` : "";
@@ -486,7 +501,14 @@ export class OpenRouterClient {
               type: "json_object",
               schema: options.jsonSchema.schema,
             };
-          } else if (options?.jsonMode) {
+          } else if (options?.structured && /^google\//i.test(model)) {
+            // Gemini held to a schema cannot emit a native function call in place of its JSON (see healSchema.ts). Other models get plain JSON mode:
+            // not every model accepts json_schema, and none of them has this failure.
+            bodyPayload.response_format = {
+              type: "json_schema",
+              json_schema: { name: options.structured.name, strict: false, schema: options.structured.schema },
+            };
+          } else if (options?.jsonMode || options?.structured) {
             bodyPayload.response_format = { type: "json_object" };
           }
 
@@ -494,6 +516,7 @@ export class OpenRouterClient {
           const tuned = tuneRequest(model, agent, this.config, { reasoningRejected });
           if (tuned.provider) bodyPayload.provider = tuned.provider;
           if (tuned.reasoning) bodyPayload.reasoning = tuned.reasoning;
+          else if (malformedTries > 0 && !reasoningRejected) bodyPayload.reasoning = { effort: malformedTries % 2 === 1 ? "low" : "medium" };
 
           // One dedicated controller for this attempt, rather than
           // AbortSignal.any([AbortSignal.timeout(...), runControl.signal]):
@@ -655,13 +678,22 @@ export class OpenRouterClient {
             // here would leave a 30s generation looking frozen, and would print
             // the "✔ (0.4s)" line as if the call had already finished. The
             // elapsed time on that line must keep meaning "this whole call".
-            const { message, usage } = await this.readStreamedCompletion(
+            const { message, usage, finish } = await this.readStreamedCompletion(
               response,
               controller,
               idleStreamTimeoutMs,
               () => clearTimeout(firstChunkTimer),
               endCall.progress
             );
+
+            // No text and no tool call, and the provider says it ended in error: a malformed function call, not a model with nothing to say.
+            // Retried with a different reasoning effort; on the last attempt the empty answer is returned as it always was.
+            const noAnswer = message.content === null && !(message.tool_calls && message.tool_calls.length > 0);
+            if (noAnswer && (finish?.reason === "error" || /MALFORMED/i.test(finish?.native ?? "")) && attempt < maxRetriesPerModel) {
+              malformedTries++;
+              console.log(`${clearLine}[DIAGNOSTIC] ${model} ended with no answer (${finish?.native ?? finish?.reason}); retrying with ${malformedTries % 2 === 1 ? "low" : "medium"} reasoning.`);
+              throw new Error(`${model} returned no answer (${finish?.native ?? finish?.reason}).`);
+            }
 
             clearInterval(ticker);
             // The provider's own count of what the model wrote replaces the running estimate in the step's total.

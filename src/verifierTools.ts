@@ -29,6 +29,7 @@ import { createSerialHooks } from "./qaFirmware.js";
 import { extractTestFailureReport } from "./testReport.js";
 import { selectTests, failsBefore } from "./testGraph.js";
 import { failingTestFiles, healTests, type HealCall } from "./testHeal.js";
+import { HEAL_REPLY_STRUCTURED } from "./healSchema.js";
 import { runSuiteLogged, selectUnverified, loadLog, staleSince, healParked } from "./testLog.js";
 import { digestFailure } from "./failureDigest.js";
 import { evidenceText } from "./failureEvidence.js";
@@ -2680,7 +2681,7 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
       const escalate: HealCall | undefined =
         models.length > 1
           ? async (messages) => {
-              const m = await this.client.complete(models.slice(1), messages, { temperature: 0, agent: "REPAIR", jsonMode: true });
+              const m = await this.client.complete(models.slice(1), messages, { temperature: 0, agent: "REPAIR", jsonMode: true, structured: HEAL_REPLY_STRUCTURED });
               return m?.content ?? m?.choices?.[0]?.message?.content ?? "";
             }
           : undefined;
