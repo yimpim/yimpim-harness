@@ -20,7 +20,8 @@ import { isTestPath } from "./focusTests.js";
 import { parseLenient } from "./jsonRepair.js";
 import { runSuite, failingTestFiles, type SuiteRun } from "./testRun.js";
 import { runSuiteLogged, unchangedGreen, verdictFor, saveVerdict, recordHealOutcome } from "./testLog.js";
-import { verifyCites, citeProblem, madeWorse, testsFailing } from "./healAuthority.js";
+import { verifyCites, citeProblem, madeWorse, testsFailing, testsPassing, regressions, failingNames } from "./healAuthority.js";
+import { beginTrial, endTrial, recoverTrial } from "./healCheckpoint.js";
 import { listTestFiles } from "./focusTests.js";
 import { reachableFiles } from "./testGraph.js";
 import { digestFailure } from "./failureDigest.js";
@@ -73,6 +74,11 @@ export interface HealOptions {
    * exist (healAuthority.ts). On for real runs; off by default so a caller that does not ask for it behaves as before.
    */
   requireCites?: boolean;
+  /**
+   * The stronger model's call. Causes the first model could not settle (it PARKED them) go to it, in a fresh conversation that says what is already fixed.
+   * Unset: parked causes are reported as they are.
+   */
+  escalate?: HealCall;
 }
 
 const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
@@ -165,6 +171,8 @@ export function gutted(before: string, after: string): string | undefined {
 
 const SYSTEM = `You repair a failing test file. Tests and code drifted apart. Failures usually come from a FEW causes, so handle each CAUSE, not each test.
 
+You are pointed at ONE cause at a time (see FOCUS in the message): do that one, with edits, before thinking about the others. The easy and certain causes come first. What you cannot settle quickly you PARK, and you are given the next one; parked causes are looked at again afterwards by a stronger model. Spending your effort on the hardest cause while the easy ones are untouched is the one thing to avoid.
+
 Work like this.
 1. Read the FAILURE section: the distinct causes with how many tests each breaks, the first line of the project's own code each points at, and the EVIDENCE: facts taken from the repository, not guessed (what exists, which test mocks lack what, which commit changed what and whether it touched the test).
 2. Decide each cause on its own. Who is wrong?
@@ -177,13 +185,15 @@ Work like this.
 Rules for edits: keep every case that is still meaningful, update expected values and calls to match the code, never delete assertions or skip tests to make them pass, never loosen an assertion into one that cannot fail. Mock only what the test already mocked, plus what the code now needs.
 
 Answer with JSON only, one of:
- {"verdict":"stale-test","reason":"one or two sentences: what was wrong","cites":[{"at":"docs/SPEC.md:532","quote":"exact words copied from near that line"},"512f0c7"],"edits":[{"find":"exact existing text","replace":"new text"}]}
-     every cause is test-side, and these edits fix them. "cites" is REQUIRED with any edit, and with any claim that the code is wrong: at least one authority OUTSIDE the test file. Cite a place as {"at":"path:line","quote":"the exact words you rely on, copied from the file"}, or a commit hash from the evidence. Citations are CHECKED: the quote must appear in that file within a few lines of the line you cite, so read the lines first and copy the words. A citation whose words are not there is refused.
- {"verdict":"mixed","reason":"...","cites":[...],"edits":[...],"codeBugs":["path:line what is wrong", ...],"appDeviations":["what the spec says, where, and what the app does instead"]}
+ {"verdict":"stale-test","reason":"one or two sentences: what was wrong","edits":[{"find":"exact existing text","replace":"new text"}]}
+     these edits fix the cause you were pointed at (and any others you are certain of). When you rely on the written spec, a commit or a line of the app's code, you may name it with "cites":[{"at":"path:line","quote":"the exact words"}] or a commit hash: it helps whoever reads the result, and it is never a reason to hold back an answer you are confident in.
+ {"verdict":"mixed","reason":"...","edits":[...],"codeBugs":["path:line what is wrong", ...],"appDeviations":["what the spec says, where, and what the app does instead"]}
      some causes are test-side (the edits fix them) and the rest are code defects, each named with its file and line. "appDeviations" is optional: causes where the test follows the written spec and the app does not.
- {"verdict":"code-bug","reason":"path:line what is wrong","cites":[{"at":"docs/SPEC.md:532","quote":"..."}]}      every cause is a code defect; the test is not changed. Cite what shows the code is wrong (the spec, a doc comment, the commit): a defect claim with no verified citation is refused.
- {"verdict":"app-deviation","reason":"...","cites":[{"at":"docs/SPEC.md:532","quote":"..."},{"at":"src/components/X.tsx:1319","quote":"..."}]}
-     the test is right according to the written spec and the app does something else. Nothing is changed or fixed: a person decides which is right. Cite the spec line AND the app line.
+ {"verdict":"code-bug","reason":"path:line what is wrong"}      every cause that is left is a code defect; the test is not changed. Say what shows it (the spec, a doc comment, the commit) in the reason.
+ {"verdict":"app-deviation","reason":"..."}
+     the test is right according to the written spec and the app does something else. Nothing is changed or fixed: a person decides which is right. Say where the spec says it and where the app differs.
+ {"verdict":"park","kind":"unsure","reason":"what you found and what is still unknown"}
+     you cannot settle the cause you were pointed at with what you have: park it, do NOT keep digging, and you will be given the next one. kind "code" only if you are sure the app is what is wrong.
  {"verdict":"unclear","reason":"..."}                          only after you have looked and it still does not settle it.
  {"need":["path/one",{"path":"path/two","from":120,"to":260},{"search":"someName"},{"probe":{"file":"__tests__/x.test.ts","before":"the line to print before","log":"String(AppState.currentState)"}}]}
      a string is a whole file; {"path","from","to"} is a range of lines; {"search"} finds where a name is defined, used or mocked; {"probe"} runs a throwaway COPY of the test with one console.log inserted before the line that contains "before", where "log" is a single expression, and shows what it printed. Use it when you need to know a value at run time (is this guard true, what does this mock return). The real test file is never changed by it. Ask instead of guessing.
@@ -232,6 +242,8 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   const { repoRoot } = opts;
   const run = opts.run ?? runSuiteLogged;
   const abs = path.join(repoRoot, file);
+  // A trial edit that was never judged (the process was killed after writing it) is put back to the best state before anything else.
+  if (recoverTrial(repoRoot, file)) opts.log?.(`  ↺ ${file}: an edit that was being tried when an earlier run was interrupted was undone.`);
   let original: string;
   try {
     original = fs.readFileSync(abs, "utf-8");
@@ -279,20 +291,78 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   const digest0 = digestFailure(first.output.replace(ANSI, ""), repoRoot, file);
   const view = large ? presentLargeFile(original, file, digest0, repoRoot) : original;
 
-  const seen = new Set<string>();
+  let seen = new Set<string>();
   // For each replacement this worker has had applied, how many copies the file must hold for it to still be in (see applyEditsLenient).
   let requiredCopies = new Map<string, number>();
   let current = first;
   let attempts = 0;
   let last = original;
-  const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
+  // ------------------------------------------------------------------------------------------------------ one cause at a time
+  // A worker asked about 14 causes at once digs into the hardest one and never commits to the easy ones (five benchmark runs ended at 130 of 164, unchanged,
+  // every call a lookup). So it is pointed at ONE cause at a time, the biggest not yet settled. What it cannot settle it PARKS and moves on; what is
+  // parked goes to the stronger model afterwards, told what is already fixed so that it cannot go backwards.
+  interface Cause {
+    key: string;
+    message: string;
+    count: number;
+    at?: string;
+    detail?: string;
+  }
+  const causesOf = (output: string): Cause[] =>
+    digestFailure(output.replace(ANSI, ""), repoRoot, file, 80).clusters.map((c) => ({
+      key: c.signature,
+      message: c.message,
+      count: c.count,
+      at: c.frame ? `${c.frame.file}:${c.frame.line}` : undefined,
+      detail: c.detail,
+    }));
+  let parked = new Map<string, { kind: "unsure" | "code"; reason: string; message: string; count: number }>();
+  /** What has been fixed so far, in the order it was fixed. */
+  const ledger: { message: string; fixed: number; by: string }[] = [];
+  /** Every batch of edits that was accepted, with the reason the worker gave: the first model's changes, handed on in full to the stronger one. */
+  const batches: { reason: string; edits: { find: string; replace: string }[] }[] = [];
+  const focusOf = (): Cause | undefined => causesOf(current.output).find((c) => !parked.has(c.key));
+  const ledgerLines = (): string[] => ledger.map((l) => `  - [${l.fixed}× fixed] ${l.message}  (by: ${l.by})`);
+  const focusText = (): string => {
+    const all = causesOf(current.output);
+    const f = all.find((c) => !parked.has(c.key));
+    if (!f) return "";
+    const lines = [
+      "FOCUS: work on ONE cause at a time.",
+      `Now: [${f.count}×] ${f.message}${f.at ? `  (first points at ${f.at})` : ""}`,
+    ];
+    if (f.detail) lines.push(f.detail.split("\n").slice(0, 10).join("\n"));
+    lines.push(
+      "Reply with the edits that fix THIS cause: the easy and certain ones first (a shared helper, a mock, setup, a changed label). If you cannot settle it with what you have, do NOT keep digging: park it with " +
+        '{"verdict":"park","kind":"unsure","reason":"what you found"} (kind "code" only if you are sure the app is what is wrong) and you will be given the next one. After your edits are run you are shown what still fails.'
+    );
+    if (ledger.length > 0) lines.push("ALREADY FIXED (these stay fixed: an edit that breaks a test that passes now is undone automatically):", ...ledgerLines());
+    if (parked.size > 0) lines.push("PARKED (leave these for now):", ...[...parked.values()].map((p) => `  - [${p.count}×] ${p.message} — ${p.reason}`));
+    const rest = all.filter((c) => !parked.has(c.key) && c.key !== f.key);
+    if (rest.length > 0) lines.push(`Still to come after this one: ${rest.length} more cause${rest.length === 1 ? "" : "s"}.`);
+    return lines.join("\n");
+  };
+  const focusTail = (): string => {
+    const t = focusText();
+    return t ? `\n\n${t}` : "";
+  };
+  /** The edits of one answer, in a few words, for the ledger. */
+  const summarizeEdits = (list: { find: string; replace: string }[] | undefined): string =>
+    list && list.length > 0
+      ? list
+          .slice(0, 2)
+          .map((e) => `"${e.find.replace(/\s+/g, " ").slice(0, 50)}" → "${e.replace.replace(/\s+/g, " ").slice(0, 50)}"`)
+          .join("; ") + (list.length > 2 ? `; and ${list.length - 2} more` : "")
+      : "a rewrite";
+
+  let messages: { role: "system" | "user" | "assistant"; content: string }[] = [
     { role: "system", content: SYSTEM },
     {
       role: "user",
       content:
         `TEST FILE ${file}\n${view}\n\nFAILURE (this file run on its own)\n${failureText(current.output, repoRoot, file)}\n\n` +
         `SOURCE IT IMPORTS OR NAMES\n${sourceText || "(none could be resolved)"}\n\n` +
-        `OTHER FILES IT REACHES (ask for any you need)\n${others.length ? others.join("\n") : "(none)"}\n\nRECENT GIT HISTORY\n${history || "(none)"}`,
+        `OTHER FILES IT REACHES (ask for any you need)\n${others.length ? others.join("\n") : "(none)"}\n\nRECENT GIT HISTORY\n${history || "(none)"}${focusTail()}`,
     },
   ];
 
@@ -324,7 +394,9 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   // so the failure is of course the same, and that is no reason to stop: the model is told why and tries again.
   let retryUnchanged = false;
   // Lookups the worker has asked for in this heal, so a repeat is not answered twice.
-  const asked = new Set<string>();
+  let asked = new Set<string>();
+  // One conversation with one model. It ends with a result, or with "parked-out": every cause that still fails has been parked.
+  const converse = async (callFn: HealCall): Promise<HealResult | "parked-out"> => {
   for (;;) {
     if (!retryUnchanged) {
       const key = failureKey(current.output);
@@ -340,7 +412,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     let parsed: any;
     for (let dry = 0, malformed = 0; ; ) {
       try {
-        reply = await opts.call(messages, `Heal ${file}`, true);
+        reply = await callFn(messages, `Heal ${file}`, true);
       } catch (err: any) {
         return giveUp("unhealed", `the model call failed: ${err?.message ?? err}`);
       }
@@ -404,7 +476,8 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       if (useful.length === 0) {
         dry++;
         if (dry >= 2) {
-          parsed = { verdict: "unclear", reason: "its lookups turned up nothing new" };
+          // Looking has not settled the cause it was on: park it (the next one is a fresh start) instead of ending the whole file.
+          parsed = focusOf() ? { verdict: "park", kind: "unsure", reason: "its lookups turned up nothing new" } : { verdict: "unclear", reason: "its lookups turned up nothing new" };
           break;
         }
         messages.push({
@@ -425,6 +498,17 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     const deviations: string[] = Array.isArray(parsed?.appDeviations) ? parsed.appDeviations.map((c: unknown) => String(c).trim()).filter(Boolean) : [];
     const deviation = verdict === "app-deviation";
     const withDeviations = deviations.length > 0 ? { deviations } : {};
+
+    // The worker could not settle the cause it was pointed at: park it and go on to the next, so one hard cause cannot starve the easy ones.
+    if (verdict === "park") {
+      const f = focusOf();
+      if (!f) return giveUp("unclear", reason);
+      parked.set(f.key, { kind: parsed?.kind === "code" ? "code" : "unsure", reason: reason.slice(0, 400), message: f.message, count: f.count });
+      if (!focusOf()) return "parked-out";
+      messages.push({ role: "assistant", content: reply }, { role: "user", content: `Parked: [${f.count}×] ${f.message}.\n\n${focusText()}` });
+      retryUnchanged = true;
+      continue;
+    }
 
     // An answer that changes the test, or says the app differs from its spec, has to rest on something stronger than the test itself.
     // Calling the code wrong matters as much as editing the test: it is what sends a fix task to change product code.
@@ -546,21 +630,29 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     }
     const undoTo = last;
     const runBefore = current;
+    beginTrial(repoRoot, file, undoTo, next);
     fs.writeFileSync(abs, next);
     last = next;
     current = await run(repoRoot, [file]);
     trace.output = current.output;
     if (current.ok) {
+      endTrial(repoRoot, file);
       // How much it changed, said plainly and never judged: a stale mock is a few lines, a renamed API can be a hundred, and which
       // one this was is for the person reading the report (and the diff) to see, not for a fixed number to decide.
       const changed = changedLines(original, next);
       return { file, status: "healed", note: `${reason} (${changed} line${changed === 1 ? "" : "s"} changed${skippedNote ? "; some of its edits did not apply and were skipped" : ""})`, attempts, ...withDeviations };
     }
-    // An edit must not leave MORE tests failing than the run before it had. If it did (or the file no longer runs), it is undone and the worker is
-    // told, so a bad batch can never be what the file ends up as. A file that could not load before has no count to compare with.
+    // An edit must never leave MORE tests failing than the run before it had, and must never turn a test that PASSED into a failing one, whatever
+    // else it fixes (it can fix two and break two). If it did (or the file no longer runs), it is undone and the worker is told, so a bad batch can
+    // never be what the file ends up as, and a later cause can never roll back an earlier one. A file that could not load before has no count to compare with.
     const direction = madeWorse(runBefore.output, current.output);
-    if (direction.worse) {
+    const broke = regressions(runBefore.output, current.output, undoTo, next);
+    // What the patch DID fix, so a rejection can say both: it fixed these, but broke those that already passed.
+    const afterNames = new Set(failingNames(current.output));
+    const fixedNow = failingNames(runBefore.output).filter((n) => !afterNames.has(n));
+    if (direction.worse || broke.length > 0) {
       fs.writeFileSync(abs, undoTo);
+      endTrial(repoRoot, file);
       last = undoTo;
       requiredCopies = copiesBeforeBatch;
       current = runBefore;
@@ -570,35 +662,107 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         {
           role: "user",
           content:
-            `That change made it WORSE: ${direction.was} test(s) failing before, ${direction.now === undefined ? "and now the file does not run at all" : `${direction.now} after`}. It was undone: the file is as it was before that change. ` +
-            `Find out why it got worse (look at what the new failures are) and try a smaller or different edit.`,
+            (broke.length > 0
+              ? `${fixedNow.length > 0 ? `Your patch fixed ${fixedNow.slice(0, 5).join(" | ")}${fixedNow.length > 5 ? " …" : ""}, but ` : "That change "}BROKE ${broke.length} test(s) that already passed${ledger.length > 0 ? " (fixed earlier)" : ""}: ${broke.slice(0, 5).join(" | ")}${broke.length > 5 ? " …" : ""}. Keep both green: fix your cause without breaking them. `
+              : `That change made it WORSE: ${direction.was} test(s) failing before, ${direction.now === undefined ? "and now the file does not run at all" : `${direction.now} after`}. `) +
+            `It was undone: the file is as it was before that change. ` +
+            `Find out why (look at what the new failures are) and try a smaller or different edit.`,
         }
       );
-      const k = `worse:${direction.now ?? "none"}:${next.length}:${next.slice(0, 200)}`;
+      const k = `worse:${direction.now ?? "none"}:${broke.join("|")}:${next.length}:${next.slice(0, 200)}`;
       if (seen.has(k)) {
-        return giveUp("unhealed", "the same change made more tests fail again");
+        return giveUp("unhealed", broke.length > 0 ? "the same change broke tests that passed again" : "the same change made more tests fail again");
       }
       seen.add(k);
       retryUnchanged = true;
       continue;
     }
+    endTrial(repoRoot, file);
+    // What this batch fixed goes in the ledger: every cause that now has fewer failures than before.
+    {
+      const after = causesOf(current.output);
+      for (const b of causesOf(runBefore.output)) {
+        const fixed = b.count - (after.find((x) => x.key === b.key)?.count ?? 0);
+        if (fixed > 0) ledger.push({ message: b.message, fixed, by: summarizeEdits(edits) });
+      }
+      batches.push({ reason, edits: edits ?? [] });
+    }
     // Still failing. Even for a "mixed" answer nothing is handed on yet: the worker has only SAID what is left is code, and a smaller failure
     // count proves nothing (55 -> 35 left 34 failures that were the test's own). It is shown what really still fails, and decides again: if
     // every remaining cause is the code's it answers code-bug (its edits so far are kept), otherwise it goes on fixing the test.
+    // Every cause that is left has been parked: there is nothing more to ask this model, so it is time for the hand-off (or the final report).
+    if (parked.size > 0 && !focusOf()) return "parked-out";
     const stillFailing = digestFailure(current.output.replace(ANSI, ""), repoRoot, file).total;
+    const focus = focusText();
     messages.push(
       { role: "assistant", content: reply },
       {
         role: "user",
         content:
           skippedNote + `Your change is applied and the file still fails (${stillFailing} failing, ${digest0.total} before).\n${failureText(current.output, repoRoot, file)}\n\n` +
-          `Go through EVERY cause that still fails, not only the one you named: a cause is the code's only if the test is right and the app does the wrong thing. ` +
-          `If any is still the test's own (a helper that counts wrongly, a changed label, a stale mock), keep fixing it: return the next edits. ` +
-          `Only when every remaining cause is the code's, answer {"verdict":"code-bug","reason":"...","cites":[{"at":"path:line","quote":"exact words"}],"codeBugs":[...]} with no edits (your edits so far are kept). ` +
-          `Edits are applied to the file as it is now.`,
+          (focus
+            ? `${focus}\n\nIf EVERY remaining cause is the code's rather than the test's, answer {"verdict":"code-bug","reason":"...","codeBugs":[...]} instead (your edits so far are kept). Edits are applied to the file as it is now.`
+            : `Go through EVERY cause that still fails, not only the one you named: a cause is the code's only if the test is right and the app does the wrong thing. ` +
+              `If any is still the test's own (a helper that counts wrongly, a changed label, a stale mock), keep fixing it: return the next edits. ` +
+              `Only when every remaining cause is the code's, answer {"verdict":"code-bug","reason":"...","codeBugs":[...]} with no edits (your edits so far are kept). ` +
+              `Edits are applied to the file as it is now.`),
       }
     );
   }
+  };
+
+  let outcome = await converse(opts.call);
+  if (outcome === "parked-out" && opts.escalate && parked.size > 0) {
+    // What the first model could not settle goes to the stronger one, in a fresh conversation that begins by saying what is ALREADY FIXED. The ratchet
+    // enforces it: an edit that breaks any test that passes now is undone, so the stronger model cannot go backwards.
+    const handed = [...parked.values()];
+    opts.log?.(`  ↗ ${file}: ${handed.length} cause${handed.length === 1 ? "" : "s"} the first model could not settle go to the stronger model, with what is already fixed.`);
+    const nowView = large ? presentLargeFile(last, file, digestFailure(current.output.replace(ANSI, ""), repoRoot, file), repoRoot) : last;
+    parked = new Map();
+    seen = new Set<string>();
+    asked = new Set<string>();
+    retryUnchanged = false;
+    const fixedText = ledger.length > 0 ? ledgerLines().join("\n") : "  (nothing yet)";
+    // The first model's edits, in the order they were made: enough to see what it changed and why, cut short rather than allowed to swamp the prompt.
+    let changesText = batches
+      .map((b, i) => `  ${i + 1}. ${b.reason.replace(/\s+/g, " ").slice(0, 160)}\n${b.edits.slice(0, 6).map((e) => `       "${e.find.replace(/\s+/g, " ").slice(0, 90)}" → "${e.replace.replace(/\s+/g, " ").slice(0, 90)}"`).join("\n")}${b.edits.length > 6 ? `\n       … and ${b.edits.length - 6} more edits in this batch` : ""}`)
+      .join("\n");
+    if (changesText.length > 6000) changesText = `${changesText.slice(0, 6000)}\n  … (shortened: the file above holds all of them)`;
+    if (!changesText) changesText = "  (none)";
+    const handedText = handed.map((p) => `  - [${p.count}×] ${p.message} — ${p.kind === "code" ? "it believed the app is wrong: " : ""}${p.reason}`).join("\n");
+    messages = [
+      { role: "system", content: SYSTEM },
+      {
+        role: "user",
+        content:
+          `TEST FILE ${file}\n${nowView}\n\nFAILURE (this file run on its own, as it is NOW)\n${failureText(current.output, repoRoot, file)}\n\n` +
+          `HANDOFF. A first model already worked on this file and fixed part of it: the file above is its result. You are the stronger model, called in for what it could not settle.\n` +
+          `It brought the passing tests from ${testsPassing(first.output) ?? "?"} to ${testsPassing(current.output) ?? "?"}. Do not revert or undo its changes unless one of its workarounds directly conflicts with the true root-cause fix for a parked cause, and every test that passes now must stay green: a change that breaks one is undone automatically and you are told which.\n` +
+          `ALREADY FIXED (these STAY fixed):\n${fixedText}\n` +
+          `ITS CHANGES (already in the file above):\n${changesText}\n` +
+          `THE FIRST MODEL COULD NOT SETTLE THESE (they are yours; its notes may be wrong):\n${handedText}\n\n` +
+          `SOURCE IT IMPORTS OR NAMES\n${sourceText || "(none could be resolved)"}\n\n` +
+          `OTHER FILES IT REACHES (ask for any you need)\n${others.length ? others.join("\n") : "(none)"}\n\nRECENT GIT HISTORY\n${history || "(none)"}${focusTail()}`,
+      },
+    ];
+    outcome = await converse(opts.escalate);
+  }
+  if (outcome !== "parked-out") return outcome;
+
+  // Every cause left is parked, by the first model and (when there is one) the stronger one.
+  const codeParks = [...parked.values()].filter((p) => p.kind === "code");
+  const summary = [...parked.values()].map((p) => `[${p.count}×] ${p.message} — ${p.reason}`).join("; ").slice(0, 1500);
+  if (codeParks.length > 0) {
+    const note = `${codeParks.map((p) => `${p.message} — ${p.reason}`).join(" ")} Still failing: ${testsFailing(current.output) ?? "?"}.`.slice(0, 2300);
+    const before = testsFailing(first.output);
+    const now = testsFailing(current.output);
+    if (last !== original && now !== undefined && (before === undefined || now < before)) {
+      return { file, status: "code-bug", partial: true, note: `${note} (the test's out-of-date parts were fixed: ${changedLines(original, last)} lines changed)`, attempts };
+    }
+    fs.writeFileSync(abs, original);
+    return { file, status: "code-bug", note, attempts };
+  }
+  return giveUp("unclear", `${parked.size} cause${parked.size === 1 ? "" : "s"} could not be settled: ${summary}`);
 }
 
 // ------------------------------------------------------------ shared causes

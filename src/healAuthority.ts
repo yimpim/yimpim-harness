@@ -194,3 +194,39 @@ export function madeWorse(before: string, after: string): { worse: boolean; was?
   const now = testsFailing(after);
   return { worse: now === undefined || now > was, was, now };
 }
+
+// ------------------------------------------------------------------------------------------------------------------------ the ratchet, per test
+
+/** The tests a runner says failed, from its own "● Describe › test title" lines (Jest, and the runners that print the same). */
+export function failingNames(output: string): string[] {
+  const out: string[] = [];
+  for (const line of output.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").split(/\r?\n/)) {
+    const m = /^\s*●\s+(.+?)\s*$/.exec(line);
+    if (!m || /^Console\b/.test(m[1]) || /^Test suite failed to run/i.test(m[1])) continue;
+    if (!out.includes(m[1])) out.push(m[1]);
+  }
+  return out;
+}
+
+/**
+ * Tests that PASSED before an edit and fail after it. A count can fall while an edit breaks something that was fine (it fixes two tests and
+ * breaks two others), so the count alone is not a ratchet: an edit must never turn a passing test red, whatever it fixes. A test the edit renamed or
+ * removed does not count (its title is no longer in the file). Without names in the run before (a file that could not load) there is nothing to compare.
+ */
+export function regressions(beforeOutput: string, afterOutput: string, textBefore: string, textAfter: string): string[] {
+  const before = failingNames(beforeOutput);
+  if (before.length === 0) return [];
+  const was = new Set(before);
+  return failingNames(afterOutput).filter((name) => {
+    if (was.has(name)) return false;
+    const title = name.split(" › ").pop()?.trim() ?? "";
+    return title.length >= 4 && textBefore.includes(title) && textAfter.includes(title);
+  });
+}
+
+/** How many tests the runner says passed ("Tests: 34 failed, 130 passed, 164 total"). Undefined when the output has no such line. */
+export function testsPassing(output: string): number | undefined {
+  const m = /^\s*Tests:?\s+(.*)$/m.exec(output.replace(/\u001b\[[0-9;]*[A-Za-z]/g, ""));
+  const p = m ? /(\d+)\s+passed/.exec(m[1]) : null;
+  return p ? Number(p[1]) : undefined;
+}

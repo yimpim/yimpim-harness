@@ -2676,9 +2676,17 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
         const m = await this.client.complete(models, messages, { temperature: 0, agent: "REPAIR", jsonMode: true });
         return m?.content ?? m?.choices?.[0]?.message?.content ?? "";
       };
+      // The causes the first model parks go to the stronger one: every model after the first in the repair chain.
+      const escalate: HealCall | undefined =
+        models.length > 1
+          ? async (messages) => {
+              const m = await this.client.complete(models.slice(1), messages, { temperature: 0, agent: "REPAIR", jsonMode: true });
+              return m?.content ?? m?.choices?.[0]?.message?.content ?? "";
+            }
+          : undefined;
       try {
         if (retry.length === 0) throw new Error("nothing to retry");
-        const healed = await healTests({ repoRoot: this.repoRoot, files: retry, call, requireCites: true, log: (l) => console.log(`[TESTS] ${l}`) });
+        const healed = await healTests({ repoRoot: this.repoRoot, files: retry, call, escalate, log: (l) => console.log(`[TESTS] ${l}`) });
         stillRed.push(...healed.results.filter((r) => r.status !== "healed" && r.status !== "already-green").map((r) => `${r.file} (${r.status}: ${r.note})`));
         const fixed = healed.results.filter((r) => r.status === "healed").length;
         if (fixed > 0) {
