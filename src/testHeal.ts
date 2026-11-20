@@ -25,7 +25,7 @@ import { listTestFiles } from "./focusTests.js";
 import { reachableFiles } from "./testGraph.js";
 import { digestFailure } from "./failureDigest.js";
 import { evidenceText } from "./failureEvidence.js";
-import { applyEdits, parseEdits, presentLargeFile, readRange, searchRepo, runProbe, LARGE_FILE_LINES } from "./healEdits.js";
+import { applyEditsLenient, parseEdits, presentLargeFile, readRange, searchRepo, runProbe, LARGE_FILE_LINES } from "./healEdits.js";
 import { removeTest, renderRemoval, recordRemoved } from "./testSettle.js";
 
 export { runSuite, failingTestFiles, type SuiteRun };
@@ -280,6 +280,8 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   const view = large ? presentLargeFile(original, file, digest0, repoRoot) : original;
 
   const seen = new Set<string>();
+  // For each replacement this worker has had applied, how many copies the file must hold for it to still be in (see applyEditsLenient).
+  let requiredCopies = new Map<string, number>();
   let current = first;
   let attempts = 0;
   let last = original;
@@ -294,6 +296,30 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     },
   ];
 
+  // Giving up never throws away progress. When the edits already made leave fewer tests failing than the start (or a file that could not load now
+  // loads), they are KEPT and the result says so: a run that fixed 6 of 34 and then could not explain the rest used to put the file back as it was
+  // and report no progress at all. With nothing gained, the file goes back exactly as it was. Every edit that was kept passed the made-it-worse
+  // check, so the kept state is never worse than the start.
+  const giveUp = (status: "unclear" | "unhealed", note: string): HealResult => {
+    const before = testsFailing(first.output);
+    const now = testsFailing(current.output);
+    const better = last !== original && now !== undefined && (before === undefined || now < before);
+    if (better) {
+      fs.writeFileSync(abs, last);
+      const changed = changedLines(original, last);
+      const gained = before === undefined ? "the file could not run before and now does" : `${before} failing at the start, ${now} now`;
+      return {
+        file,
+        status,
+        partial: true,
+        note: `${note}. The test fixes it had already made were KEPT (${gained}; ${changed} line${changed === 1 ? "" : "s"} changed); what is left needs a person.`,
+        attempts,
+      };
+    }
+    fs.writeFileSync(abs, original);
+    return { file, status, note: `${note}. The file was put back as it was.`, attempts };
+  };
+
   // Set when the last answer was not applied (its edits did not match, or it was refused): the file was not changed and not run again,
   // so the failure is of course the same, and that is no reason to stop: the model is told why and tries again.
   let retryUnchanged = false;
@@ -303,8 +329,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     if (!retryUnchanged) {
       const key = failureKey(current.output);
       if (seen.has(key)) {
-        fs.writeFileSync(abs, original);
-        return { file, status: "unhealed", note: "the same failure came back, so the file was put back as it was", attempts };
+        return giveUp("unhealed", "the same failure came back");
       }
       seen.add(key);
     }
@@ -317,8 +342,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       try {
         reply = await opts.call(messages, `Heal ${file}`, true);
       } catch (err: any) {
-        fs.writeFileSync(abs, original);
-        return { file, status: "unhealed", note: `the model call failed: ${err?.message ?? err}`, attempts };
+        return giveUp("unhealed", `the model call failed: ${err?.message ?? err}`);
       }
       const lenient = parseLenient(reply);
       parsed = lenient?.value;
@@ -410,8 +434,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         messages.push({ role: "assistant", content: reply }, { role: "user", content: `Not applied: ${problem}` });
         const k = `cite:${problem}`;
         if (seen.has(k)) {
-          fs.writeFileSync(abs, original);
-          return { file, status: "unhealed", note: "its answer rested on no authority outside the test that could be verified, so nothing was changed", attempts };
+          return giveUp("unhealed", "its answer rested on no authority outside the test that could be verified, so nothing was changed");
         }
         seen.add(k);
         retryUnchanged = true;
@@ -441,21 +464,53 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       return { file, status: deviation ? "app-deviation" : "code-bug", note: [reason, ...codeBugs].join(" ").slice(0, 2000), attempts, ...withDeviations };
     }
     if (verdict !== "stale-test" && !mixed) {
-      fs.writeFileSync(abs, original);
-      return { file, status: "unclear", note: reason, attempts };
+      return giveUp("unclear", reason);
     }
 
     // The change: edits applied to the file as it is now, or (for a file that is not large) the whole corrected file.
     let next: string | undefined;
+    let skippedNote = "";
+    // What was recorded as applied BEFORE this batch: if the batch is undone as worse, the record goes back with the file.
+    const copiesBeforeBatch = requiredCopies;
     const edits = parseEdits(parsed?.edits);
     if (edits) {
-      const applied = applyEdits(last, edits);
+      // Each edit stands alone: the ones that match are applied and the ones that do not are skipped and reported, so a batch is not lost to
+      // one ambiguous "find" (a real run threw away twelve good edits over the tenth, resent the same batch, and gave up).
+      const lenient = applyEditsLenient(last, edits, requiredCopies);
+      requiredCopies = lenient.required;
+      // Three different things, said apart: applied now, already in the file from an earlier answer (not an error: do not resend), and skipped (needs more context).
+      skippedNote =
+        lenient.skipped.length > 0 || lenient.already > 0
+          ? `Of your ${edits.length} edits: ${lenient.applied} applied now; ${lenient.already} already in the file from an earlier answer (do not send those again); ${lenient.skipped.length} SKIPPED because they need more context. ` +
+            (lenient.skipped.length > 0 ? `${lenient.skipped.map((x) => x.error).join(" ")} Send only the skipped ones again, each with more surrounding text, if they are still needed. ` : "")
+          : "";
+      // Everything it sent is already in the file: nothing new to apply. Not an error: show it what still fails and let it carry on.
+      if (lenient.applied === 0 && lenient.skipped.length === 0 && lenient.already > 0) {
+        const stillFails = digestFailure(current.output.replace(ANSI, ""), repoRoot, file).total;
+        messages.push(
+          { role: "assistant", content: reply },
+          {
+            role: "user",
+            content:
+              `Nothing new to apply: all ${lenient.already} edits you sent are already in the file. Send only NEW edits for what still fails (${stillFails} failing now). ` +
+              `If what is left is not the test's own, answer code-bug or app-deviation with citations.\n${failureText(current.output, repoRoot, file)}`,
+          }
+        );
+        const k = `already:${lenient.already}:${failureKey(current.output)}`;
+        if (seen.has(k)) {
+          return giveUp("unhealed", "it kept sending edits that were already in the file");
+        }
+        seen.add(k);
+        retryUnchanged = true;
+        continue;
+      }
+      const applied = lenient.applied === 0 ? { ok: false as const, error: lenient.skipped[0]?.error ?? "no edit could be applied." } : { ok: true as const, text: lenient.text };
       if (!applied.ok) {
         messages.push({ role: "assistant", content: reply }, { role: "user", content: `Not applied: ${applied.error} The file is unchanged${last === original ? "" : " since your earlier edits, which it contains"}.` });
-        const k = `edit:${applied.error}`;
+        // The breaker fires only when NOTHING applied and the very same anchors are skipped again: a different ambiguous edit is a different problem.
+        const k = `edit:${lenient.skipped.map((x) => x.find).join("\u0001") || applied.error}`;
         if (seen.has(k)) {
-          fs.writeFileSync(abs, original);
-          return { file, status: "unhealed", note: `its edits could not be applied (${applied.error.slice(0, 120)})`, attempts };
+          return giveUp("unhealed", `its edits could not be applied (${applied.error.slice(0, 120)})`);
         }
         seen.add(k);
         retryUnchanged = true;
@@ -467,8 +522,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         messages.push({ role: "assistant", content: reply }, { role: "user", content: `This file has ${lineCount} lines: do not return it whole. Reply with "edits": [{"find":"exact existing text","replace":"new text"}].` });
         const k = "whole-file-refused";
         if (seen.has(k)) {
-          fs.writeFileSync(abs, original);
-          return { file, status: "unhealed", note: "it kept returning the whole file instead of edits", attempts };
+          return giveUp("unhealed", "it kept returning the whole file instead of edits");
         }
         seen.add(k);
         retryUnchanged = true;
@@ -477,16 +531,14 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       next = matchEol(original, parsed.test);
     }
     if (next === undefined) {
-      fs.writeFileSync(abs, original);
-      return { file, status: "unclear", note: reason, attempts };
+      return giveUp("unclear", reason);
     }
     const refusal = gutted(original, next);
     if (refusal) {
       messages.push({ role: "assistant", content: reply }, { role: "user", content: `Refused: ${refusal}. Try again.` });
       const k = `refused:${refusal}`;
       if (seen.has(k)) {
-        fs.writeFileSync(abs, original);
-        return { file, status: "unhealed", note: `kept proposing a rewrite that ${refusal}`, attempts };
+        return giveUp("unhealed", `kept proposing a rewrite that ${refusal}`);
       }
       seen.add(k);
       retryUnchanged = true;
@@ -502,7 +554,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       // How much it changed, said plainly and never judged: a stale mock is a few lines, a renamed API can be a hundred, and which
       // one this was is for the person reading the report (and the diff) to see, not for a fixed number to decide.
       const changed = changedLines(original, next);
-      return { file, status: "healed", note: `${reason} (${changed} line${changed === 1 ? "" : "s"} changed)`, attempts, ...withDeviations };
+      return { file, status: "healed", note: `${reason} (${changed} line${changed === 1 ? "" : "s"} changed${skippedNote ? "; some of its edits did not apply and were skipped" : ""})`, attempts, ...withDeviations };
     }
     // An edit must not leave MORE tests failing than the run before it had. If it did (or the file no longer runs), it is undone and the worker is
     // told, so a bad batch can never be what the file ends up as. A file that could not load before has no count to compare with.
@@ -510,6 +562,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     if (direction.worse) {
       fs.writeFileSync(abs, undoTo);
       last = undoTo;
+      requiredCopies = copiesBeforeBatch;
       current = runBefore;
       trace.output = runBefore.output;
       messages.push(
@@ -523,8 +576,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       );
       const k = `worse:${direction.now ?? "none"}:${next.length}:${next.slice(0, 200)}`;
       if (seen.has(k)) {
-        fs.writeFileSync(abs, original);
-        return { file, status: "unhealed", note: "the same change made more tests fail again, so the file was put back as it was", attempts };
+        return giveUp("unhealed", "the same change made more tests fail again");
       }
       seen.add(k);
       retryUnchanged = true;
@@ -539,7 +591,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       {
         role: "user",
         content:
-          `Your change is applied and the file still fails (${stillFailing} failing, ${digest0.total} before).\n${failureText(current.output, repoRoot, file)}\n\n` +
+          skippedNote + `Your change is applied and the file still fails (${stillFailing} failing, ${digest0.total} before).\n${failureText(current.output, repoRoot, file)}\n\n` +
           `Go through EVERY cause that still fails, not only the one you named: a cause is the code's only if the test is right and the app does the wrong thing. ` +
           `If any is still the test's own (a helper that counts wrongly, a changed label, a stale mock), keep fixing it: return the next edits. ` +
           `Only when every remaining cause is the code's, answer {"verdict":"code-bug","reason":"...","cites":[{"at":"path:line","quote":"exact words"}],"codeBugs":[...]} with no edits (your edits so far are kept). ` +
@@ -858,7 +910,7 @@ export async function healTests(opts: HealOptions): Promise<HealReport> {
       // A partial result fixed what was test-side and handed the rest on: that is progress, not a failed heal, so it earns no strike.
       if (r.status !== "already-green" && !r.partial) recordHealOutcome(opts.repoRoot, r.file, r);
     } catch {}
-    if ((r.status === "code-bug" || r.status === "app-deviation" || r.status === "unclear" || r.status === "unhealed") && !/the model call failed/.test(r.note)) {
+    if ((r.status === "code-bug" || r.status === "app-deviation" || ((r.status === "unclear" || r.status === "unhealed") && !r.partial)) && !/the model call failed/.test(r.note)) {
       try {
         saveVerdict(opts.repoRoot, r.file, { status: r.status, note: r.note.replace(/ \(nothing it depends on changed since it was last diagnosed\)$/, ""), failure: r.failure });
       } catch {}

@@ -32,7 +32,7 @@ const PATH_TOKEN = /(?:^|[\s("'`,;])((?:[\w.@\-[\]()]+\/)*[\w.@\-[\]()]+\.[A-Za-
 const HASH_TOKEN = /\b([0-9a-f]{7,40})\b/g;
 /** How far from the cited line the quoted words may be. */
 const NEAR = 3;
-const MIN_QUOTE = 10;
+const MIN_QUOTE = 8;
 
 function git(repoRoot: string, args: string[]): boolean {
   try {
