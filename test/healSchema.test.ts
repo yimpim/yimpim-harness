@@ -84,3 +84,25 @@ describe("the schema covers every reply the heal reads, and each kind has to car
     for (const v of ["stale-test", "mixed", "code-bug", "app-deviation", "unclear", "park"]) assert.ok(allowed.has(v), v);
   });
 });
+
+describe("every kind of lookup the prompt offers can be said under the schema", () => {
+  // A schema that leaves a kind out makes it IMPOSSIBLE for the model to ask for it: a schema without "probe" meant the stronger model could only read.
+  const items = ((HEAL_REPLY_SCHEMA as any).anyOf[0].properties.need.items.anyOf as any[]);
+  test("a bare file name, a range, a search and a probe", () => {
+    assert.ok(items.some((i) => i.type === "string"), "a whole file by name");
+    const obj = items.find((i) => i.type === "object");
+    for (const f of ["path", "from", "to", "search", "probe"]) assert.ok(obj.properties[f], f);
+  });
+  test("a probe carries the three things runProbe needs, all required", () => {
+    const probe = items.find((i) => i.type === "object").properties.probe;
+    assert.deepEqual(Object.keys(probe.properties).sort(), ["before", "file", "log"]);
+    assert.deepEqual([...probe.required].sort(), ["before", "file", "log"]);
+  });
+  test("the prompt's own examples of a lookup are all expressible (so the schema and the prompt cannot drift apart)", () => {
+    const src = fs.readFileSync("src/testHeal.ts", "utf8");
+    const line = src.split("\n").find((l) => l.trim().startsWith('{"need":["path/one"')) ?? "";
+    assert.match(line, /"path":"path\/two","from":120,"to":260/);
+    assert.match(line, /\{"search":"someName"\}/);
+    assert.match(line, /\{"probe":\{"file":/);
+  });
+});
