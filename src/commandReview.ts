@@ -103,13 +103,18 @@ const INJECTION: RegExp[] = [
   /\bdo not (flag|report|ask|tell|mention)\b|\bwithout (asking|approval|review)\b|\bskip (the )?(review|check|approval)\b/i,
 ];
 
+/** Only the prompt-injection half of dangerIn: text written to steer a reviewer. For code that legitimately imports `../src/x` or mocks `fetch`, such as a test. */
+export function injectionIn(text: string): string | undefined {
+  for (const re of INJECTION) if (re.test(text)) return "it contains text written to steer a security reviewer (a prompt-injection attempt)";
+  return undefined;
+}
+
 export function dangerIn(text: string): string | undefined {
   for (const d of DANGEROUS) {
     const m = d.re.exec(text);
     if (m) return d.why.replace("$1", m[1] ?? "");
   }
-  for (const re of INJECTION) if (re.test(text)) return "it contains text written to steer a security reviewer (a prompt-injection attempt)";
-  return undefined;
+  return injectionIn(text);
 }
 
 const CODE_FILE = /\.(c?js|mjs|ts|tsx|jsx|py|rb|sh|bash|ps1|bat|cmd|php|pl|lua|json|ya?ml|toml|cfg|ini)$/i;
