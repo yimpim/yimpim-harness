@@ -3,6 +3,7 @@ import fsSync from "fs";
 import path from "path";
 import crypto from "crypto";
 import { execFile } from "child_process";
+import type { ReviewRequest, ReviewOutcome } from "./commandReview.js";
 import {
   CommandApprovals,
   describeBinary,
@@ -1014,6 +1015,12 @@ export class AgentTools {
   /** Files and directories the agent itself created this session (repo-relative). */
   private agentCreatedFiles = new Set<string>();
   private agentCreatedDirs = new Set<string>();
+  private commandReviewer?: (req: ReviewRequest) => Promise<ReviewOutcome>;
+
+  /** A security review that may clear a normal-risk command before a person is asked (see commandReview.ts). */
+  public setCommandReviewer(fn: ((req: ReviewRequest) => Promise<ReviewOutcome>) | undefined): void {
+    this.commandReviewer = fn;
+  }
   /** Results of run_dependency_install already produced this phase (reset by beginPhase). */
   private dependencyInstallMemo = new Map<string, string>();
   /** Install plans the user already approved this phase, so a retry after an edit does not re-ask. */
@@ -2151,11 +2158,38 @@ export class AgentTools {
       );
     }
 
-    if (decision.verdict === "ask") {
+    // Before a person is asked: a security model reads what is being run (a script in full) and clears what is plainly harmless. Destructive,
+    // network, secret-reading, port-opening or steering text, and anything the review cannot settle, still goes to the person.
+    let reviewNote = "";
+    let clearedByReview = false;
+    if (decision.verdict === "ask" && decision.risk === "normal" && this.commandReviewer) {
+      try {
+        const review = await this.commandReviewer({
+          argv: decision.argv,
+          label,
+          purpose,
+          cwd: decision.cwd,
+          repoRoot: this.repoRoot,
+          created: [...this.agentCreatedFiles],
+        });
+        if (review.allow) {
+          clearedByReview = true;
+          console.log(`[SECURITY] ✔ Allowed without asking: ${label} — ${review.why}`);
+        } else {
+          reviewNote = review.why;
+          console.log(`[SECURITY] ✋ Needs a person: ${label} — ${review.why}`);
+        }
+      } catch {
+        // a review that fails never allows
+      }
+    }
+
+    if (decision.verdict === "ask" && !clearedByReview) {
       const lines = [
         `${this.activeAgent} wants to run a command:`,
         `  ${label}`,
         ...(purpose ? [`Why: ${purpose}`] : []),
+        ...(reviewNote ? [`Security review: ${reviewNote}`] : []),
         ...(decision.changedSinceApproval
           ? [`Note: this was approved before, but files it runs (scripts, build files, config it loads) have changed since.`]
           : []),

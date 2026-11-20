@@ -739,7 +739,7 @@ const READ_ONLY_GIT = new Set(["status", "diff", "log", "show", "rev-parse", "ls
 const GIT_UNSAFE_FLAG = /^(--output|--exec|--ext-diff|--textconv|--open-files-in-pager|--upload-pack|--receive-pack|-O|-o|--git-dir|--work-tree|--no-index)(=|$)/;
 
 /** Read-only git: looking at the repo's state or history, with no configuration override and no way to write or run anything. */
-function isReadOnlyGit(rest: string[]): boolean {
+export function isReadOnlyGit(rest: string[]): boolean {
   const [sub, ...args] = rest;
   if (!sub) return false;
   if (sub === "remote") return args.length === 0 || (args.length === 1 && (args[0] === "-v" || args[0] === "--verbose"));

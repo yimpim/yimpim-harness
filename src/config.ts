@@ -95,6 +95,9 @@ export const ConfigSchema = z.object({
       dependencyLookup: z.boolean().default(true),
       // The attacker-style review runs on the (expensive) security model; this caps how many times one task may use it.
       reviewsPerTask: z.number().int().min(1).max(20).default(3),
+      // A security model reads a command (and any script it runs, in full) before a person is asked, and clears what is plainly harmless.
+      // Destructive, network, secret-reading, port-opening or injection-looking commands always go to the person. Off = always ask.
+      commandReview: z.boolean().default(true),
     })
     .prefault({}),
   uiDesign: z
