@@ -275,12 +275,60 @@ describe("what stops it: its own word, the user's budget, or no progress. Never 
     assert.equal(count(), 3);
   });
 
-  test("six rounds of only reading: stagnation; five and then an experiment: it goes on", async () => {
-    const six = await go(Array.from({ length: 20 }, () => ({ calls: [read()] })));
-    assert.equal(six.result.stop, "stagnation");
-    assert.match(six.result.conclusion, /6 rounds without an edit or a test run \(only reading, searching or recording\)/);
-    const five = await go([...Array.from({ length: 5 }, () => ({ calls: [read()] })), { calls: [runT()] }, { calls: [read()] }, { calls: [conclude()] }]);
+  test("re-reading the same file: the first read is new, six repeats after it are stagnation; five repeats and then an experiment: it goes on", async () => {
+    const repeats = await go(Array.from({ length: 20 }, () => ({ calls: [read()] })));
+    assert.equal(repeats.result.stop, "stagnation");
+    assert.match(repeats.result.conclusion, /6 rounds that learned nothing new \(no edit, no test run, nothing read or searched that had not been already\)/);
+    assert.equal(repeats.count(), 7, "one new read, then six that showed nothing new");
+    const five = await go([...Array.from({ length: 6 }, () => ({ calls: [read()] })), { calls: [runT()] }, { calls: [read()] }, { calls: [conclude()] }]);
     assert.equal(five.result.stop, "concluded");
+  });
+
+  test("READING NEW CHUNKS OF A BIG FILE IS PROGRESS: the benchmark's pattern (run once, then read the app file piece by piece) is never cut off", async () => {
+    // What a benchmark run actually did, and was wrongly stopped for: one test run, then the test and a 3,683-line app file read in new ranges.
+    const chunk = (p: string, a: number, b: number): Call => ({ name: "read_file", args: { path: p, startLine: a, endLine: b } });
+    const steps: Step[] = [
+      { calls: [{ name: "search_code", args: { pattern: "derives the phase header", path: FILE } }] },
+      { calls: [runT("derives the phase header")] },
+      { calls: [chunk(FILE, 3100, 3593)] },
+      { calls: [chunk(FILE, 2500, 2700)] },
+      { calls: [chunk("src/x.ts", 1, 400)] },
+      { calls: [chunk("app/dashboard.tsx", 1, 400)] },
+      { calls: [chunk("app/dashboard.tsx", 401, 1200)] },
+      { calls: [chunk("app/dashboard.tsx", 1201, 2200)] },
+      { calls: [chunk("app/dashboard.tsx", 2201, 3000)] },
+      { calls: [chunk("app/dashboard.tsx", 3001, 3683)] },
+      { calls: [chunk("src/timeline.ts", 1, 400)] },
+      { calls: [chunk(FILE, 2400, 2505)] },
+      { calls: [fixLine("A1")] },
+      { calls: [runT()] },
+      { calls: [conclude("found it by reading, then fixed it")] },
+    ];
+    const { result, count } = await go(steps);
+    assert.equal(result.stop, "concluded", "twelve rounds of looking at new things and then an experiment: never stopped");
+    assert.equal(count(), steps.length);
+  });
+
+  test("a range that overlaps what was read but adds new lines is new; one entirely inside what was read is not", async () => {
+    const chunk = (a: number, b: number): Call => ({ name: "read_file", args: { path: "app/big.tsx", startLine: a, endLine: b } });
+    // 1-400 new, then 300-500 (adds 401-500, new), then six ranges all inside 1-500 (nothing new)
+    const steps: Step[] = [{ calls: [chunk(1, 400)] }, { calls: [chunk(300, 500)] }, ...Array.from({ length: 10 }, (_, i) => ({ calls: [chunk(10 + i * 40, 50 + i * 40)] }))];
+    const { result, count } = await go(steps);
+    assert.equal(result.stop, "stagnation");
+    assert.equal(count(), 8, "two rounds that saw new lines, then six that did not");
+  });
+
+  test("a whole-file read covers every range of that file afterwards; an edit to the file makes it new again", async () => {
+    const steps: Step[] = [
+      { calls: [read()] },
+      ...Array.from({ length: 3 }, (_, i) => ({ calls: [{ name: "read_file", args: { path: FILE, startLine: 1 + i, endLine: 3 + i } }] })),
+      { calls: [fixLine("A1")] }, // the file changed
+      { calls: [read()] }, // new again
+      { calls: [runT()] },
+      { calls: [conclude()] },
+    ];
+    const { result } = await go(steps);
+    assert.equal(result.stop, "concluded");
   });
 
   test("a run the gate refused is a round of nothing", async () => {
@@ -355,19 +403,53 @@ describe("StagnationTracker", () => {
     assert.equal(round(t, (x) => x.onRun("b")), undefined);
     assert.match(round(t, (x) => x.onRun("b")) ?? "", /3 test runs in a row/);
   });
-  test("a refused run and a round of only reading both count as no progress; an edit or a run clears it", () => {
+  test("a refused run, a repeated read and a repeated search are no progress; an edit or a run clears it", () => {
     const t = new StagnationTracker(2);
     t.check();
+    const a = { path: "a.ts", startLine: 1, endLine: 50 };
+    assert.equal(round(t, (x) => x.onTool("read_file", a)), undefined, "new");
     assert.equal(round(t, (x) => x.onRefused()), undefined);
-    assert.equal(round(t, (x) => x.onTool("read_file")), undefined);
+    assert.equal(round(t, (x) => x.onTool("read_file", a)), undefined, "a repeat");
     assert.equal(round(t, (x) => x.onRefused()), undefined);
-    assert.match(round(t, (x) => x.onTool("search_code")) ?? "", /4 rounds without an edit or a test run/);
+    assert.match(round(t, (x) => x.onTool("read_file", { path: "a.ts", startLine: 10, endLine: 20 })) ?? "", /4 rounds that learned nothing new/);
     const u = new StagnationTracker(2);
     u.check();
-    round(u, (x) => x.onTool("read_file"));
-    round(u, (x) => x.onTool("read_file"));
-    round(u, (x) => x.onTool("read_file"));
-    assert.equal(round(u, (x) => x.onTool("patch_file")), undefined, "an edit clears the reading count");
+    round(u, (x) => x.onTool("search_code", { pattern: "foo" }));
+    round(u, (x) => x.onTool("search_code", { pattern: "foo" }));
+    round(u, (x) => x.onTool("search_code", { pattern: "foo" }));
+    assert.equal(round(u, (x) => x.onTool("patch_file", { path: "a.ts" })), undefined, "an edit clears the count");
+  });
+
+  test("novelty: new lines of a file, a new search, a new listing; and what is NOT new", () => {
+    const t = new StagnationTracker(1); // stop after 2 rounds with nothing new
+    t.check();
+    const novel = (name: string, args: Record<string, unknown>) => round(t, (x) => x.onTool(name, args)) === undefined;
+    assert.ok(novel("read_file", { path: "src/A.ts", startLine: 1, endLine: 100 }));
+    assert.ok(novel("read_file", { path: "src\\a.ts", startLine: 90, endLine: 150 }), "same file (slashes and case do not matter), and lines 101-150 are new");
+    assert.ok(novel("search_code", { pattern: "handleBack", path: "app" }));
+    assert.ok(novel("search_code", { pattern: "handleBack", path: "src" }), "the same pattern elsewhere is a new search");
+    assert.ok(novel("search_code", { patterns: ["b", "a"] }));
+    assert.ok(novel("list_files", { recursive: true }));
+    assert.ok(novel("get_file_outline", { path: "src/a.ts" }));
+    // now nothing new: the next two rounds stop it
+    assert.equal(round(t, (x) => x.onTool("search_code", { patterns: ["a", "b"] })), undefined, "the same batch in another order: not new (round 1 of 2)");
+    assert.match(round(t, (x) => x.onTool("read_file", { path: "src/a.ts", startLine: 5, endLine: 140 })) ?? "", /2 rounds that learned nothing new/, "inside what was read");
+  });
+
+  test("several files read at once: new if any of them is new", () => {
+    const t = new StagnationTracker(1);
+    t.check();
+    round(t, (x) => x.onTool("read_file", { paths: ["a.ts", "b.ts"] }));
+    assert.equal(round(t, (x) => x.onTool("read_file", { paths: ["a.ts", "c.ts"] })), undefined, "c.ts is new");
+    assert.equal(round(t, (x) => x.onTool("read_file", { paths: ["a.ts", "b.ts"] })), undefined, "nothing new: 1 of 2");
+    assert.match(round(t, (x) => x.onTool("read_file", { path: "c.ts", startLine: 3, endLine: 9 })) ?? "", /2 rounds that learned nothing new/);
+  });
+
+  test("a read with nothing to read (no path) is not progress", () => {
+    const t = new StagnationTracker(1);
+    t.check();
+    assert.equal(round(t, (x) => x.onTool("read_file", {})), undefined);
+    assert.match(round(t, (x) => x.onTool("read_file", {})) ?? "", /2 rounds that learned nothing new/);
   });
   test("it counts the rounds that have ended", () => {
     const t = new StagnationTracker(9);
@@ -484,7 +566,7 @@ describe("record_deviation: evidence is checked the moment it is given", () => {
   test("a model that only records, round after round, is stopped: recording is not an experiment (it used to loop forever)", async () => {
     const { result, count } = await go(Array.from({ length: 20 }, () => ({ calls: [rec(good)] })));
     assert.equal(result.stop, "stagnation");
-    assert.match(result.conclusion, /6 rounds without an edit or a test run/);
+    assert.match(result.conclusion, /6 rounds that learned nothing new/);
     assert.equal(count(), 6);
   });
   test("so is a model that keeps calling a tool it was never offered", async () => {

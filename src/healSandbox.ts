@@ -12,7 +12,7 @@ import os from "os";
 import path from "path";
 import crypto from "crypto";
 import { execFileSync } from "child_process";
-import { SAFE, type RunTests } from "./healEdits.js";
+import { SAFE, unseenRanges, type RunTests } from "./healEdits.js";
 import { failingNames } from "./healAuthority.js";
 import { OpenRouterClient, type FunctionTool } from "./openrouter.js";
 import type { AgentConfig } from "./config.js";
@@ -396,13 +396,18 @@ export const SANDBOX_TOOLS_SCHEMA: FunctionTool[] = [
 
 const EDIT_TOOLS = new Set(["patch_file", "write_file"]);
 const READ_TOOLS = new Set(["read_file", "search_code", "get_file_outline", "list_files"]);
+/** Lines up to the end of a file whose length is not known: a read with no end line covers "the rest". */
+const TO_END = 1_000_000_000;
 
 /**
- * When to stop an agent that is not making progress, judged by what it has done and what it has learned, never by a count of rounds:
+ * When to stop an agent that is not making progress, judged by what it has done and what it has LEARNED, never by a count of rounds:
  *  1. the same test result N times in a row with no change made in between;
  *  2. N rounds of edits with no test run (editing blind);
- *  3. 2N rounds of only reading (reading is allowed; reading forever is not).
- * A test run whose result is new (and an edit that is followed by a run) is progress and resets the others. A refused run is a round of nothing.
+ *  3. 2N rounds that learned nothing new: no edit, no test run, and no look at anything not already seen (re-reading lines already read, a search
+ *     already made, recording a deviation, a refused run, a tool it was not offered).
+ * Reading lines it has not read, or a search it has not made, IS progress: a benchmark run showed a model reading a 3,683-line app file in new chunks, the
+ * way a person does, and being stopped for "reading" just before its first experiment. What it has seen is remembered per file as line ranges; the files
+ * are finite, so new reading runs out, and the dollar budget bounds it in any case. A test run whose result is new, or an edit followed by a run, resets all.
  */
 export class StagnationTracker {
   /** Rounds that have fully ended. */
@@ -415,17 +420,51 @@ export class StagnationTracker {
   private editSinceRun = false;
   private editRounds = 0;
   private readRounds = 0;
-  private cur = { edit: false, run: false, read: false, refused: false };
+  private cur = { edit: false, run: false, novel: false };
+  /** Line ranges of each file already read. */
+  private seenLines = new Map<string, [number, number][]>();
+  /** Searches, listings and outlines already made, by what was asked. */
+  private seenLooks = new Set<string>();
 
   constructor(private readonly n: number) {}
 
-  onTool(name: string): void {
+  onTool(name: string, args?: Record<string, unknown>): void {
     if (EDIT_TOOLS.has(name)) {
       this.cur.edit = true;
       this.editSinceRun = true;
+      // the file changed: what was read of it before is not what is there now
+      const p = typeof args?.path === "string" ? normPath(args.path) : undefined;
+      if (p) this.seenLines.delete(p);
     } else if (READ_TOOLS.has(name)) {
-      this.cur.read = true;
+      if (this.isNovel(name, args ?? {})) this.cur.novel = true;
     }
+  }
+
+  /** Whether this look shows the agent anything it has not seen. Remembers it either way. */
+  private isNovel(name: string, args: Record<string, unknown>): boolean {
+    if (name === "read_file") {
+      const paths = Array.isArray(args.paths) ? args.paths.filter((p): p is string => typeof p === "string") : typeof args.path === "string" ? [args.path] : [];
+      if (paths.length === 0) return false; // nothing could be read
+      const single = paths.length === 1 && typeof args.path === "string";
+      const from = single && Number.isFinite(Number(args.startLine)) && Number(args.startLine) >= 1 ? Math.floor(Number(args.startLine)) : 1;
+      const to = single && Number.isFinite(Number(args.endLine)) && Number(args.endLine) >= from ? Math.floor(Number(args.endLine)) : TO_END;
+      let novel = false;
+      for (const raw of paths) {
+        const p = normPath(raw);
+        const have = this.seenLines.get(p) ?? [];
+        if (unseenRanges(from, to, have).length > 0) novel = true;
+        this.seenLines.set(p, [...have, [from, to]]);
+      }
+      return novel;
+    }
+    // A search, a listing or an outline is new when it asks something not asked before (the same pattern in the same place is the same answer).
+    const key =
+      name === "search_code"
+        ? `search|${[...(Array.isArray(args.patterns) ? args.patterns : [args.pattern])].map((x) => String(x ?? "").trim()).sort().join("\u0001")}|${normPath(String(args.path ?? ""))}|${args.caseSensitive === true}`
+        : `${name}|${JSON.stringify(Object.keys(args).sort().map((k) => [k, typeof args[k] === "string" ? normPath(String(args[k])) : args[k]]))}`;
+    if (this.seenLooks.has(key)) return false;
+    this.seenLooks.add(key);
+    return true;
   }
 
   /** A test run that ran, with the fingerprint of what it printed. */
@@ -437,9 +476,9 @@ export class StagnationTracker {
     this.editSinceRun = false;
   }
 
-  /** A run_test the gate refused. */
+  /** A run_test the gate refused: nothing ran, nothing was learned. */
   onRefused(): void {
-    this.cur.refused = true;
+    // deliberately nothing: the round counts as one without progress unless something else in it was
   }
 
   /** Called at the top of every round: closes the one before and says whether to stop. */
@@ -448,7 +487,7 @@ export class StagnationTracker {
     if (closing) this.rounds++;
     this.started = true;
     const c = this.cur;
-    this.cur = { edit: false, run: false, read: false, refused: false };
+    this.cur = { edit: false, run: false, novel: false };
     if (closing) {
       if (c.run) {
         this.editRounds = 0;
@@ -456,19 +495,20 @@ export class StagnationTracker {
       } else if (c.edit) {
         this.editRounds++;
         this.readRounds = 0;
+      } else if (c.novel) {
+        this.readRounds = 0; // it looked at something it had not seen: that is progress
       } else {
-        // No edit and no test run, whatever else the round held: reading, searching, recording, a refused run, a tool it was not offered. None of that
-        // is an experiment, so none of it can go on forever. (A round of only `record_deviation` calls used to be counted as nothing at all, and a model
-        // that did only that was never stopped.)
         this.readRounds++;
       }
     }
     if (this.identical >= this.n) return `stagnation: ${this.identical} test runs in a row gave the same result with no change in between`;
     if (this.editRounds >= this.n) return `stagnation: ${this.editRounds} rounds of edits without running a test`;
-    if (this.readRounds >= this.n * 2) return `stagnation: ${this.readRounds} rounds without an edit or a test run (only reading, searching or recording)`;
+    if (this.readRounds >= this.n * 2) return `stagnation: ${this.readRounds} rounds that learned nothing new (no edit, no test run, nothing read or searched that had not been already)`;
     return undefined;
   }
 }
+
+const normPath = (p: string) => p.replace(/\\/g, "/").replace(/^\.\//, "").trim().toLowerCase();
 
 /** A test result reduced to what matters, so two runs that print the same failures at different speeds count as the same. */
 export function fingerprintOf(output: string, root: string): string {
@@ -665,7 +705,7 @@ export function createSandboxRun(deps: {
           maxRoundsOverride: Number.MAX_SAFE_INTEGER, // budget and stagnation decide, not a round count
           stopWhen,
           onToolCall: (name, args) => {
-            tracker.onTool(name);
+            tracker.onTool(name, args);
             trace.push({ n: trace.length + 1, tool: name, arg: JSON.stringify(args ?? {}).slice(0, 160) });
           },
           reason: `heal sandbox: ${a.cause.message.slice(0, 60)}`,
