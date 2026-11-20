@@ -14,6 +14,15 @@ import crypto from "crypto";
 import { execFileSync } from "child_process";
 import { SAFE, type RunTests } from "./healEdits.js";
 import { failingNames } from "./healAuthority.js";
+import { OpenRouterClient, type FunctionTool } from "./openrouter.js";
+import type { AgentConfig } from "./config.js";
+import { AgentTools, TOOLS_SCHEMA, RUN_TEST_TOOL } from "./agentTools.js";
+import { runToolAgent } from "./agentLoop.js";
+import { createRepoTools } from "./repoTools.js";
+import { events } from "./events.js";
+import { AbortedError } from "./remote/control.js";
+import { makeCommandReviewer, type ReviewCall } from "./commandReview.js";
+import { createRunTestSession, changedFiles } from "./sandboxRunTest.js";
 
 export interface Sandbox {
   /** Absolute path of the worktree root. */
@@ -310,4 +319,316 @@ export function pruneStaleSandboxes(repoRoot: string): number {
 function firstLine(e: any): string {
   const text = String(e?.stderr || e?.message || e).trim();
   return text.split(/\r?\n/).find((l) => l.trim())?.trim().slice(0, 300) ?? "unknown error";
+}
+
+// ====================================================================================================================================
+// The AGENT half: one parked cause worked by the stronger model in a native tool loop, inside the sandbox.
+// ====================================================================================================================================
+
+export interface SandboxCause {
+  message: string;
+  count: number;
+  /** The failing test names of this cause. */
+  tests: string[];
+  /** What the first model said about it (it may be wrong). */
+  reason: string;
+  kind: "unsure" | "code";
+}
+
+export interface SandboxResult {
+  /** The sandbox's test file, when it differs from what it started with (console.log lines the agent added are stripped). */
+  candidate?: string;
+  /** Repo-relative non-test files changed in the sandbox: logging for an experiment, or the evidence for a code bug. Never copied back. */
+  appFilesTouched: string[];
+  conclusion: string;
+  stop: "concluded" | "code-bug" | "budget" | "stagnation" | "error" | "preflight";
+  rounds: number;
+  /** Dollars spent on this cause (0 when the provider reports no cost). */
+  cost: number;
+  /** run_test calls that ran. */
+  runs: number;
+}
+
+export type SandboxRun = (args: {
+  repoRoot: string;
+  file: string;
+  testText: string;
+  /** The runner's output for the file as it is now: what the sandbox must reproduce. */
+  failureOutput: string;
+  /** failureText(...) from testHeal: the same digest the first model saw. Passed in (not computed here) so this module does not import testHeal. */
+  failureDigest: string;
+  cause: SandboxCause;
+  ledger: string[];
+  firstModelNotes: string;
+}) => Promise<SandboxResult>;
+
+// ------------------------------------------------------------------------------------------------------------------------ the tools
+
+/** What the sandbox agent may call. Not offered: running a command, installing, asking a person, staging a deletion, registering things. */
+export const SANDBOX_TOOL_NAMES = ["read_file", "search_code", "get_file_outline", "list_files", "patch_file", "write_file", "conclude_task"] as const;
+export const SANDBOX_TOOLS_SCHEMA: FunctionTool[] = [
+  ...TOOLS_SCHEMA.filter((t) => (SANDBOX_TOOL_NAMES as readonly string[]).includes(t.function.name)),
+  RUN_TEST_TOOL,
+] as unknown as FunctionTool[];
+
+// ------------------------------------------------------------------------------------------------------------------------ progress, judged by state
+
+const EDIT_TOOLS = new Set(["patch_file", "write_file"]);
+const READ_TOOLS = new Set(["read_file", "search_code", "get_file_outline", "list_files"]);
+
+/**
+ * When to stop an agent that is not making progress, judged by what it has done and what it has learned, never by a count of rounds:
+ *  1. the same test result N times in a row with no change made in between;
+ *  2. N rounds of edits with no test run (editing blind);
+ *  3. 2N rounds of only reading (reading is allowed; reading forever is not).
+ * A test run whose result is new (and an edit that is followed by a run) is progress and resets the others. A refused run is a round of nothing.
+ */
+export class StagnationTracker {
+  /** Rounds that have fully ended. */
+  rounds = 0;
+  /** run_test calls that ran. */
+  runs = 0;
+  private started = false;
+  private lastFp: string | undefined;
+  private identical = 0;
+  private editSinceRun = false;
+  private editRounds = 0;
+  private readRounds = 0;
+  private cur = { edit: false, run: false, read: false, refused: false };
+
+  constructor(private readonly n: number) {}
+
+  onTool(name: string): void {
+    if (EDIT_TOOLS.has(name)) {
+      this.cur.edit = true;
+      this.editSinceRun = true;
+    } else if (READ_TOOLS.has(name)) {
+      this.cur.read = true;
+    }
+  }
+
+  /** A test run that ran, with the fingerprint of what it printed. */
+  onRun(fp: string): void {
+    this.runs++;
+    this.cur.run = true;
+    this.identical = fp === this.lastFp && !this.editSinceRun ? this.identical + 1 : 1;
+    this.lastFp = fp;
+    this.editSinceRun = false;
+  }
+
+  /** A run_test the gate refused. */
+  onRefused(): void {
+    this.cur.refused = true;
+  }
+
+  /** Called at the top of every round: closes the one before and says whether to stop. */
+  check(): string | undefined {
+    if (this.started) this.rounds++;
+    this.started = true;
+    const c = this.cur;
+    this.cur = { edit: false, run: false, read: false, refused: false };
+    if (c.run) {
+      this.editRounds = 0;
+      this.readRounds = 0;
+    } else if (c.edit) {
+      this.editRounds++;
+      this.readRounds = 0;
+    } else if (c.read || c.refused) {
+      this.readRounds++;
+    }
+    if (this.identical >= this.n) return `stagnation: ${this.identical} test runs in a row gave the same result with no change in between`;
+    if (this.editRounds >= this.n) return `stagnation: ${this.editRounds} rounds of edits without running a test`;
+    if (this.readRounds >= this.n * 2) return `stagnation: ${this.readRounds} rounds of reading without running an experiment`;
+    return undefined;
+  }
+}
+
+/** A test result reduced to what matters, so two runs that print the same failures at different speeds count as the same. */
+export function fingerprintOf(output: string, root: string): string {
+  const names = failingNames(output).sort().join("|");
+  const rootPosix = root.replace(/\\/g, "/");
+  const norm = output
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+    .replace(/\\/g, "/")
+    .split(rootPosix)
+    .join("<root>")
+    .replace(/\b\d+(?:\.\d+)?\s?m?s\b/g, "<t>")
+    .replace(/^\s*Time:.*$/gm, "");
+  return crypto.createHash("sha1").update(`${names}\n${norm}`).digest("hex");
+}
+
+// ------------------------------------------------------------------------------------------------------------------------ the prompt
+
+const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}\n… (cut)` : s);
+
+/** Short on purpose: the agent reads the files it needs with read_file instead of being handed 170k characters of them. */
+export function buildSandboxPrompt(a: { file: string; lineCount: number; cause: SandboxCause; ledger: string[]; firstModelNotes: string; failureDigest: string }): string {
+  const tests = a.cause.tests.slice(0, 30).map((t) => `    - ${t}`).join("\n") + (a.cause.tests.length > 30 ? `\n    … and ${a.cause.tests.length - 30} more` : "");
+  const ledger = a.ledger.length > 0 ? a.ledger.slice(0, 20).join("\n") + (a.ledger.length > 20 ? `\n  … and ${a.ledger.length - 20} more fixed causes` : "") : "  (every test not listed above)";
+  return [
+    "You are fixing ONE cause of failing tests in a JavaScript/TypeScript project, in a disposable SANDBOX copy of the project.",
+    "",
+    "THE CAUSE",
+    `  [${a.cause.count}×] ${a.cause.message}`,
+    "  Failing tests:",
+    tests,
+    `  What the first model said about it (it may be wrong): ${cut(a.cause.reason, 600)}`,
+    "",
+    "WHAT ALREADY PASSES AND MUST KEEP PASSING",
+    ledger,
+    ...(a.firstModelNotes ? ["", "WHAT THE FIRST MODEL CHANGED", cut(a.firstModelNotes, 1000)] : []),
+    "",
+    `THE TEST FILE: ${a.file} (${a.lineCount} lines). Read it with read_file using line ranges. Search with search_code.`,
+    "",
+    "THE FAILURE NOW (this file run on its own)",
+    cut(a.failureDigest, 3000),
+    "",
+    "HOW TO WORK",
+    "- Reading code cannot show timing (debounces, effects that run later), what an event carries, or what a mock returns. MEASURE: add console.log",
+    "  anywhere (the test or the app code), change a wait, then run_test with a namePattern for one test, and read the output. Repeat. This is a",
+    "  sandbox: experiments cost nothing and are thrown away.",
+    "- Only the TEST FILE comes back to the real project, and only if it makes more tests pass without breaking any that pass now. Changes to app",
+    "  code are thrown away (they are fine for logging). Remove your console.log lines from the test file before you finish.",
+    "- Fix the TEST when it is out of date. The app's code, its doc comments, the written spec (docs/ or *.md) and recent commits are the authority,",
+    "  in about that order of strength. If the APP is what is wrong, do not bend the test: conclude and say exactly where (file:line) and what shows it.",
+    "- Never delete tests or assertions, never skip tests, never loosen an assertion into one that cannot fail.",
+    "- When the cause's tests pass (run them), or when you are sure the app is at fault, call conclude_task: FINISHED_PATCHING with what you changed",
+    '  and why; or CANNOT_LOCATE with what you found and what is still unknown, starting with "APP BUG:" when the app is wrong.',
+  ].join("\n");
+}
+
+// ------------------------------------------------------------------------------------------------------------------------ outcome
+
+/** What the agent's last word means, from the string `runToolAgent` returned or the error it threw. */
+export function interpretOutcome(returned: string | undefined, error?: Error): { stop: SandboxResult["stop"]; conclusion: string } {
+  if (error) {
+    const m = /^ESCALATION_NEEDED:\s*([\s\S]*)$/.exec(error.message);
+    if (m) {
+      const text = m[1].trim();
+      return { stop: /^APP BUG\b/i.test(text) ? "code-bug" : "concluded", conclusion: text.slice(0, 1500) };
+    }
+    return { stop: "error", conclusion: error.message.slice(0, 1500) };
+  }
+  const text = String(returned ?? "").trim();
+  const stopped = /^STOPPED:\s*([\s\S]*)$/.exec(text);
+  if (stopped) return { stop: /^budget/i.test(stopped[1]) ? "budget" : "stagnation", conclusion: stopped[1].trim().slice(0, 1500) };
+  const done = /^(?:TASK_CONCLUDED|TASK_ALREADY_SATISFIED):\s*([\s\S]*)$/.exec(text);
+  const body = (done ? done[1] : text).trim();
+  // an agent that finished by describing a bug in the app, without the formal exit, still means a code bug
+  return { stop: /^APP BUG\b/i.test(body) ? "code-bug" : "concluded", conclusion: body.slice(0, 1500) };
+}
+
+/** Removes the single-line console.log/debug statements the agent added (compared with what the file started as): the safety net for a forgotten probe. */
+export function stripAddedLogs(startText: string, text: string): string {
+  const had = new Map<string, number>();
+  for (const l of startText.split(/\r?\n/)) had.set(l, (had.get(l) ?? 0) + 1);
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const out: string[] = [];
+  for (const l of text.split(/\r?\n/)) {
+    const left = had.get(l) ?? 0;
+    if (left > 0) {
+      had.set(l, left - 1);
+      out.push(l);
+    } else if (/^\s*console\.(?:log|debug)\(.*\);?\s*$/.test(l)) {
+      continue;
+    } else {
+      out.push(l);
+    }
+  }
+  return out.join(eol);
+}
+
+// ------------------------------------------------------------------------------------------------------------------------ the run
+
+export function createSandboxRun(deps: {
+  client: OpenRouterClient;
+  config: AgentConfig;
+  /** The stronger models: every repair model after the first. */
+  models: string[];
+  /** Dollars per cause. 0 = no dollar stop (the stagnation rules still apply). */
+  budgetUsd: number;
+  stagnation: number;
+  /** The heal's own runner. */
+  run: RunTests;
+  /** The security model, for code the gate flags. */
+  securityCall: ReviewCall;
+  log?: (line: string) => void;
+}): SandboxRun {
+  const reviewer = makeCommandReviewer(deps.securityCall);
+  return async (a) => {
+    const log = deps.log ?? (() => {});
+    const empty = (stop: SandboxResult["stop"], conclusion: string): SandboxResult => ({ appFilesTouched: [], conclusion, stop, rounds: 0, cost: 0, runs: 0 });
+    let created: SandboxCreate;
+    try {
+      created = await createSandbox({ repoRoot: a.repoRoot, file: a.file, testText: a.testText, expectFailing: failingNames(a.failureOutput), run: deps.run, log });
+    } catch (e: any) {
+      return empty("preflight", `could not make a sandbox: ${String(e?.message ?? e).slice(0, 300)}`);
+    }
+    if (!created.ok) return empty("preflight", created.reason);
+    const sandbox = created.sandbox;
+    const tracker = new StagnationTracker(Math.max(1, deps.stagnation));
+    const startUsage = events.usageReport();
+    let costWarned = false;
+    try {
+      const session = createRunTestSession({ root: sandbox.root, base: sandbox.base, gate: { review: reviewer }, fallbackRun: deps.run });
+      const tools = new AgentTools(sandbox.root, deps.config, async (_q, fallback) => fallback); // never waits on a person
+      tools.beginPhase([], 1_000_000, "heal sandbox"); // the per-phase file cap is for a phase that must stay small: a sandbox is thrown away
+      tools.bindSandboxRunTest(async (args) => {
+        const r = await session.run(args);
+        if (r.refused) tracker.onRefused();
+        else tracker.onRun(fingerprintOf(r.output, sandbox.root));
+        return r.text;
+      });
+
+      const stopWhen = (): string | undefined => {
+        const spent = events.usageDelta(startUsage).totals;
+        if (deps.budgetUsd > 0) {
+          if (spent.costKnown && spent.cost >= deps.budgetUsd) return `budget: $${spent.cost.toFixed(2)} of $${deps.budgetUsd.toFixed(2)} spent on this cause`;
+          if (!spent.costKnown && !costWarned) {
+            costWarned = true;
+            log("sandbox: the provider reports no cost, so only the stagnation rules can stop this run");
+          }
+        }
+        return tracker.check();
+      };
+
+      let returned: string | undefined;
+      let error: Error | undefined;
+      try {
+        returned = await runToolAgent({
+          prompt: buildSandboxPrompt({ file: a.file, lineCount: a.testText.split(/\r?\n/).length, cause: a.cause, ledger: a.ledger, firstModelNotes: a.firstModelNotes, failureDigest: a.failureDigest }),
+          repo: createRepoTools(sandbox.root, deps.config),
+          repoRoot: sandbox.root,
+          client: deps.client,
+          config: deps.config,
+          agentTools: tools,
+          models: deps.models,
+          agentName: "HEAL_SANDBOX",
+          tools: SANDBOX_TOOLS_SCHEMA,
+          maxRoundsOverride: Number.MAX_SAFE_INTEGER, // budget and stagnation decide, not a round count
+          stopWhen,
+          onToolCall: (name) => tracker.onTool(name),
+          reason: `heal sandbox: ${a.cause.message.slice(0, 60)}`,
+        });
+      } catch (e: any) {
+        if (e instanceof AbortedError) throw e; // a user Stop is not the sandbox's to swallow
+        error = e instanceof Error ? e : new Error(String(e));
+      }
+      const outcome = interpretOutcome(returned, error);
+
+      // What came out: the test file (minus forgotten logging) and the names of the app files that were touched.
+      let candidate: string | undefined;
+      try {
+        const text = stripAddedLogs(sandbox.startText, fs.readFileSync(path.join(sandbox.root, sandbox.file), "utf8"));
+        if (text !== sandbox.startText) candidate = text;
+      } catch {
+        // the file is gone: nothing comes back
+      }
+      const touched = changedFiles(sandbox.root).filter((f) => f !== sandbox.file);
+      const spent = events.usageDelta(startUsage).totals;
+      return { candidate, appFilesTouched: touched, conclusion: outcome.conclusion, stop: outcome.stop, rounds: tracker.rounds, cost: spent.costKnown ? spent.cost : 0, runs: tracker.runs };
+    } finally {
+      destroySandbox(sandbox, a.repoRoot);
+    }
+  };
 }

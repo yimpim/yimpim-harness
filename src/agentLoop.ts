@@ -59,6 +59,11 @@ export const DISCOVERY_FILE_BUDGET = 30;
 export const DISCOVERY_ROUND_BUDGET = 32;
 
 export interface AgentRunOptions {
+  /**
+   * Checked at the top of every round. A string ends the run: the loop returns `STOPPED: <reason>` (it does not throw). For a caller that judges
+   * progress by STATE (a dollar budget, a run that keeps giving the same result) instead of a number of rounds.
+   */
+  stopWhen?: () => string | undefined;
   /** Plain text, or content blocks (e.g. from buildUserContent) to include an image. */
   prompt: string | any[];
   repo: RepoTools;
@@ -498,6 +503,13 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
     // Safe boundary: stop between rounds, never mid-write.
     runControl.throwIfAborted();
 
+    const stopReason = options.stopWhen?.();
+    if (stopReason) {
+      console.log(`[${displayName}] ⏹ Stopped: ${stopReason}`);
+      emitAgentEnd(rounds, "stopped");
+      return `STOPPED: ${stopReason}`;
+    }
+
     const response = await client.complete(models, messages, {
       tools: availableTools,
       toolChoice: "auto",
@@ -578,6 +590,13 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
       // keeps its own smaller in-loop breaker below; the hook is for the
       // A->B handoff policy, which must see the same calls the loop does.
       options.onToolCall?.(name, args);
+
+      // The heal sandbox agent may call ONLY what it was offered. The dispatch below is by name alone, so a model that names a tool it was not
+      // given (a command runner, a dependency install, a question to a person) would otherwise be run.
+      if (agentName === "HEAL_SANDBOX" && !(options.tools ?? []).some((t: any) => t?.function?.name === name)) {
+        messages.push({ role: "tool", tool_call_id: call.id, name, content: `Tool not available in this sandbox: ${name}. Use only the tools you were given.` });
+        continue;
+      }
 
       // Once Discovery's budget is spent its tools were removed, but a model
       // (or provider) can still send a call. Refuse it with the reason instead
