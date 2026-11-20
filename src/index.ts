@@ -43,6 +43,7 @@ import { parseLenient } from "./jsonRepair.js";
 import { splitJobs, unplannedJobs } from "./jobsList.js";
 import { healTests, renderHealReport, failingTestFiles, failureText } from "./testHeal.js";
 import { HEAL_REPLY_STRUCTURED } from "./healSchema.js";
+import { sandboxFor } from "./healSandbox.js";
 import { renderLog, runSuiteLogged } from "./testLog.js";
 import { fixTaskFor, isFixTask, savePendingFixes, settlePendingFixes } from "./testSettle.js";
 import { directFixFor, setMustPass } from "./directFix.js";
@@ -5139,15 +5140,18 @@ async function main(): Promise<void> {
   const runTestHealJob = (all = false): Promise<void> => asOwnTask(all ? "/tests heal all" : "/tests heal", async () => {
     const healModels = config.models.repair ?? config.models.editor;
     console.log(`🧪 [TESTS] Healing the test suite with ${healModels.join(", ")}. Every failing test file gets its own worker, started together.`);
+    // What the first model parks goes to a sandbox (a disposable copy of the project) when heal.sandbox is on and there is a stronger model; else to the JSON pass below.
+    const sandbox = sandboxFor({ client, config, repairModels: healModels, log: (line) => console.log("🧪 [TESTS] " + line) });
     try {
       const report = await healTests({
         repoRoot,
         all,
+        sandbox,
         call: (messages, label, json) => runLabeledCompletion({ client, models: healModels, messages: messages as any, agentName: "REPAIR", jsonMode: json, reason: label }),
         // What the first model cannot settle (it parks those causes) goes to the stronger one: every model after the first in the repair chain. With a
         // single model there is nobody to hand it to, and parked causes are reported as they are.
         escalate:
-          healModels.length > 1
+          !sandbox && healModels.length > 1
             ? (messages, label, json) => runLabeledCompletion({ client, models: healModels.slice(1), messages: messages as any, agentName: "REPAIR", jsonMode: json, ...(json ? { structured: HEAL_REPLY_STRUCTURED } : {}), reason: `${label} (stronger model)` })
             : undefined,
         log: (line) => console.log("🧪 [TESTS] " + line),

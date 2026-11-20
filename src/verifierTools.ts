@@ -30,6 +30,7 @@ import { extractTestFailureReport } from "./testReport.js";
 import { selectTests, failsBefore } from "./testGraph.js";
 import { failingTestFiles, healTests, type HealCall } from "./testHeal.js";
 import { HEAL_REPLY_STRUCTURED } from "./healSchema.js";
+import { sandboxFor } from "./healSandbox.js";
 import { runSuiteLogged, selectUnverified, loadLog, staleSince, healParked } from "./testLog.js";
 import { digestFailure } from "./failureDigest.js";
 import { evidenceText } from "./failureEvidence.js";
@@ -2678,8 +2679,10 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
         return m?.content ?? m?.choices?.[0]?.message?.content ?? "";
       };
       // The causes the first model parks go to the stronger one: every model after the first in the repair chain.
+      // The same decision as /tests heal: a sandbox when heal.sandbox is on and there is a stronger model, otherwise the JSON pass below.
+      const sandbox = sandboxFor({ client: this.client, config: this.config, repairModels: models, log: (l) => console.log(`[TESTS] ${l}`) });
       const escalate: HealCall | undefined =
-        models.length > 1
+        !sandbox && models.length > 1
           ? async (messages) => {
               const m = await this.client.complete(models.slice(1), messages, { temperature: 0, agent: "REPAIR", jsonMode: true, structured: HEAL_REPLY_STRUCTURED });
               return m?.content ?? m?.choices?.[0]?.message?.content ?? "";
@@ -2687,7 +2690,7 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
           : undefined;
       try {
         if (retry.length === 0) throw new Error("nothing to retry");
-        const healed = await healTests({ repoRoot: this.repoRoot, files: retry, call, escalate, log: (l) => console.log(`[TESTS] ${l}`) });
+        const healed = await healTests({ repoRoot: this.repoRoot, files: retry, call, escalate, sandbox, log: (l) => console.log(`[TESTS] ${l}`) });
         stillRed.push(...healed.results.filter((r) => r.status !== "healed" && r.status !== "already-green").map((r) => `${r.file} (${r.status}: ${r.note})`));
         const fixed = healed.results.filter((r) => r.status === "healed").length;
         if (fixed > 0) {

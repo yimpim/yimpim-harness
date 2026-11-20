@@ -208,6 +208,25 @@ async function runModel() {
       const u = events.usageDelta(before).totals;
       console.log(`${m}: ${err ? "ERROR " + err : reply.trim() ? "reply " + JSON.stringify(reply.trim().slice(0, 60)) : "EMPTY REPLY"} (${Math.round((Date.now() - t) / 100) / 10}s, ${u.total} tokens${u.costKnown ? ", $" + u.cost.toFixed(5) : ""})`);
     }
+    // The sandbox: make one from the fixture, check it reproduces the failure, remove it. No model is called. A failure here is an environment problem
+    // (a link the test runner will not follow, a missing file) and would otherwise surface as a sandbox that never starts in the middle of a paid run.
+    {
+      const { createSandbox, destroySandbox } = await imp("healSandbox.js");
+      const { runSuiteLogged } = await imp("testLog.js");
+      const { failingNames } = await imp("healAuthority.js");
+      const text = read(path.join(REPO, TEST_FILE));
+      const here = await runSuiteLogged(REPO, [TEST_FILE]);
+      const names = failingNames(here.output);
+      const t = Date.now();
+      const sb = await createSandbox({ repoRoot: REPO, file: TEST_FILE, testText: text, expectFailing: names, run: runSuiteLogged });
+      if (sb.ok) {
+        destroySandbox(sb.sandbox, REPO);
+        console.log(`sandbox preflight: ok (${Math.round((Date.now() - t) / 100) / 10}s; the same ${names.length} failing tests reproduced in a copy, and the copy removed)`);
+      } else {
+        console.log(`sandbox preflight: FAILED: ${sb.reason}`);
+      }
+      console.log(`real node_modules intact: ${fs.existsSync(path.join(REPO, "node_modules", "jest", "bin", "jest.js"))}`);
+    }
     console.log("wiring check done");
     return;
   }
@@ -221,6 +240,7 @@ async function runModel() {
   const { OpenRouterClient } = await imp("openrouter.js");
   const { runLabeledCompletion } = await imp("agentLoop.js");
   const { HEAL_REPLY_STRUCTURED } = await imp("healSchema.js");
+  const { sandboxFor, sandboxBase, sandboxPrefix } = await imp("healSandbox.js");
   const { events } = await imp("events.js");
   const { healTests, renderHealReport } = await imp("testHeal.js");
 
@@ -249,7 +269,7 @@ async function runModel() {
     if (!key) throw new Error("No OpenRouter key: run `yimpim setup`.");
     const client = new OpenRouterClient(key, config);
     const models = config.models.repair ?? config.models.editor;
-    const trace = { calls: 0, strongCalls: 0, strong: [], refusedNoCite: 0, refusedBadCite: 0, madeWorse: 0, callMs: [], steps: [], batches: [], nothingNew: 0, alreadyResent: 0 };
+    const trace = { calls: 0, strongCalls: 0, strong: [], sandbox: [], refusedNoCite: 0, refusedBadCite: 0, madeWorse: 0, callMs: [], steps: [], batches: [], nothingNew: 0, alreadyResent: 0 };
     const log = [];
     const call = async (messages, label, json) => {
       const last = String(messages[messages.length - 1]?.content ?? "");
@@ -271,14 +291,14 @@ async function runModel() {
       let kind = "unparsed";
       let asked = "";
       try {
-        const j = JSON.parse(String(reply).replace(/^```(?:json)?s*|s*```$/g, ""));
+        const j = JSON.parse(String(reply).replace(/^```(?:json)?\s*|\s*```$/g, ""));
         kind = j.need ? "need" : String(j.verdict ?? "?");
         if (j.need) asked = JSON.stringify(j.need).slice(0, 220);
         else asked = `edits=${Array.isArray(j.edits) ? j.edits.length : 0} cites=${Array.isArray(j.cites) ? j.cites.length : 0}`;
       } catch {
         asked = String(reply).slice(0, 160);
       }
-      trace.steps.push({ n: trace.calls, seconds: Math.round((Date.now() - t) / 100) / 10, shownChars: last.length, shownHead: last.slice(0, 140).replace(/s+/g, " "), answered: kind, asked });
+      trace.steps.push({ n: trace.calls, seconds: Math.round((Date.now() - t) / 100) / 10, shownChars: last.length, shownHead: last.slice(0, 140).replace(/\s+/g, " "), answered: kind, asked });
       return reply;
     };
 
@@ -287,9 +307,29 @@ async function runModel() {
     let report;
     let crashed;
     try {
-      // The same hand-off the CLI makes: what the first model parks goes to the stronger one (every model after the first in the repair chain).
+      // The same hand-off the CLI makes: what the first model parks goes to the stronger one (every model after the first in the repair chain), in a
+      // SANDBOX when heal.sandbox is on (sandboxFor decides, so the CLI, the phase gate and this cannot disagree), else as a JSON conversation.
+      // --no-sandbox keeps the JSON pass; --no-escalate switches both off.
+      let sandbox;
+      if (!has("--no-escalate") && !has("--no-sandbox")) {
+        const real = sandboxFor({ client, config, repairModels: models, log: (l) => { log.push(l); console.log("  " + l); } });
+        if (real) {
+          let k = 0;
+          sandbox = async (a) => {
+            const r = await real(a);
+            k++;
+            const entry = { cause: a.cause.message, count: a.cause.count, tests: a.cause.tests, stop: r.stop, runs: r.runs, rounds: r.rounds, cost: r.cost, candidate: !!r.candidate, appFilesTouched: r.appFilesTouched, conclusion: r.conclusion };
+            trace.sandbox.push(entry);
+            // What the agent did, call by call, so a run that went nowhere can be read afterwards instead of guessed at.
+            try {
+              fs.writeFileSync(path.join(BENCH, "results", `sandbox-${stamp()}-${n}-${k}.json`), JSON.stringify({ ...entry, trace: r.trace ?? [] }, null, 2));
+            } catch {}
+            return r;
+          };
+        }
+      }
       const escalate =
-        models.length > 1 && !has("--no-escalate")
+        !sandbox && models.length > 1 && !has("--no-escalate")
           ? async (messages, label, json) => {
               const t = Date.now();
               const reply = await runLabeledCompletion({ client, models: models.slice(1), messages, agentName: "REPAIR", jsonMode: json, ...(json ? { structured: HEAL_REPLY_STRUCTURED } : {}), reason: `${label} (stronger model)` });
@@ -299,9 +339,9 @@ async function runModel() {
               // The stronger model's calls in full (the main trace only sees the first model's): how long, how big, and whether it answered at all.
               const last = String(messages[messages.length - 1]?.content ?? "");
               let kind = String(reply).trim() ? "unparsed" : "EMPTY";
-              let asked = String(reply).slice(0, 160).replace(/s+/g, " ");
+              let asked = String(reply).slice(0, 160).replace(/\s+/g, " ");
               try {
-                const j = JSON.parse(String(reply).replace(/^```(?:json)?s*|s*```$/g, ""));
+                const j = JSON.parse(String(reply).replace(/^```(?:json)?\s*|\s*```$/g, ""));
                 kind = j.need ? "need" : String(j.verdict ?? "?");
                 asked = j.need ? JSON.stringify(j.need).slice(0, 200) : `edits=${Array.isArray(j.edits) ? j.edits.length : 0}`;
               } catch {}
@@ -314,7 +354,7 @@ async function runModel() {
               return reply;
             }
           : undefined;
-      report = await healTests({ repoRoot: REPO, all: false, call, escalate, log: (l) => { log.push(l); console.log("  " + l); } });
+      report = await healTests({ repoRoot: REPO, all: false, call, escalate, sandbox, log: (l) => { log.push(l); console.log("  " + l); } });
     } catch (err) {
       crashed = String(err?.message ?? err);
       console.log("  the heal crashed: " + crashed);
@@ -341,6 +381,19 @@ async function runModel() {
       firstModel: models[0],
       strongModels: models.slice(1),
       strongSteps: trace.strong,
+      sandbox: trace.sandbox,
+      sandboxCost: Math.round(trace.sandbox.reduce((s, x) => s + (x.cost || 0), 0) * 1000) / 1000,
+      // Everything that was not the sandbox: the first model's calls (and any JSON stronger-model calls), so the two can be told apart in the cost.
+      firstModelCost: usage.totals.costKnown ? Math.round((usage.totals.cost - trace.sandbox.reduce((s, x) => s + (x.cost || 0), 0)) * 1000) / 1000 : null,
+      // Cleanup checks: nothing of the sandbox may be left behind, and the real dependencies must still be there.
+      worktreesLeft: (() => {
+        try {
+          return fs.existsSync(sandboxBase()) ? fs.readdirSync(sandboxBase()).filter((x) => x.startsWith(sandboxPrefix(REPO))).length : 0;
+        } catch {
+          return -1;
+        }
+      })(),
+      nodeModulesIntact: fs.existsSync(path.join(REPO, "node_modules", "jest", "bin", "jest.js")),
       refusedNoCite: trace.refusedNoCite,
       refusedBadCite: trace.refusedBadCite,
       madeWorse: trace.madeWorse,
@@ -366,6 +419,10 @@ async function runModel() {
       for (const st of trace.steps) kinds[st.answered] = (kinds[st.answered] ?? 0) + 1;
       console.log(`  what it answered, by kind: ${JSON.stringify(kinds)}`);
     }
+    for (const s of trace.sandbox) {
+      console.log(`  sandbox: [${s.count}×] ${s.cause.slice(0, 60)} → ${s.stop}${s.candidate ? " (it returned a test file)" : ""}, ${s.runs} test runs, ${s.rounds} rounds, $${s.cost.toFixed(2)}${s.appFilesTouched.length ? `, app files touched: ${s.appFilesTouched.join(", ")}` : ""}`);
+    }
+    if (trace.sandbox.length) console.log(`  sandbox total $${result.sandboxCost.toFixed(2)}; copies left behind: ${result.worktreesLeft}; real node_modules intact: ${result.nodeModulesIntact}`);
     console.log(`  batches with skipped edits: ${trace.batches.length}${trace.batches.length ? " (" + trace.batches.map((b) => `${b.applied} new / ${b.already} already / ${b.skipped} skipped`).join(", ") + ")" : ""}; already-applied edits resent: ${trace.alreadyResent}; \"nothing new\" turns: ${trace.nothingNew}`);
     console.log(`  first model: ${models[0]}; stronger model(s): ${models.slice(1).join(", ") || "none"}${has("--no-escalate") ? " (escalation switched off)" : ""}; calls to the stronger model: ${trace.strongCalls}`);
     console.log(`  refused for no citation: ${trace.refusedNoCite}, bad citation: ${trace.refusedBadCite}, undone as worse: ${trace.madeWorse}, app-deviations: ${result.deviations.length}`);
