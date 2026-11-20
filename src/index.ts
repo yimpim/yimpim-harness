@@ -42,6 +42,7 @@ import { stageDesignImage } from "./designDelivery.js";
 import { parseLenient } from "./jsonRepair.js";
 import { splitJobs, unplannedJobs } from "./jobsList.js";
 import { healTests, renderHealReport, failingTestFiles, failureText } from "./testHeal.js";
+import { HEAL_REPLY_STRUCTURED } from "./healSchema.js";
 import { renderLog, runSuiteLogged } from "./testLog.js";
 import { fixTaskFor, isFixTask, savePendingFixes, settlePendingFixes } from "./testSettle.js";
 import { directFixFor, setMustPass } from "./directFix.js";
@@ -5147,7 +5148,7 @@ async function main(): Promise<void> {
         // single model there is nobody to hand it to, and parked causes are reported as they are.
         escalate:
           healModels.length > 1
-            ? (messages, label, json) => runLabeledCompletion({ client, models: healModels.slice(1), messages: messages as any, agentName: "REPAIR", jsonMode: json, reason: `${label} (stronger model)` })
+            ? (messages, label, json) => runLabeledCompletion({ client, models: healModels.slice(1), messages: messages as any, agentName: "REPAIR", jsonMode: json, ...(json ? { structured: HEAL_REPLY_STRUCTURED } : {}), reason: `${label} (stronger model)` })
             : undefined,
         log: (line) => console.log("🧪 [TESTS] " + line),
       });

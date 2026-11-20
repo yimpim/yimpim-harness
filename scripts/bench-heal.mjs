@@ -220,6 +220,7 @@ async function runModel() {
   const { loadApiKey } = await imp("secrets.js");
   const { OpenRouterClient } = await imp("openrouter.js");
   const { runLabeledCompletion } = await imp("agentLoop.js");
+  const { HEAL_REPLY_STRUCTURED } = await imp("healSchema.js");
   const { events } = await imp("events.js");
   const { healTests, renderHealReport } = await imp("testHeal.js");
 
@@ -291,7 +292,7 @@ async function runModel() {
         models.length > 1 && !has("--no-escalate")
           ? async (messages, label, json) => {
               const t = Date.now();
-              const reply = await runLabeledCompletion({ client, models: models.slice(1), messages, agentName: "REPAIR", jsonMode: json, reason: `${label} (stronger model)` });
+              const reply = await runLabeledCompletion({ client, models: models.slice(1), messages, agentName: "REPAIR", jsonMode: json, ...(json ? { structured: HEAL_REPLY_STRUCTURED } : {}), reason: `${label} (stronger model)` });
               trace.calls++;
               trace.strongCalls++;
               trace.callMs.push(Date.now() - t);
