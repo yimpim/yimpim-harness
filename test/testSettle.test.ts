@@ -109,7 +109,7 @@ describe("a test that cannot be healed gets a decision", () => {
     assert.ok(has("__tests__/t.test.ts"));
   });
 
-  test("a test that loads and fails on behaviour is sent to the code fix, never settled away", async () => {
+  test("a test that loads and fails on behaviour is kept and left for a person, never settled away and never sent to guess at the code", async () => {
     write("__tests__/t.test.ts", "BROKEN expect(started).toBe(true);\n");
     const behaviour = async (root: string, files: string[]) => {
       const targets = files.length ? files : ["__tests__/t.test.ts"];
@@ -121,7 +121,7 @@ describe("a test that cannot be healed gets a decision", () => {
       run: behaviour,
       call: async () => JSON.stringify({ verdict: "unclear", reason: "cannot tell why it does not start" }),
     });
-    assert.equal(report.results[0].status, "code-bug");
+    assert.equal(report.results[0].status, "unclear");
     assert.ok(has("__tests__/t.test.ts"), "the test is kept");
     assert.ok(!has(".agent/removed-tests.json"));
   });
@@ -165,7 +165,7 @@ describe("after the code fix attempt", () => {
 });
 
 describe("an assertion about null is a behaviour failure, not an environment one", () => {
-  test("it goes to the code fix, never settled away", async () => {
+  test("it is kept and left for a person, never settled away", async () => {
     write("__tests__/n.test.ts", "BROKEN expect(x).not.toBeNull();\n");
     const report = await healTests({
       repoRoot: dir,
@@ -175,7 +175,7 @@ describe("an assertion about null is a behaviour failure, not an environment one
       },
       call: async () => JSON.stringify({ verdict: "unclear", reason: "cannot tell" }),
     });
-    assert.equal(report.results[0].status, "code-bug");
+    assert.equal(report.results[0].status, "unclear");
     assert.ok(fs.existsSync(path.join(dir, "__tests__/n.test.ts")));
   });
 });
