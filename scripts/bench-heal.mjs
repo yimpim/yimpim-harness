@@ -121,7 +121,8 @@ async function score(m, startText) {
     porcelainAfter: porcelain,
   });
   const t = sc.jestTotals(after);
-  return { totals: t, integrity: i, verdict: sc.verdictLine(t.passed, t.total, i), stats: { start: sc.statsOf(startText), after: sc.statsOf(afterText) }, porcelain };
+  const failing = (after.testResults?.[0]?.assertionResults ?? []).filter((a) => a.status === "failed").map((a) => `${(a.ancestorTitles ?? []).slice(-1)[0] ?? ""} > ${a.title}`);
+  return { failing, totals: t, integrity: i, verdict: sc.verdictLine(t.passed, t.total, i), stats: { start: sc.statsOf(startText), after: sc.statsOf(afterText) }, porcelain };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------- selftest
@@ -192,18 +193,22 @@ async function runModel() {
     const { key } = loadApiKey();
     if (!key) throw new Error("No OpenRouter key: run `yimpim setup`.");
     const models = config.models.repair ?? config.models.editor;
-    const before = events.usageReport();
-    const t = Date.now();
-    const reply = await runLabeledCompletion({
-      client: new OpenRouterClient(key, config),
-      models,
-      messages: [{ role: "user", content: 'Reply with exactly this JSON and nothing else: {"ok":true}' }],
-      agentName: "REPAIR",
-      jsonMode: true,
-      reason: "benchmark wiring check",
-    });
-    const u = events.usageDelta(before).totals;
-    console.log(`models: ${models.join(", ")}\nreply: ${String(reply).trim().slice(0, 80)}\n${Math.round((Date.now() - t) / 100) / 10}s, ${u.total} tokens${u.costKnown ? `, $${u.cost.toFixed(5)}` : ", cost not reported"}\nThe wiring works.`);
+    // Every model in the chain on its own, so a model that answers with nothing (or not JSON) is seen here and not in the middle of a heal.
+    const client = new OpenRouterClient(key, config);
+    for (const m of models) {
+      const before = events.usageReport();
+      const t = Date.now();
+      let reply = "";
+      let err = "";
+      try {
+        reply = await runLabeledCompletion({ client, models: [m], messages: [{ role: "user", content: 'Reply with exactly this JSON and nothing else: {"ok":true}' }], agentName: "REPAIR", jsonMode: true, reason: "benchmark wiring check" });
+      } catch (e) {
+        err = String(e?.message ?? e).slice(0, 200);
+      }
+      const u = events.usageDelta(before).totals;
+      console.log(`${m}: ${err ? "ERROR " + err : reply.trim() ? "reply " + JSON.stringify(reply.trim().slice(0, 60)) : "EMPTY REPLY"} (${Math.round((Date.now() - t) / 100) / 10}s, ${u.total} tokens${u.costKnown ? ", $" + u.cost.toFixed(5) : ""})`);
+    }
+    console.log("wiring check done");
     return;
   }
   if (!has("--yes")) {
@@ -243,7 +248,7 @@ async function runModel() {
     if (!key) throw new Error("No OpenRouter key: run `yimpim setup`.");
     const client = new OpenRouterClient(key, config);
     const models = config.models.repair ?? config.models.editor;
-    const trace = { calls: 0, strongCalls: 0, refusedNoCite: 0, refusedBadCite: 0, madeWorse: 0, callMs: [], steps: [], batches: [], nothingNew: 0, alreadyResent: 0 };
+    const trace = { calls: 0, strongCalls: 0, strong: [], refusedNoCite: 0, refusedBadCite: 0, madeWorse: 0, callMs: [], steps: [], batches: [], nothingNew: 0, alreadyResent: 0 };
     const log = [];
     const call = async (messages, label, json) => {
       const last = String(messages[messages.length - 1]?.content ?? "");
@@ -290,6 +295,16 @@ async function runModel() {
               trace.calls++;
               trace.strongCalls++;
               trace.callMs.push(Date.now() - t);
+              // The stronger model's calls in full (the main trace only sees the first model's): how long, how big, and whether it answered at all.
+              const last = String(messages[messages.length - 1]?.content ?? "");
+              let kind = String(reply).trim() ? "unparsed" : "EMPTY";
+              let asked = String(reply).slice(0, 160).replace(/s+/g, " ");
+              try {
+                const j = JSON.parse(String(reply).replace(/^```(?:json)?s*|s*```$/g, ""));
+                kind = j.need ? "need" : String(j.verdict ?? "?");
+                asked = j.need ? JSON.stringify(j.need).slice(0, 200) : `edits=${Array.isArray(j.edits) ? j.edits.length : 0}`;
+              } catch {}
+              trace.strong.push({ n: trace.strongCalls, seconds: Math.round((Date.now() - t) / 100) / 10, shownChars: last.length, promptChars: messages.reduce((n, m) => n + String(m.content ?? "").length, 0), replyChars: String(reply).length, answered: kind, asked });
               return reply;
             }
           : undefined;
@@ -319,10 +334,12 @@ async function runModel() {
       strongCalls: trace.strongCalls,
       firstModel: models[0],
       strongModels: models.slice(1),
+      strongSteps: trace.strong,
       refusedNoCite: trace.refusedNoCite,
       refusedBadCite: trace.refusedBadCite,
       madeWorse: trace.madeWorse,
       steps: trace.steps,
+      stillFailing: scored.failing,
       partialBatches: trace.batches,
       nothingNew: trace.nothingNew,
       alreadyResent: trace.alreadyResent,
@@ -333,8 +350,11 @@ async function runModel() {
       report: report ? renderHealReport(report) : "",
     };
     results.push(result);
-    fs.writeFileSync(path.join(BENCH, "results", `run-${stamp()}-${n}.json`), JSON.stringify(result, null, 2));
-    console.log(`\n  ${result.verdict}\n  ${seconds}s, ${trace.calls} model calls, ${result.tokens} tokens${result.cost === null ? "" : `, $${result.cost.toFixed(3)}`}`);
+    // Keep what the run actually produced (the working copy is reset afterwards): the final test file, next to the result.
+    const runStamp = stamp();
+    fs.writeFileSync(path.join(BENCH, "results", `run-${runStamp}-${n}.final.test.ts`), read(path.join(REPO, TEST_FILE)));
+    fs.writeFileSync(path.join(BENCH, "results", `run-${runStamp}-${n}.json`), JSON.stringify(result, null, 2));
+    console.log(`\n  ${result.verdict}\n  still failing: ${scored.failing.length ? scored.failing.map((x) => x.slice(0, 70)).join(" | ").slice(0, 600) : "none"}\n  ${seconds}s, ${trace.calls} model calls, ${result.tokens} tokens${result.cost === null ? "" : `, $${result.cost.toFixed(3)}`}`);
     {
       const kinds = {};
       for (const st of trace.steps) kinds[st.answered] = (kinds[st.answered] ?? 0) + 1;
