@@ -116,6 +116,11 @@ export function setMustPass(files: string[]): void {
   for (const f of files) mustPass.add(f.replace(/\\/g, "/"));
 }
 
+/** True while a fix for failing tests is in progress: those tests are the spec, so a change must satisfy them and not bend them. */
+export function anyMustPass(): boolean {
+  return mustPass.size > 0;
+}
+
 export function isMustPass(file: string): boolean {
   return mustPass.has(file.replace(/\\/g, "/"));
 }
