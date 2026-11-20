@@ -142,7 +142,7 @@ export function presentLargeFile(original: string, file: string, digest: Digest 
   return out.join("\n");
 };
 
-const SAFE = (rel: string) => !rel.startsWith("..") && !path.isAbsolute(rel) && !/(^|\/)(\.git|\.agent|node_modules)(\/|$)/.test(rel);
+export const SAFE = (rel: string) => !rel.startsWith("..") && !path.isAbsolute(rel) && !/(^|\/)(\.git|\.agent|node_modules)(\/|$)/.test(rel);
 
 /** Lines `from..to` of a repository file, numbered. Undefined when the file is missing or off limits. */
 export function readRange(repoRoot: string, relRaw: string, from = 1, to = from + 199): string | undefined {
