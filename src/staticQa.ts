@@ -17,6 +17,7 @@ import { STATIC_QA_SYSTEM } from "./prompts.js";
 import { LOCK_FILE_NAMES } from "./orchestrator.js";
 import { uiSignals } from "./uiLint.js";
 import { fileReader, securitySignals } from "./securityLint.js";
+import { isScratchPath } from "./scratch.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -483,7 +484,9 @@ export function isHarnessArtifactPath(rel: string): boolean {
   const p = normalizeRelPath(rel);
   // .expo/ is Expo's own dev output (logs, caches) — QA's own `expo export`
   // writes into it, so it must never be judged as part of the phase's change.
-  return p === "PROGRESS.md" || p === "QA_REVIEW.md" || p === ".agent" || p.startsWith(".agent/") || p.startsWith(".expo/");
+  // A scratch file (a test report an agent parsed, a throwaway helper script) is not part of the change: judging it against the phase's
+  // requirements only produces a screenful of "uncertain" for each one (scratch.ts).
+  return p === "PROGRESS.md" || p === "QA_REVIEW.md" || p === ".agent" || p.startsWith(".agent/") || p.startsWith(".expo/") || isScratchPath(p);
 }
 
 /** Cheap, deterministic red flags that need no model call. */

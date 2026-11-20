@@ -471,6 +471,10 @@ function handleLine(rawLine: string): void {
   }
   const raw = paste.expand(rawLine);
   const trimmed = raw.trim();
+  // Pressing Enter makes readline end the line with its own newline BEFORE this runs, so the cursor is one row below the prompt. clearInputArea
+  // measures from the prompt's last row; from one row lower it stopped one row short and left the TOP row of the pinned area (the status line,
+  // or the divider when there is none) on screen. That was the second copy of the progress line above what you typed. Step back up first.
+  if (rl && process.stdout.isTTY) readline.moveCursor(process.stdout, 0, -1);
   if (trimmed) writeRawAbove(echoedInput(trimmed));
 
   // /stop always wins, regardless of what currently owns the line — same

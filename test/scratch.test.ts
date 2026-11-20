@@ -95,6 +95,14 @@ describe("an agent writing a scratch file", () => {
   });
 });
 
+describe("QA does not review scratch files as if they were the change", () => {
+  test("a test report or helper script the agent made is exempt from the semantic review, a real file is not", async () => {
+    const { isHarnessArtifactPath } = await import("../src/staticQa.js");
+    for (const p of [".jest-baseline.json", ".jest-failures-dump.cjs", "jest-report.json", ".agent/tmp/x.cjs", ".expo/devices.json"]) assert.equal(isHarnessArtifactPath(p), true, p);
+    for (const p of ["src/components/DashboardTimeline.tsx", "jest.config.js", "docs/summary.md", "QA_REVIEW.md_not"]) assert.equal(isHarnessArtifactPath(p), false, p);
+  });
+});
+
 describe("the wiring", () => {
   const index = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8").replace(/\r\n/g, "\n");
   test("scratch files are never committed, by the carry-over or by a phase, and are removed when a task ends or is stopped", () => {

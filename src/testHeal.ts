@@ -661,12 +661,13 @@ async function settleUnresolved(opts: HealOptions, results: HealResult[], log: (
       const helper = /shared helper that sits where Jest looks/.test(r.note);
       if (helper) return; // not a test: the config fix is named in the report
       // A test that loads and then fails on behaviour (an assertion, a render error, something that never starts) may be
-      // catching a real defect that nobody could pin down yet. Removing it would hide that, so it goes to the code fix first;
-      // it is removed only if it still fails after that attempt.
+      // catching a real defect that nobody could pin down yet. Removing it would hide that, so it is KEPT. It is not sent to a code
+      // fix either: no cause was found on the test and none was named in the code, and a Planner asked to change product code to
+      // satisfy a test nobody could explain changes what passes today (a real run broke a passing test that way). It is left as it
+      // is, and reported with what still fails, for a person to look at.
       if (!ENVIRONMENT_FAILURE.test(r.failure ?? "")) {
-        r.status = "code-bug";
-        r.note = `it fails on behaviour and the cause could not be pinned on the test, so the code is fixed first (${r.note})`;
-        log(`  🐞 ${r.file}: ${r.note}`);
+        r.note = `it fails on behaviour and the cause could not be pinned on the test or on one piece of code, so nothing was changed and it needs a person (${r.note})`;
+        log(`  ? ${r.file}: ${r.note}`);
         return;
       }
       const sources = [...new Set([...importedSources(repoRoot, r.file, original), ...referencedFiles(repoRoot, r.file, original)])];
