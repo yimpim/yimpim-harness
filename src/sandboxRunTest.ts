@@ -143,7 +143,7 @@ function git(cwd: string, args: string[]): string {
 }
 
 /** Files that differ from the sandbox's base commit (modified or new), repo-relative, never the shared dependency folders. */
-function changedFiles(root: string): string[] {
+export function changedFiles(root: string): string[] {
   let out = "";
   try {
     out = git(root, ["status", "--porcelain", "-z", "--untracked-files=all"]);
