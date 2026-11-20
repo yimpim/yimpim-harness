@@ -48,6 +48,7 @@ import { directFixFor, setMustPass } from "./directFix.js";
 import { checkExistence, existencePlannerSection, renderExistence } from "./existence.js";
 import { type Intent, parseIntentReply, routeFacts } from "./routeIntent.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
+import { makeCommandReviewer } from "./commandReview.js";
 import { runSecurityAudit } from "./securityAudit.js";
 import { existingDirOnly, existingFilesOnly, projectLayout, renderLayout } from "./projectLayout.js";
 import { loadRepoMap, recordConfirmedFindings } from "./repoMap.js";
@@ -4725,6 +4726,14 @@ async function main(): Promise<void> {
       "Your answer: "
     )
   );
+  // A security model clears what is plainly harmless before a person is asked about a command; everything else still asks (commandReview.ts).
+  if (config.security.commandReview) {
+    agentTools.setCommandReviewer(
+      makeCommandReviewer((messages) =>
+        runLabeledCompletion({ client, models: securityModels(config.models), messages: messages as any, agentName: "SECURITY", jsonMode: true, reason: "Security: reviewing a command" })
+      )
+    );
+  }
   // Backs the run_build_check tool: lets EDITOR/REPAIR confirm a patch
   // actually compiles before handing back to QA, reusing the SAME
   // build/typecheck command resolution the real QA build gate uses — see
