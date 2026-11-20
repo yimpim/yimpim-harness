@@ -92,8 +92,13 @@ describe("a file that is part stale test and part code defect", () => {
     codeBugs: ["app/screen.ts:3 isRunning compares the raw state to 'RUNNING', so a running desktop is never running"],
   };
 
+  // First answer: mixed, with its test-side edits. It is then shown what STILL fails and says that what is left is the code.
+  const twoStepCall = () => {
+    let n = 0;
+    return async () => (++n === 1 ? JSON.stringify(mixed) : JSON.stringify({ verdict: "code-bug", reason: "What still fails is the code.", codeBugs: mixed.codeBugs }));
+  };
   test("the test-side causes are fixed and kept, and only the code defect is handed on", async () => {
-    const report = await healTests({ repoRoot: dir, run, settle: false, call: async () => JSON.stringify(mixed) });
+    const report = await healTests({ repoRoot: dir, run, settle: false, call: twoStepCall() });
     const r = report.results[0];
     assert.equal(r.status, "code-bug");
     assert.equal(r.partial, true);
@@ -103,18 +108,48 @@ describe("a file that is part stale test and part code defect", () => {
     assert.match(read(TEST), /MARKER-RUNNING expects running to be running/);
     // What is handed on names the defect and what is left, and is the failure that remains (only the code's two tests).
     assert.match(r.note, /app\/screen\.ts:3 isRunning compares the raw state/);
-    assert.match(r.note, /What is left is the code \(2 failing\)/);
+    assert.match(r.note, /Still failing after the test-side fixes: 2/);
     assert.match(r.note, /out-of-date parts were fixed: 3 lines changed/); // one line added to the mock, one changed (counted as removed + added)
     assert.match(r.failure ?? "", /running 0/);
     assert.doesNotMatch(r.failure ?? "", /getToken|label 0/);
   });
+  test("a smaller failure count is not enough: the worker is shown what still fails and, while some of it is the test's, keeps fixing it", async () => {
+    const prompts: string[] = [];
+    let n = 0;
+    const r = (
+      await healTests({
+        repoRoot: dir,
+        run,
+        settle: false,
+        call: async (messages) => {
+          prompts.push(messages[messages.length - 1].content);
+          n++;
+          if (n === 1) return JSON.stringify({ ...mixed, edits: [mixed.edits[0]] }); // fixes the mock only; the stale label copy still fails
+          if (n === 2) return JSON.stringify({ verdict: "mixed", reason: "the label copy", edits: [mixed.edits[1]], codeBugs: mixed.codeBugs });
+          return JSON.stringify({ verdict: "code-bug", reason: "only the code is left", codeBugs: mixed.codeBugs });
+        },
+      })
+    ).results[0];
+    assert.equal(n, 3, "it was not handed on after the first answer, although the count had dropped");
+    assert.match(prompts[1], /Go through EVERY cause that still fails/);
+    assert.match(prompts[1], /3 failing|label 0/, "it was shown the stale-copy failures that were still there");
+    assert.equal(r.status, "code-bug");
+    assert.equal(r.partial, true);
+    assert.match(read(TEST), /expects Reconnecting/);
+  });
+  test("saying 'code-bug' with no test fix made first puts the file back and makes no claim of partial progress", async () => {
+    const before = read(TEST);
+    const r = (await healTests({ repoRoot: dir, run, settle: false, call: async () => JSON.stringify({ verdict: "code-bug", reason: "code" }) })).results[0];
+    assert.equal(r.partial, undefined);
+    assert.equal(read(TEST), before);
+  });
   test("a partial result is not a failed heal: it earns no strike, so it is not parked", async () => {
-    await healTests({ repoRoot: dir, run, settle: false, call: async () => JSON.stringify(mixed) });
+    await healTests({ repoRoot: dir, run, settle: false, call: twoStepCall() });
     const log = JSON.parse(fs.readFileSync(path.join(dir, ".agent", "test-log.json"), "utf8"));
     assert.equal(log.files[TEST]?.healStrikes, undefined);
   });
   test("the report says which part is which", async () => {
-    const report = await healTests({ repoRoot: dir, run, settle: false, call: async () => JSON.stringify(mixed) });
+    const report = await healTests({ repoRoot: dir, run, settle: false, call: twoStepCall() });
     const text = renderHealReport(report);
     assert.match(text, /Part test, part code\. The out-of-date parts of these tests were fixed/);
     assert.doesNotMatch(text, /tests left untouched/);
