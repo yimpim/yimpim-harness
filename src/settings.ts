@@ -206,6 +206,14 @@ export const SETTINGS: SettingDef[] = [
       "running a test, or twice this many rounds of only reading. A new result is progress and starts the count again.",
   },
   {
+    key: "heal.sandbox.deviationTestCap",
+    type: "number",
+    group: "Limits",
+    description:
+      "When the app works but differs from its written spec in a small visible way (a label, its capital letters, wording, order), the test is changed to match the app so work is not " +
+      "blocked, and a follow-up ticket records the gap. This is the most tests one such change may touch. Anything bigger is refused and reported for a person.",
+  },
+  {
     key: "limits.maxToolRounds",
     type: "number",
     group: "Limits",

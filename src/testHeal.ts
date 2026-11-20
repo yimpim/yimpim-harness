@@ -28,6 +28,7 @@ import { digestFailure, signatureOf } from "./failureDigest.js";
 import { statsOf } from "./benchScore.js";
 import type { SandboxRun, SandboxResult } from "./healSandbox.js";
 import { AbortedError } from "./remote/control.js";
+import { validateDeviation, describeDeviation, deviationGutting, testsModified, emitDeviationUnits, refsIn, DEFAULT_DEVIATION_TEST_CAP, type DeviationRecord } from "./healDeviation.js";
 import { evidenceText } from "./failureEvidence.js";
 import { applyEditsLenient, parseEdits, presentLargeFile, readRange, searchRepo, runProbe, unseenRanges, LARGE_FILE_LINES } from "./healEdits.js";
 import { removeTest, renderRemoval, recordRemoved } from "./testSettle.js";
@@ -56,6 +57,12 @@ export interface HealResult {
    * whether the spec or the app is right is a decision for a person, and a Planner asked to "fix" it would rewrite product code.
    */
   deviations?: string[];
+  /**
+   * Places where the spec and the working app differ and the test was changed to follow the APP (a label's casing, wording, order): accepted only with the app's
+   * and the spec's file:line, no assertion removed, within a cap, through the ratchet. Each is also a follow-up ticket when the project has a roadmap. Different from
+   * `deviations`, where nothing was changed.
+   */
+  acceptedDeviations?: string[];
 }
 
 export type HealCall = (messages: { role: "system" | "user" | "assistant"; content: string }[], label: string, json: boolean) => Promise<string>;
@@ -612,10 +619,15 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       // fix task changes product code on its word, the stronger model looks. The claim is about the cause the worker was pointed at, so only THAT cause is
       // parked (marked "it believes the app is wrong") and the worker goes on to the next one: a claim about one cause must not end its work on the easy ones.
       // The stronger model's own verdict is final.
-      if (stage === "first" && opts.escalate) {
+      // This holds whenever there is anything stronger to hand the cause to: the JSON stronger-model pass (escalate) OR the sandbox. It used to be tied to
+      // escalate alone, so with the sandbox on a single "the app is wrong" claim (even about a label's casing) ended the whole file after minutes, with the
+      // sandbox never run and most of the file untouched.
+      // A claim that the spec and the app disagree (an app-deviation, or a code-bug citing the spec) is not a Tier 1 test-edit path either: the cheap model
+      // never bends a test by itself. It is parked, with the places it named, and the stronger model decides defect or deviation.
+      if (stage === "first" && (opts.escalate || opts.sandbox)) {
         const f = focusOf();
         if (f) {
-          const why = [reason, ...codeBugs].join(" ").replace(/\s+/g, " ").slice(0, 600);
+          const why = [reason, ...codeBugs, ...deviations].join(" ").replace(/\s+/g, " ").slice(0, 600);
           parked.set(f.key, { kind: "code", reason: why, message: f.message, count: f.count });
           if (!focusOf()) return "parked-out";
           messages.push({ role: "assistant", content: reply }, { role: "user", content: `Parked as the app's problem, for the stronger model to check: [${f.count}×] ${f.message}.\n\n${focusText()}` });
@@ -809,6 +821,9 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   // ------------------------------------------------------------------------------------------ parked causes, in a sandbox
   /** One line per parked cause that went to the sandbox, for the report. */
   const sandboxNotes: string[] = [];
+  /** Deviations whose test change was kept: "app X:12 vs spec Y:5: ...". */
+  const acceptedDeviations: string[] = [];
+  const withAccepted = (r: HealResult): HealResult => (acceptedDeviations.length > 0 ? { ...r, acceptedDeviations: [...acceptedDeviations] } : r);
   /** What the first model changed, short: the sandbox agent reads the file itself. */
   const describeBatches = (): string =>
     batches
@@ -822,10 +837,36 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
    * edit goes through), after a cheap integrity check. Nothing but the test file ever gets here: the app's own code is never written by the heal.
    * A write-ahead record covers a kill between writing and judging.
    */
-  const mergeCandidate = async (candidate: string, r: SandboxResult): Promise<{ kept: boolean; why: string; gain: number }> => {
+  const mergeCandidate = async (candidate: string, r: SandboxResult, claimedApp: boolean): Promise<{ kept: boolean; why: string; gain: number }> => {
     if (candidate === last) return { kept: false, why: "it changed nothing", gain: 0 };
     const problem = candidateProblem(last, candidate);
     if (problem) return { kept: false, why: `its test file was refused: ${problem}`, gain: 0 };
+    // A test changed to follow the APP is the riskiest change a heal makes, so it has to earn it, before anything is run:
+    //  1. concrete evidence: every deviation must have the app's file:line and the spec's file:line, and they must exist in the real project (not only in
+    //     the sandbox); when the first model called the app wrong and the test was changed anyway, there must be at least one;
+    //  2. no check removed or weakened (a test can be made to pass by deleting what it checks);
+    //  3. within a cap on how many tests one deviation verdict may change.
+    // Then it goes through the same ratchet as every edit (below).
+    const records = r.deviations ?? [];
+    const isDeviation = records.length > 0 || claimedApp;
+    const checkedRecords: DeviationRecord[] = [];
+    if (isDeviation) {
+      if (records.length === 0) {
+        return { kept: false, why: "the test was changed to follow the app, but no deviation was recorded (the app's file:line and the spec's file:line), so it was not kept", gain: 0 };
+      }
+      const bad: string[] = [];
+      for (const rec of records) {
+        const c = validateDeviation(repoRoot, { app: `${rec.appFile}:${rec.appLine}`, spec: `${rec.specFile}:${rec.specLine}`, summary: rec.summary });
+        if (c.ok) checkedRecords.push(c.rec);
+        else bad.push(c.why);
+      }
+      if (bad.length > 0) return { kept: false, why: `a deviation did not hold up against the project (${bad[0]}${bad.length > 1 ? `; and ${bad.length - 1} more` : ""}), so the test change was not kept`, gain: 0 };
+      const gutting = deviationGutting(last, candidate);
+      if (gutting) return { kept: false, why: `a test changed to follow the app may not lose checks: ${gutting}`, gain: 0 };
+      const cap = opts.sandbox?.deviationTestCap ?? DEFAULT_DEVIATION_TEST_CAP;
+      const modified = testsModified(last, candidate);
+      if (modified > cap) return { kept: false, why: `a deviation may change at most ${cap} tests, and this changes ${modified}`, gain: 0 };
+    }
     const undoTo = last;
     const before = current;
     beginTrial(repoRoot, file, undoTo, candidate);
@@ -869,7 +910,15 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     last = candidate;
     current = after;
     trace.output = after.output;
-    return { kept: true, why: `+${gain} passing`, gain };
+    // Accepted: it is said in the report, and, when the project has a roadmap, becomes a follow-up ticket (one per app file and spec place, however often found).
+    if (checkedRecords.length > 0) {
+      for (const rec of checkedRecords) {
+        const line = describeDeviation(rec);
+        if (!acceptedDeviations.includes(line)) acceptedDeviations.push(line);
+      }
+      for (const note of emitDeviationUnits(repoRoot, checkedRecords)) opts.log?.(`  ↳ ${file}: ${note}`);
+    }
+    return { kept: true, why: `+${gain} passing${checkedRecords.length > 0 ? `, ${checkedRecords.length} deviation${checkedRecords.length === 1 ? "" : "s"} recorded` : ""}`, gain };
   };
 
   /** Each parked cause, biggest first, goes to the sandbox; what comes back goes through mergeCandidate. */
@@ -893,7 +942,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
           testText: last,
           failureOutput: current.output,
           failureDigest: failureText(current.output, repoRoot, file),
-          cause: { message: cause.message, count: cause.count, tests: testsOfCause(current.output, key), reason: p.reason, kind: p.kind },
+          cause: { message: cause.message, count: cause.count, tests: testsOfCause(current.output, key), reason: p.reason, kind: p.kind, refs: refsIn(p.reason) },
           ledger: ledgerLines(),
           firstModelNotes: describeBatches(),
         });
@@ -911,7 +960,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         parked.set(key, { ...p, kind: "code", reason: `${r.conclusion}${evidence}`.slice(0, 700) });
         verdict = `app bug: ${firstWords(r.conclusion, 200)}`;
       } else if (r.candidate) {
-        const m = await mergeCandidate(r.candidate, r);
+        const m = await mergeCandidate(r.candidate, r, p.kind === "code");
         verdict = m.kept ? `kept (${m.why})` : `not kept: ${m.why}`;
         if (!m.kept) parked.set(key, { ...p, reason: `the sandbox's change was not kept: ${m.why}` });
       } else {
@@ -934,7 +983,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     await sandboxParked();
     if (current.ok) {
       const changed = changedLines(original, last);
-      return { file, status: "healed", note: `the first model fixed what it could and the sandbox settled the rest. ${sandboxNotes.join(" | ")} (${changed} line${changed === 1 ? "" : "s"} changed)`.slice(0, 2300), attempts };
+      return withAccepted({ file, status: "healed", note: `the first model fixed what it could and the sandbox settled the rest. ${sandboxNotes.join(" | ")} (${changed} line${changed === 1 ? "" : "s"} changed)`.slice(0, 2300), attempts });
     }
   }
   if (outcome === "parked-out" && opts.escalate && !opts.sandbox && parked.size > 0) {
@@ -983,12 +1032,12 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     const before = testsFailing(first.output);
     const now = testsFailing(current.output);
     if (last !== original && now !== undefined && (before === undefined || now < before)) {
-      return { file, status: "code-bug", partial: true, note: `${note} (the test's out-of-date parts were fixed: ${changedLines(original, last)} lines changed)`, attempts };
+      return withAccepted({ file, status: "code-bug", partial: true, note: `${note} (the test's out-of-date parts were fixed: ${changedLines(original, last)} lines changed)`, attempts });
     }
     fs.writeFileSync(abs, original);
     return { file, status: "code-bug", note, attempts };
   }
-  return giveUp("unclear", `${parked.size} cause${parked.size === 1 ? "" : "s"} could not be settled: ${summary}`);
+  return withAccepted(giveUp("unclear", `${parked.size} cause${parked.size === 1 ? "" : "s"} could not be settled: ${summary}`));
 }
 
 // ------------------------------------------------------------ shared causes
@@ -1336,6 +1385,12 @@ export function renderHealReport(r: HealReport): string {
       if (d.status === "app-deviation") lines.push(`  - ${d.file}: ${d.note}`);
       for (const x of d.deviations ?? []) lines.push(`  - ${d.file}: ${x}`);
     }
+  }
+  // The app WORKS but differs from the spec in a cosmetic way: the test was changed to follow the app, with evidence, and a follow-up brings the app to the spec.
+  const followed = r.results.filter((x) => x.acceptedDeviations && x.acceptedDeviations.length > 0);
+  if (followed.length) {
+    lines.push("", "The app works but differs from its written spec here. The test now follows the app (so this does not block), and a follow-up ticket brings the app to the spec when the project has a roadmap:");
+    for (const d of followed) for (const x of d.acceptedDeviations ?? []) lines.push(`  - ${d.file}: ${x}`);
   }
   const rewritten = by("rewritten");
   if (rewritten.length) lines.push("", "Rewritten from scratch:", ...rewritten.map((b) => `  - ${b.file}: ${b.note}`));

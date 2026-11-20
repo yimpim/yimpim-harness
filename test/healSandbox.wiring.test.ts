@@ -14,18 +14,19 @@ const fakeClient: any = { complete: async () => ({}) };
 const src = (f: string) => fs.readFileSync(f, "utf8");
 
 describe("configuration", () => {
-  test("the defaults: on, $0.75 per cause, three rounds of patience", () => {
+  test("the defaults: on, $0.75 per cause, three rounds of patience, at most 12 tests per deviation", () => {
     const c = ConfigSchema.parse({});
-    assert.deepEqual(c.heal.sandbox, { enabled: true, budgetUsd: 0.75, stagnation: 3 });
+    assert.deepEqual(c.heal.sandbox, { enabled: true, budgetUsd: 0.75, stagnation: 3, deviationTestCap: 12 });
   });
   test("each key can be set, and a nonsense value is refused", () => {
-    assert.deepEqual(config({ sandbox: { enabled: false, budgetUsd: 0, stagnation: 5 } }).heal.sandbox, { enabled: false, budgetUsd: 0, stagnation: 5 });
+    assert.deepEqual(config({ sandbox: { enabled: false, budgetUsd: 0, stagnation: 5, deviationTestCap: 4 } }).heal.sandbox, { enabled: false, budgetUsd: 0, stagnation: 5, deviationTestCap: 4 });
     assert.throws(() => config({ sandbox: { budgetUsd: -1 } }));
     assert.throws(() => config({ sandbox: { stagnation: 0 } }));
     assert.throws(() => config({ sandbox: { stagnation: 2.5 } }));
+    assert.throws(() => config({ sandbox: { deviationTestCap: 0 } }));
   });
   test("every key is a documented setting a person can change, in plain words, and parses from text", () => {
-    for (const key of ["heal.sandbox.enabled", "heal.sandbox.budgetUsd", "heal.sandbox.stagnation"]) {
+    for (const key of ["heal.sandbox.enabled", "heal.sandbox.budgetUsd", "heal.sandbox.stagnation", "heal.sandbox.deviationTestCap"]) {
       const def = findSetting(key);
       assert.ok(def, key);
       assert.ok(def!.description.length > 60, `${key} is described`);
@@ -81,5 +82,6 @@ describe("the three places a heal is started all ask sandboxFor, and use the JSO
     assert.match(s, /models: deps\.repairModels\.slice\(1\)/);
     assert.match(s, /budgetUsd: cfg\?\.budgetUsd \?\? 0\.75/);
     assert.match(s, /stagnation: cfg\?\.stagnation \?\? 3/);
+    assert.match(s, /deviationTestCap: cfg\?\.deviationTestCap \?\? DEFAULT_DEVIATION_TEST_CAP/);
   });
 });

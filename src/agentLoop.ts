@@ -885,6 +885,9 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
           // A measurement: neither an inspection nor an edit (ReadTracker classifies an unknown tool as "other"), so the read streak is left alone.
           console.log(`[${displayName}] 🧪 run_test ${String(args.file ?? "")}${args.namePattern ? ` -t "${String(args.namePattern).slice(0, 60)}"` : ""}`);
           toolOutput = await agentTools.runTest(args);
+        } else if (name === "record_deviation") {
+          console.log(`[${displayName}] 📝 record_deviation ${String(args.app ?? "").slice(0, 80)} vs ${String(args.spec ?? "").slice(0, 80)}`);
+          toolOutput = await agentTools.recordDeviation(args);
         } else if (name === "stage_file_for_deletion") {
           // Staging is a mutation in every sense that matters here: the editor
           // has reached a terminal decision about the file (it should go)
