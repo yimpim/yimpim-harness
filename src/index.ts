@@ -5142,9 +5142,13 @@ async function main(): Promise<void> {
       const report = await healTests({
         repoRoot,
         all,
-        // A test is only stale if something stronger than the test says so; every edit must cite it, and the citation must exist.
-        requireCites: true,
         call: (messages, label, json) => runLabeledCompletion({ client, models: healModels, messages: messages as any, agentName: "REPAIR", jsonMode: json, reason: label }),
+        // What the first model cannot settle (it parks those causes) goes to the stronger one: every model after the first in the repair chain. With a
+        // single model there is nobody to hand it to, and parked causes are reported as they are.
+        escalate:
+          healModels.length > 1
+            ? (messages, label, json) => runLabeledCompletion({ client, models: healModels.slice(1), messages: messages as any, agentName: "REPAIR", jsonMode: json, reason: `${label} (stronger model)` })
+            : undefined,
         log: (line) => console.log("🧪 [TESTS] " + line),
       });
       console.log("\n🧪 [TESTS] " + renderHealReport(report));

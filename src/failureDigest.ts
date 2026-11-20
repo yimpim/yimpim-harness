@@ -150,7 +150,7 @@ const MAX_TEXT = 7000;
 /**
  * @param testFile the test file being healed (repo-relative): a frame inside it is shown too, since that is where the cause is exercised.
  */
-export function digestFailure(output: string, repoRoot: string, testFile?: string): Digest {
+export function digestFailure(output: string, repoRoot: string, testFile?: string, top: number = TOP_CAUSES): Digest {
   const lines = output.replace(ANSI, "").split(/\r?\n/);
   let index: Map<string, string[]> | undefined;
   const byBase = () => (index ??= indexByBasename(repoRoot));
@@ -176,7 +176,7 @@ export function digestFailure(output: string, repoRoot: string, testFile?: strin
   const total = Math.max(named.size, errorHeads);
 
   const ranked = [...groups.entries()].sort((a, b) => b[1].count - a[1].count || a[1].at - b[1].at);
-  const clusters: Cluster[] = ranked.slice(0, TOP_CAUSES).map(([signature, g]) => {
+  const clusters: Cluster[] = ranked.slice(0, top).map(([signature, g]) => {
     const block = lines.slice(g.at, g.at + 45);
     const frames = framesIn(repoRoot, block, byBase);
     const test = testFile ? posix(testFile) : undefined;

@@ -277,16 +277,21 @@ describe("an edit that makes it worse is undone", () => {
 
 describe("the wiring", () => {
   const read2 = (p: string) => fs.readFileSync(new URL(p, import.meta.url), "utf-8").replace(/\r\n/g, "\n");
-  test("real heal runs ask for citations", () => {
-    assert.ok(read2("../src/index.ts").includes("requireCites: true,"));
-    assert.ok(read2("../src/verifierTools.ts").includes("files: retry, call, requireCites: true,"));
+  test("real heal runs do NOT require citations (it stopped the worker from answering), and hand parked causes to the stronger model", () => {
+    const idx = read2("../src/index.ts");
+    const ver = read2("../src/verifierTools.ts");
+    assert.ok(!idx.includes("requireCites: true"));
+    assert.ok(!ver.includes("requireCites: true"));
+    assert.ok(idx.includes("escalate:") && idx.includes("healModels.slice(1)"));
+    assert.ok(ver.includes("files: retry, call, escalate,") && ver.includes("models.slice(1)"));
   });
   test("the worker is told the order of authority and the new verdict", () => {
     const t = read2("../src/testHeal.ts");
     assert.ok(t.includes("Who is RIGHT is decided by the strongest authority, in this order: (1) the written spec"));
     assert.ok(t.includes('{"verdict":"app-deviation"'));
-    assert.ok(t.includes('"cites" is REQUIRED with any edit, and with any claim that the code is wrong'));
-    assert.ok(t.includes("the quote must appear in that file within a few lines of the line you cite"));
+    assert.ok(t.includes('you may name it with "cites"') && t.includes("never a reason to hold back an answer you are confident in"), "citations are optional");
+    assert.ok(!t.includes('"cites" is REQUIRED'));
+    assert.ok(t.includes('{"verdict":"park"') && t.includes("You are pointed at ONE cause at a time"));
     assert.ok(t.includes("A TEST HELPER that calls a handler directly"), "the lesson from the hand repair: a faulty helper is not a faulty app");
   });
   test("an app-deviation is never queued as a code defect for the fix task", () => {

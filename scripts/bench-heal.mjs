@@ -243,7 +243,7 @@ async function runModel() {
     if (!key) throw new Error("No OpenRouter key: run `yimpim setup`.");
     const client = new OpenRouterClient(key, config);
     const models = config.models.repair ?? config.models.editor;
-    const trace = { calls: 0, refusedNoCite: 0, refusedBadCite: 0, madeWorse: 0, callMs: [], steps: [], batches: [], nothingNew: 0, alreadyResent: 0 };
+    const trace = { calls: 0, strongCalls: 0, refusedNoCite: 0, refusedBadCite: 0, madeWorse: 0, callMs: [], steps: [], batches: [], nothingNew: 0, alreadyResent: 0 };
     const log = [];
     const call = async (messages, label, json) => {
       const last = String(messages[messages.length - 1]?.content ?? "");
@@ -281,7 +281,19 @@ async function runModel() {
     let report;
     let crashed;
     try {
-      report = await healTests({ repoRoot: REPO, all: false, call, requireCites: true, log: (l) => { log.push(l); console.log("  " + l); } });
+      // The same hand-off the CLI makes: what the first model parks goes to the stronger one (every model after the first in the repair chain).
+      const escalate =
+        models.length > 1 && !has("--no-escalate")
+          ? async (messages, label, json) => {
+              const t = Date.now();
+              const reply = await runLabeledCompletion({ client, models: models.slice(1), messages, agentName: "REPAIR", jsonMode: json, reason: `${label} (stronger model)` });
+              trace.calls++;
+              trace.strongCalls++;
+              trace.callMs.push(Date.now() - t);
+              return reply;
+            }
+          : undefined;
+      report = await healTests({ repoRoot: REPO, all: false, call, escalate, log: (l) => { log.push(l); console.log("  " + l); } });
     } catch (err) {
       crashed = String(err?.message ?? err);
       console.log("  the heal crashed: " + crashed);
@@ -304,6 +316,9 @@ async function runModel() {
       crashed,
       seconds,
       modelCalls: trace.calls,
+      strongCalls: trace.strongCalls,
+      firstModel: models[0],
+      strongModels: models.slice(1),
       refusedNoCite: trace.refusedNoCite,
       refusedBadCite: trace.refusedBadCite,
       madeWorse: trace.madeWorse,
@@ -326,6 +341,7 @@ async function runModel() {
       console.log(`  what it answered, by kind: ${JSON.stringify(kinds)}`);
     }
     console.log(`  batches with skipped edits: ${trace.batches.length}${trace.batches.length ? " (" + trace.batches.map((b) => `${b.applied} new / ${b.already} already / ${b.skipped} skipped`).join(", ") + ")" : ""}; already-applied edits resent: ${trace.alreadyResent}; \"nothing new\" turns: ${trace.nothingNew}`);
+    console.log(`  first model: ${models[0]}; stronger model(s): ${models.slice(1).join(", ") || "none"}${has("--no-escalate") ? " (escalation switched off)" : ""}; calls to the stronger model: ${trace.strongCalls}`);
     console.log(`  refused for no citation: ${trace.refusedNoCite}, bad citation: ${trace.refusedBadCite}, undone as worse: ${trace.madeWorse}, app-deviations: ${result.deviations.length}`);
     for (const p of scored.integrity.problems) console.log("  INTEGRITY: " + p);
     for (const w of scored.integrity.warnings) console.log("  warning: " + w);

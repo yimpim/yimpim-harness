@@ -131,7 +131,7 @@ describe("a file that is part stale test and part code defect", () => {
       })
     ).results[0];
     assert.equal(n, 3, "it was not handed on after the first answer, although the count had dropped");
-    assert.match(prompts[1], /Go through EVERY cause that still fails/);
+    assert.match(prompts[1], /FOCUS: work on ONE cause at a time|Go through EVERY cause that still fails/);
     assert.match(prompts[1], /3 failing|label 0/, "it was shown the stale-copy failures that were still there");
     assert.equal(r.status, "code-bug");
     assert.equal(r.partial, true);

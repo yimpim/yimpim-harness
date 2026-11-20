@@ -20,7 +20,8 @@ describe("the readers of a test failure", () => {
   });
   test("the heal worker itself uses it for the first prompt and for every retry", () => {
     const src = read("../src/testHeal.ts");
-    // The first prompt, the retry after a failing edit, and the "nothing new to apply" turn (when every edit sent was already in the file).
-    assert.equal(src.split("failureText(current.output, repoRoot, file)").length - 1, 3);
+    // The first prompt, the retry after a failing edit, the "nothing new to apply" turn (every edit sent was already in the file), and the hand-off to
+    // the stronger model.
+    assert.equal(src.split("failureText(current.output, repoRoot, file)").length - 1, 4);
   });
 });
