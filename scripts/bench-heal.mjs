@@ -305,6 +305,11 @@ async function runModel() {
                 asked = j.need ? JSON.stringify(j.need).slice(0, 200) : `edits=${Array.isArray(j.edits) ? j.edits.length : 0}`;
               } catch {}
               trace.strong.push({ n: trace.strongCalls, seconds: Math.round((Date.now() - t) / 100) / 10, shownChars: last.length, promptChars: messages.reduce((n, m) => n + String(m.content ?? "").length, 0), replyChars: String(reply).length, answered: kind, asked });
+              // A reply of nothing is the thing to understand: keep the exact request so it can be replayed against the model directly.
+              if (kind === "EMPTY") {
+                fs.mkdirSync(path.join(BENCH, "results", "empty"), { recursive: true });
+                fs.writeFileSync(path.join(BENCH, "results", "empty", `strong-call-${trace.strongCalls}-${Date.now()}.json`), JSON.stringify({ models: models.slice(1), json, messages }));
+              }
               return reply;
             }
           : undefined;

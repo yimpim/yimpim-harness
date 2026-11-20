@@ -529,14 +529,18 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     // A "mixed" answer with nothing to change in the test is simply a code defect.
     if (verdict === "code-bug" || deviation || (mixed && !hasChange)) {
       // The first model's claim that what is left is the CODE's is a claim, and it has been wrong before (a faulty test helper called an app defect). Before a
-      // fix task changes product code on its word, the stronger model looks: every cause still failing is handed over, marked as "it believes the app is wrong".
+      // fix task changes product code on its word, the stronger model looks. The claim is about the cause the worker was pointed at, so only THAT cause is
+      // parked (marked "it believes the app is wrong") and the worker goes on to the next one: a claim about one cause must not end its work on the easy ones.
       // The stronger model's own verdict is final.
       if (stage === "first" && opts.escalate) {
-        const rest = causesOf(current.output).filter((c) => !parked.has(c.key));
-        if (rest.length > 0) {
+        const f = focusOf();
+        if (f) {
           const why = [reason, ...codeBugs].join(" ").replace(/\s+/g, " ").slice(0, 600);
-          for (const c of rest) parked.set(c.key, { kind: "code", reason: why, message: c.message, count: c.count });
-          return "parked-out";
+          parked.set(f.key, { kind: "code", reason: why, message: f.message, count: f.count });
+          if (!focusOf()) return "parked-out";
+          messages.push({ role: "assistant", content: reply }, { role: "user", content: `Parked as the app's problem, for the stronger model to check: [${f.count}×] ${f.message}.\n\n${focusText()}` });
+          retryUnchanged = true;
+          continue;
         }
       }
       // Having ALREADY fixed the test-side causes and then been shown what still fails, the worker says what is left is the code: the test
