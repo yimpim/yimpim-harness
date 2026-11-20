@@ -691,6 +691,29 @@ export function plannerReadBudget(discoveryTargetCount: number): number {
  * assertPlannerFileAllowed), not by asking nicely, so a hallucinated path or
  * one read past the cap is refused rather than silently obeyed.
  */
+/**
+ * Run one test file in a heal sandbox. DELIBERATELY not part of TOOLS_SCHEMA: an agent that is not given an explicit tool list gets
+ * TOOLS_SCHEMA, and none of them may be offered a way to run tests that only a sandbox makes safe.
+ */
+export const RUN_TEST_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "run_test",
+    description:
+      "Run a test file in the sandbox, optionally only the tests whose name matches namePattern (a regular expression, as jest -t / vitest -t). " +
+      "Returns the runner's full output. Use it to check a hypothesis: add console.log anywhere (test or app code), change a wait, run, read. " +
+      "Nothing you change here reaches the real project except the test file, and only if it makes more tests pass without breaking any.",
+    parameters: {
+      type: "object",
+      properties: {
+        file: { type: "string", description: "Repo-relative test file, e.g. __tests__/dashboard.test.ts" },
+        namePattern: { type: "string", description: 'Optional. Only tests whose full name matches. Example: "derives Send/Stop"' },
+      },
+      required: ["file"],
+    },
+  },
+};
+
 export const PLANNER_TOOLS_SCHEMA = [
   {
     type: "function" as const,
@@ -1034,6 +1057,17 @@ export class AgentTools {
   /** A security review that may clear a normal-risk command before a person is asked (see commandReview.ts). */
   public setCommandReviewer(fn: ((req: ReviewRequest) => Promise<ReviewOutcome>) | undefined): void {
     this.commandReviewer = fn;
+  }
+
+  /** Set only on the AgentTools of a heal sandbox: what `run_test` does. */
+  private sandboxRunTest?: (args: Record<string, unknown>) => Promise<string>;
+  public bindSandboxRunTest(fn: ((args: Record<string, unknown>) => Promise<string>) | undefined): void {
+    this.sandboxRunTest = fn;
+  }
+  /** `run_test`: only a heal sandbox binds it; anywhere else it is refused, so no ordinary agent can run tests this way. */
+  public async runTest(args: Record<string, unknown>): Promise<string> {
+    if (!this.sandboxRunTest) return "run_test is only available in a heal sandbox";
+    return this.sandboxRunTest(args);
   }
   /** Results of run_dependency_install already produced this phase (reset by beginPhase). */
   private dependencyInstallMemo = new Map<string, string>();
