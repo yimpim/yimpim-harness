@@ -386,6 +386,19 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     const hasChange = Boolean(parseEdits(parsed?.edits)) || (typeof parsed?.test === "string" && parsed.test.trim().length > 0);
     // A "mixed" answer with nothing to change in the test is simply a code defect.
     if (verdict === "code-bug" || (mixed && !hasChange)) {
+      // Having ALREADY fixed the test-side causes and then been shown what still fails, the worker says what is left is the code: the test
+      // edits stay (they moved the failure), and only the code defect is handed on. With no progress made, the file goes back as it was.
+      const left = digestFailure(current.output.replace(ANSI, ""), repoRoot, file).total;
+      if (last !== original && left < digest0.total) {
+        const changed = changedLines(original, last);
+        return {
+          file,
+          status: "code-bug",
+          partial: true,
+          note: `${reason} ${codeBugs.join("; ")} Still failing after the test-side fixes: ${left} (the test's out-of-date parts were fixed: ${changed} line${changed === 1 ? "" : "s"} changed)`.replace(/\s+/g, " ").slice(0, 2400),
+          attempts,
+        };
+      }
       fs.writeFileSync(abs, original);
       return { file, status: "code-bug", note: [reason, ...codeBugs].join(" ").slice(0, 2000), attempts };
     }
@@ -451,27 +464,20 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       const changed = changedLines(original, next);
       return { file, status: "healed", note: `${reason} (${changed} line${changed === 1 ? "" : "s"} changed)`, attempts };
     }
-    // Mixed: the test-side causes are fixed and what still fails is what the worker called code defects. Handing that on is only right if
-    // fixing the test side actually moved the failure (fewer failing, or a different failure than the one it started with); a "mixed" answer
-    // whose edits changed nothing is not progress, and the loop goes on as it always did.
-    if (mixed && codeBugs.length > 0) {
-      const now = digestFailure(current.output.replace(ANSI, ""), repoRoot, file).total;
-      if (now < digest0.total || failureKey(current.output) !== failureKey(first.output)) {
-        const changed = changedLines(original, next);
-        return {
-          file,
-          status: "code-bug",
-          partial: true,
-          note: `${reason} What is left is the code (${now} failing): ${codeBugs.join("; ")} (the test's out-of-date parts were fixed: ${changed} line${changed === 1 ? "" : "s"} changed)`.slice(0, 2400),
-          attempts,
-        };
-      }
-    }
+    // Still failing. Even for a "mixed" answer nothing is handed on yet: the worker has only SAID what is left is code, and a smaller failure
+    // count proves nothing (55 -> 35 left 34 failures that were the test's own). It is shown what really still fails, and decides again: if
+    // every remaining cause is the code's it answers code-bug (its edits so far are kept), otherwise it goes on fixing the test.
+    const stillFailing = digestFailure(current.output.replace(ANSI, ""), repoRoot, file).total;
     messages.push(
       { role: "assistant", content: reply },
       {
         role: "user",
-        content: `Your change is applied and the file still fails.\n${failureText(current.output, repoRoot, file)}\n\nReturn the corrected JSON again (edits are applied to the file as it is now).`,
+        content:
+          `Your change is applied and the file still fails (${stillFailing} failing, ${digest0.total} before).\n${failureText(current.output, repoRoot, file)}\n\n` +
+          `Go through EVERY cause that still fails, not only the one you named: a cause is the code's only if the test is right and the app does the wrong thing. ` +
+          `If any is still the test's own (a helper that counts wrongly, a changed label, a stale mock), keep fixing it: return the next edits. ` +
+          `Only when every remaining cause is the code's, answer {"verdict":"code-bug","reason":"...","codeBugs":[...]} with no edits (your edits so far are kept). ` +
+          `Edits are applied to the file as it is now.`,
       }
     );
   }

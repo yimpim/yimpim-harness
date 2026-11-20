@@ -16,6 +16,9 @@ import { execFileSync } from "child_process";
 import type { Cluster, Digest } from "./failureDigest.js";
 import { isTestPath } from "./focusTests.js";
 
+/** Files an agent or a tool leaves behind (test reports, scratch scripts, the harness's own state): they hold the app's text without being the app. */
+const SCRATCH = [":(exclude).agent", ":(exclude).jest*", ":(exclude)*/.jest*", ":(exclude)jest-*", ":(exclude)*/jest-*", ":(exclude)*report*", ":(exclude)*summary*", ":(exclude)*failures*", ":(exclude)PROGRESS.md"];
+
 const posix = (p: string) => p.replace(/\\/g, "/");
 
 function git(repoRoot: string, args: string[]): string {
@@ -133,7 +136,7 @@ const snippet = (s: string) => s.replace(/\s+/g, " ").slice(0, 40).trim();
 function whenTextAppeared(repoRoot: string, text: string, notInTests = true): { hash: string; date: string; subject: string; file?: string } | undefined {
   const s = snippet(text);
   if (s.length < 4) return undefined;
-  const log = git(repoRoot, ["log", `-S${s}`, "--format=%h%x09%ad%x09%s", "--date=short", "--reverse", "--", ".", ":(exclude)node_modules", ...(notInTests ? [":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference"] : [])]).split(/\r?\n/).find(Boolean);
+  const log = git(repoRoot, ["log", `-S${s}`, "--format=%h%x09%ad%x09%s", "--date=short", "--reverse", "--", ".", ":(exclude)node_modules", ...(notInTests ? [":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ...SCRATCH] : [])]).split(/\r?\n/).find(Boolean);
   if (!log) return undefined;
   const [hash, date, ...rest] = log.split("\t");
   return { hash, date, subject: rest.join("\t") };
@@ -167,7 +170,7 @@ function textTheTestLooksFor(repoRoot: string, cluster: Cluster): string[] {
   for (const text of textsOnLine(line)) {
     const probe = snippet(text);
     // The app's own code, and separately the written spec: a text only the spec has is a text the CODE is missing.
-    const inCode = git(repoRoot, ["grep", "-nIF", probe, "--", ":(exclude)node_modules", ":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ":(exclude)docs", ":(exclude)*.md"]).split(/\r?\n/).find(Boolean);
+    const inCode = git(repoRoot, ["grep", "-nIF", probe, "--", ":(exclude)node_modules", ":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ...SCRATCH, ":(exclude)docs", ":(exclude)*.md"]).split(/\r?\n/).find(Boolean);
     if (inCode) {
       out.push(`The test looks for "${probe}", which the app still has at ${inCode.split(":").slice(0, 2).join(":")}.`);
       continue;
@@ -179,7 +182,7 @@ function textTheTestLooksFor(repoRoot: string, cluster: Cluster): string[] {
       );
       continue;
     }
-    const last = git(repoRoot, ["log", `-S${probe}`, "--format=%h%x09%ad%x09%s", "--date=short", "-n", "1", "--", ".", ":(exclude)node_modules", ":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference"]).split(/\r?\n/).find(Boolean);
+    const last = git(repoRoot, ["log", `-S${probe}`, "--format=%h%x09%ad%x09%s", "--date=short", "-n", "1", "--", ".", ":(exclude)node_modules", ":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ...SCRATCH]).split(/\r?\n/).find(Boolean);
     const [hash, date, ...subject] = (last ?? "").split("\t");
     out.push(`The test looks for "${probe}" and nothing in the app's own code contains it any more${hash ? ` (last changed in ${hash} on ${date}: "${subject.join(" ").slice(0, 90)}")` : ""}.`);
   }
@@ -220,7 +223,7 @@ export function evidenceFor(repoRoot: string, testFile: string, cluster: Cluster
   const er = expectedAndReceived(cluster.detail ?? cluster.message);
   if (er) {
     const appeared = whenTextAppeared(repoRoot, er.received);
-    const expectedStill = git(repoRoot, ["grep", "-nIF", snippet(er.expected), "--", ":(exclude)node_modules", ":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference"]).split(/\r?\n/).find(Boolean);
+    const expectedStill = git(repoRoot, ["grep", "-nIF", snippet(er.expected), "--", ":(exclude)node_modules", ":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ...SCRATCH]).split(/\r?\n/).find(Boolean);
     lines.push(`The test expects "${snippet(er.expected)}" and the app gives "${snippet(er.received)}".`);
     if (appeared) lines.push(`The app's "${snippet(er.received)}" first appeared in ${appeared.hash} on ${appeared.date}: "${appeared.subject.slice(0, 90)}".`);
     lines.push(expectedStill ? `The app still has "${snippet(er.expected)}" at ${expectedStill.split(":").slice(0, 2).join(":")}.` : `Nothing in the app's own code contains "${snippet(er.expected)}" any more: the app changed away from what the test expects.`);
