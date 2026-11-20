@@ -432,10 +432,10 @@ describe("OpenRouterClient — insufficient credits (HTTP 402)", () => {
     };
 
     const client = new OpenRouterClient("test-key");
-    // The real backoff (15-60s) would make this test hang for minutes —
+    // The real wait between credit checks (4 minutes) would make this test hang —
     // standing in for it is the point: what's under test is that the call
     // is RETRIED, not how long it waits between attempts.
-    (client as any).delay = async () => {};
+    (client as any).creditsDelay = async () => {};
 
     try {
       const message = await quietly(() => client.complete(["test/primary", "test/backup"], [{ role: "user", content: "hi" }]));
@@ -461,7 +461,7 @@ describe("OpenRouterClient — insufficient credits (HTTP 402)", () => {
     };
 
     const client = new OpenRouterClient("test-key");
-    (client as any).delay = async () => {};
+    (client as any).creditsDelay = async () => {};
 
     const received: any[] = [];
     const unsubscribe = events.onEmit((e) => {
@@ -493,7 +493,7 @@ describe("OpenRouterClient — insufficient credits (HTTP 402)", () => {
     };
 
     const client = new OpenRouterClient("test-key");
-    (client as any).delay = async () => {};
+    (client as any).creditsDelay = async () => {};
 
     const received: any[] = [];
     const unsubscribe = events.onEmit((e) => {

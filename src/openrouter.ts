@@ -68,6 +68,8 @@ export interface ModelHealth {
 
 /** First cooldown after a model fails every attempt of a call; doubles per
  *  consecutive failure up to the cap. */
+/** When the account is out of credits: how long between checks. Four minutes, indefinitely: one request per check, never a burst. */
+export const CREDITS_RECHECK_MS = 4 * 60_000;
 export const MODEL_COOLDOWN_BASE_MS = 3 * 60_000;
 export const MODEL_COOLDOWN_MAX_MS = 20 * 60_000;
 
@@ -130,6 +132,29 @@ export class OpenRouterClient {
 
   private async delay(ms: number): Promise<void> {
     return new Promise((res) => setTimeout(res, ms));
+  }
+
+  /** How long to wait between checks when the account is out of credits. A field (not only the constant) so a test can shorten it. */
+  public creditsRecheckMs = CREDITS_RECHECK_MS;
+
+  /**
+   * The wait between credit checks. Unlike `delay`, a user Stop ends it at once (a wait this long that ignored Stop would leave a stopped run
+   * hanging for minutes), by throwing the same AbortedError the rest of the client uses for a Stop.
+   */
+  private async creditsDelay(ms: number): Promise<void> {
+    if (runControl.isAborted) throw new AbortedError(runControl.reason);
+    const signal = runControl.signal;
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new AbortedError(runControl.reason));
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   /**
@@ -405,12 +430,13 @@ export class OpenRouterClient {
     }
     let lastError: Error | null = null;
     // Insufficient-credits retries (see the 402 branch below) are uncounted
-    // against maxRetriesPerModel on purpose — this caps them separately so a
-    // truly abandoned/unattended run still eventually gives up rather than
-    // waiting forever. ~60 waits at up to 60s each is roughly an hour of
-    // patience, generous for "go add credits" without being unbounded.
-    let creditsRetryCount = 0;
-    const maxCreditsRetries = 60;
+    // against maxRetriesPerModel, and they are NOT capped: the user's cost
+    // control is the limit they set on their own OpenRouter key, and when
+    // the money runs out the run waits for it, checking again every
+    // CREDITS_RECHECK_MS (one request, never a burst), and carries on
+    // exactly where it was once credits are back. A user Stop ends the wait.
+    // When the first 402 of this call arrived, for the "waiting since" line.
+    let creditsSince: number | undefined;
     // 3 attempts = the initial call plus 2 retries on the SAME model before
     // falling through to the next one in the chain (the loop below). This
     // timeout only ever guards time-to-first-byte (see firstChunkTimer) — a
@@ -615,8 +641,9 @@ export class OpenRouterClient {
               // SAME request, uncounted against the normal 3-attempt budget
               // (via the attempt-- below), so a user who sees the notification
               // and adds credits gets seamless continuation with zero lost
-              // work. creditsRetryCount still caps the total wait so a
-              // genuinely abandoned/unattended run doesn't hang forever.
+              // work. There is no cap on the wait: the user's own limit on
+              // their OpenRouter key is the cost control, and a user Stop ends
+              // the wait (creditsDelay). It checks every CREDITS_RECHECK_MS.
               if (response.status === 402) {
                 if (!this.creditsWarningActive) {
                   this.creditsWarningActive = true;
@@ -637,20 +664,16 @@ export class OpenRouterClient {
                   });
                 }
 
-                creditsRetryCount++;
-                if (creditsRetryCount <= maxCreditsRetries) {
-                  const waitMs = Math.min(15_000 * creditsRetryCount, 60_000);
-                  console.log(
-                    `\n[STATUS 402] Insufficient credits — waiting ${(waitMs / 1000).toFixed(0)}s and retrying ` +
-                      `(add credits any time, no need to restart)...`
-                  );
-                  await this.delay(waitMs);
-                  attempt--; // keep retrying this model without spending the shared 3-attempt budget
-                  continue;
-                }
+                creditsSince ??= Date.now();
+                const waitMs = this.creditsRecheckMs;
+                const since = new Date(creditsSince).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
                 console.log(
-                  `\n[STATUS 402] Still no credits after ${maxCreditsRetries} waits — giving up on this call.`
+                  `\n[CREDITS] Out of OpenRouter credits. Checking again in ${Math.round(waitMs / 60_000)} min ` +
+                    `(waiting since ${since}). Add credits any time: no need to restart.`
                 );
+                await this.creditsDelay(waitMs);
+                attempt--; // keep retrying this model without spending the shared 3-attempt budget
+                continue;
               }
 
               // The model refused `reasoning: none` (its thinking cannot be turned off): say so once and send the call again without it,
