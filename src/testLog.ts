@@ -195,7 +195,8 @@ export function staleSince(root: string, exclude: string[] = []): string[] {
 
 /** A test is left alone by the automatic heal in a phase once its strikes reach this (one real failure, or two failed calls). */
 export const HEAL_PARK_AT = 2;
-const HEALED_STATUSES = new Set(["healed", "already-green", "rewritten", "removed"]);
+// An app-deviation is a settled finding, not a heal that failed, so it earns no strike.
+const HEALED_STATUSES = new Set(["healed", "already-green", "rewritten", "removed", "app-deviation"]);
 
 /** Folds one heal attempt into the test's record: a fix clears it, a failure to fix adds a strike. */
 export function recordHealOutcome(root: string, file: string, r: { status: string; note: string }): void {
@@ -236,7 +237,7 @@ export function verdictFor(root: string, file: string): StoredVerdict | undefine
   const e = loadLog(root).files[posix(file)];
   const v = e?.verdict;
   if (!v) return undefined;
-  if (v.version !== HEAL_LOGIC_VERSION && v.status !== "code-bug") return undefined;
+  if (v.version !== HEAL_LOGIC_VERSION && v.status !== "code-bug" && v.status !== "app-deviation") return undefined;
   const fp = fingerprints(root, [posix(file)]).get(posix(file));
   return fp && fp.fp === v.fingerprint ? v : undefined;
 }

@@ -20,6 +20,7 @@ import { isTestPath } from "./focusTests.js";
 import { parseLenient } from "./jsonRepair.js";
 import { runSuite, failingTestFiles, type SuiteRun } from "./testRun.js";
 import { runSuiteLogged, unchangedGreen, verdictFor, saveVerdict, recordHealOutcome } from "./testLog.js";
+import { verifyCites, citeProblem, madeWorse, testsFailing } from "./healAuthority.js";
 import { listTestFiles } from "./focusTests.js";
 import { reachableFiles } from "./testGraph.js";
 import { digestFailure } from "./failureDigest.js";
@@ -31,7 +32,7 @@ export { runSuite, failingTestFiles, type SuiteRun };
 
 const execFileAsync = promisify(execFile);
 
-export type HealStatus = "healed" | "already-green" | "code-bug" | "unclear" | "unhealed" | "rewritten" | "removed";
+export type HealStatus = "healed" | "already-green" | "code-bug" | "app-deviation" | "unclear" | "unhealed" | "rewritten" | "removed";
 
 export interface HealResult {
   file: string;
@@ -46,6 +47,11 @@ export interface HealResult {
    * which is what a fix task is for. Without it a file that is part stale test and part real bug could be neither healed nor handed on.
    */
   partial?: boolean;
+  /**
+   * Places where the APP contradicts the written spec that the test follows. Nothing is changed for these and nothing is sent to a fix task:
+   * whether the spec or the app is right is a decision for a person, and a Planner asked to "fix" it would rewrite product code.
+   */
+  deviations?: string[];
 }
 
 export type HealCall = (messages: { role: "system" | "user" | "assistant"; content: string }[], label: string, json: boolean) => Promise<string>;
@@ -62,6 +68,11 @@ export interface HealOptions {
   all?: boolean;
   /** Replaces the real test runner (tests). */
   run?: (repoRoot: string, files: string[]) => Promise<SuiteRun>;
+  /**
+   * An answer that edits the test (or says the app deviates from its spec) must cite an authority outside the test, and every citation must
+   * exist (healAuthority.ts). On for real runs; off by default so a caller that does not ask for it behaves as before.
+   */
+  requireCites?: boolean;
 }
 
 const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
@@ -157,19 +168,22 @@ const SYSTEM = `You repair a failing test file. Tests and code drifted apart. Fa
 Work like this.
 1. Read the FAILURE section: the distinct causes with how many tests each breaks, the first line of the project's own code each points at, and the EVIDENCE: facts taken from the repository, not guessed (what exists, which test mocks lack what, which commit changed what and whether it touched the test).
 2. Decide each cause on its own. Who is wrong?
-   - STALE TEST: the test is out of date. A mock (jest.mock) that lacks something the code now calls. Setup the code now needs (a provider, a mocked module, an AppState or timer value, a flag). An expectation about text, labels or structure that the app changed ON PURPOSE (the evidence shows the commit, or the app no longer contains the old text anywhere). Fix these in the test file. A module that fails to load under a test runner is NOT a code bug.
+   - STALE TEST: the test is out of date. A mock (jest.mock) that lacks something the code now calls. Setup the code now needs (a provider, a mocked module, an AppState or timer value, a flag). An expectation about text, labels or structure that the app changed ON PURPOSE (the evidence shows the commit, or the app no longer contains the old text anywhere). Fix these in the test file. A module that fails to load under a test runner is NOT a code bug. A TEST HELPER that calls a handler directly (props.onPress(), a mock callback) bypasses what the real framework applies first (a disabled prop that swallows the press, a guard, event batching): a test that finds a control "firing while disabled" through such a helper has a faulty helper, not a faulty app. Read the helper before blaming the code.
    - CODE DEFECT: the code is wrong. The test asserts documented or sensible behaviour (its comments often cite a spec section) and the code does something else: a regression. Do NOT change the test for these. Say what is wrong and where, as file:line.
    - UNSURE: say so for that cause. Never bend a test to match code that looks wrong, and never change code to match a test that looks old.
+   Who is RIGHT is decided by the strongest authority, in this order: (1) the written spec and docs in the repository (docs/, *.md); (2) the commit that last changed the app's behaviour (the evidence names it) and the app's own doc comments (a @deprecated, a note that something is intentional); (3) the app's current code; (4) the test. A test that disagrees with a stronger authority is stale. A test that AGREES with the spec while the app disagrees means the APP deviates from its spec: that is neither a test fix nor yours to change, so say app-deviation (below).
 3. Check a hunch instead of guessing. You may ask to see lines, to search the project, or to run a probe (below).
 4. Make the SMALLEST edits that fix the test-side causes. If the mock lacks something, look at how other tests mock the same module and match them.
 Rules for edits: keep every case that is still meaningful, update expected values and calls to match the code, never delete assertions or skip tests to make them pass, never loosen an assertion into one that cannot fail. Mock only what the test already mocked, plus what the code now needs.
 
 Answer with JSON only, one of:
- {"verdict":"stale-test","reason":"one or two sentences: what was wrong","edits":[{"find":"exact existing text","replace":"new text"}]}
-     every cause is test-side, and these edits fix them.
- {"verdict":"mixed","reason":"...","edits":[...],"codeBugs":["path:line what is wrong", ...]}
-     some causes are test-side (the edits fix them) and the rest are code defects, each named with its file and line.
- {"verdict":"code-bug","reason":"path:line what is wrong"}      every cause is a code defect; the test is not changed.
+ {"verdict":"stale-test","reason":"one or two sentences: what was wrong","cites":[{"at":"docs/SPEC.md:532","quote":"exact words copied from near that line"},"512f0c7"],"edits":[{"find":"exact existing text","replace":"new text"}]}
+     every cause is test-side, and these edits fix them. "cites" is REQUIRED with any edit, and with any claim that the code is wrong: at least one authority OUTSIDE the test file. Cite a place as {"at":"path:line","quote":"the exact words you rely on, copied from the file"}, or a commit hash from the evidence. Citations are CHECKED: the quote must appear in that file within a few lines of the line you cite, so read the lines first and copy the words. A citation whose words are not there is refused.
+ {"verdict":"mixed","reason":"...","cites":[...],"edits":[...],"codeBugs":["path:line what is wrong", ...],"appDeviations":["what the spec says, where, and what the app does instead"]}
+     some causes are test-side (the edits fix them) and the rest are code defects, each named with its file and line. "appDeviations" is optional: causes where the test follows the written spec and the app does not.
+ {"verdict":"code-bug","reason":"path:line what is wrong","cites":[{"at":"docs/SPEC.md:532","quote":"..."}]}      every cause is a code defect; the test is not changed. Cite what shows the code is wrong (the spec, a doc comment, the commit): a defect claim with no verified citation is refused.
+ {"verdict":"app-deviation","reason":"...","cites":[{"at":"docs/SPEC.md:532","quote":"..."},{"at":"src/components/X.tsx:1319","quote":"..."}]}
+     the test is right according to the written spec and the app does something else. Nothing is changed or fixed: a person decides which is right. Cite the spec line AND the app line.
  {"verdict":"unclear","reason":"..."}                          only after you have looked and it still does not settle it.
  {"need":["path/one",{"path":"path/two","from":120,"to":260},{"search":"someName"},{"probe":{"file":"__tests__/x.test.ts","before":"the line to print before","log":"String(AppState.currentState)"}}]}
      a string is a whole file; {"path","from","to"} is a range of lines; {"search"} finds where a name is defined, used or mocked; {"probe"} runs a throwaway COPY of the test with one console.log inserted before the line that contains "before", where "log" is a single expression, and shows what it printed. Use it when you need to know a value at run time (is this guard true, what does this mock return). The real test file is never changed by it. Ask instead of guessing.
@@ -384,23 +398,47 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     const mixed = verdict === "mixed";
     const codeBugs: string[] = Array.isArray(parsed?.codeBugs) ? parsed.codeBugs.map((c: unknown) => String(c).trim()).filter(Boolean) : [];
     const hasChange = Boolean(parseEdits(parsed?.edits)) || (typeof parsed?.test === "string" && parsed.test.trim().length > 0);
+    const deviations: string[] = Array.isArray(parsed?.appDeviations) ? parsed.appDeviations.map((c: unknown) => String(c).trim()).filter(Boolean) : [];
+    const deviation = verdict === "app-deviation";
+    const withDeviations = deviations.length > 0 ? { deviations } : {};
+
+    // An answer that changes the test, or says the app differs from its spec, has to rest on something stronger than the test itself.
+    // Calling the code wrong matters as much as editing the test: it is what sends a fix task to change product code.
+    if (opts.requireCites && (deviation || verdict === "code-bug" || ((verdict === "stale-test" || mixed) && hasChange) || (mixed && codeBugs.length > 0))) {
+      const problem = citeProblem(verifyCites(repoRoot, parsed?.cites, file, { requireQuote: true }));
+      if (problem) {
+        messages.push({ role: "assistant", content: reply }, { role: "user", content: `Not applied: ${problem}` });
+        const k = `cite:${problem}`;
+        if (seen.has(k)) {
+          fs.writeFileSync(abs, original);
+          return { file, status: "unhealed", note: "its answer rested on no authority outside the test that could be verified, so nothing was changed", attempts };
+        }
+        seen.add(k);
+        retryUnchanged = true;
+        continue;
+      }
+    }
+
     // A "mixed" answer with nothing to change in the test is simply a code defect.
-    if (verdict === "code-bug" || (mixed && !hasChange)) {
+    if (verdict === "code-bug" || deviation || (mixed && !hasChange)) {
       // Having ALREADY fixed the test-side causes and then been shown what still fails, the worker says what is left is the code: the test
       // edits stay (they moved the failure), and only the code defect is handed on. With no progress made, the file goes back as it was.
       const left = digestFailure(current.output.replace(ANSI, ""), repoRoot, file).total;
-      if (last !== original && left < digest0.total) {
+      // Progress is fewer failing, or a file that could not load now loads (its failures were hidden behind the load error, so the count rises).
+      const loadFixed = testsFailing(first.output) === undefined && testsFailing(current.output) !== undefined;
+      if (last !== original && (left < digest0.total || loadFixed)) {
         const changed = changedLines(original, last);
         return {
           file,
-          status: "code-bug",
+          status: deviation ? "app-deviation" : "code-bug",
           partial: true,
           note: `${reason} ${codeBugs.join("; ")} Still failing after the test-side fixes: ${left} (the test's out-of-date parts were fixed: ${changed} line${changed === 1 ? "" : "s"} changed)`.replace(/\s+/g, " ").slice(0, 2400),
           attempts,
+          ...withDeviations,
         };
       }
       fs.writeFileSync(abs, original);
-      return { file, status: "code-bug", note: [reason, ...codeBugs].join(" ").slice(0, 2000), attempts };
+      return { file, status: deviation ? "app-deviation" : "code-bug", note: [reason, ...codeBugs].join(" ").slice(0, 2000), attempts, ...withDeviations };
     }
     if (verdict !== "stale-test" && !mixed) {
       fs.writeFileSync(abs, original);
@@ -454,6 +492,8 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       retryUnchanged = true;
       continue;
     }
+    const undoTo = last;
+    const runBefore = current;
     fs.writeFileSync(abs, next);
     last = next;
     current = await run(repoRoot, [file]);
@@ -462,7 +502,33 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       // How much it changed, said plainly and never judged: a stale mock is a few lines, a renamed API can be a hundred, and which
       // one this was is for the person reading the report (and the diff) to see, not for a fixed number to decide.
       const changed = changedLines(original, next);
-      return { file, status: "healed", note: `${reason} (${changed} line${changed === 1 ? "" : "s"} changed)`, attempts };
+      return { file, status: "healed", note: `${reason} (${changed} line${changed === 1 ? "" : "s"} changed)`, attempts, ...withDeviations };
+    }
+    // An edit must not leave MORE tests failing than the run before it had. If it did (or the file no longer runs), it is undone and the worker is
+    // told, so a bad batch can never be what the file ends up as. A file that could not load before has no count to compare with.
+    const direction = madeWorse(runBefore.output, current.output);
+    if (direction.worse) {
+      fs.writeFileSync(abs, undoTo);
+      last = undoTo;
+      current = runBefore;
+      trace.output = runBefore.output;
+      messages.push(
+        { role: "assistant", content: reply },
+        {
+          role: "user",
+          content:
+            `That change made it WORSE: ${direction.was} test(s) failing before, ${direction.now === undefined ? "and now the file does not run at all" : `${direction.now} after`}. It was undone: the file is as it was before that change. ` +
+            `Find out why it got worse (look at what the new failures are) and try a smaller or different edit.`,
+        }
+      );
+      const k = `worse:${direction.now ?? "none"}:${next.length}:${next.slice(0, 200)}`;
+      if (seen.has(k)) {
+        fs.writeFileSync(abs, original);
+        return { file, status: "unhealed", note: "the same change made more tests fail again, so the file was put back as it was", attempts };
+      }
+      seen.add(k);
+      retryUnchanged = true;
+      continue;
     }
     // Still failing. Even for a "mixed" answer nothing is handed on yet: the worker has only SAID what is left is code, and a smaller failure
     // count proves nothing (55 -> 35 left 34 failures that were the test's own). It is shown what really still fails, and decides again: if
@@ -476,7 +542,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
           `Your change is applied and the file still fails (${stillFailing} failing, ${digest0.total} before).\n${failureText(current.output, repoRoot, file)}\n\n` +
           `Go through EVERY cause that still fails, not only the one you named: a cause is the code's only if the test is right and the app does the wrong thing. ` +
           `If any is still the test's own (a helper that counts wrongly, a changed label, a stale mock), keep fixing it: return the next edits. ` +
-          `Only when every remaining cause is the code's, answer {"verdict":"code-bug","reason":"...","codeBugs":[...]} with no edits (your edits so far are kept). ` +
+          `Only when every remaining cause is the code's, answer {"verdict":"code-bug","reason":"...","cites":[{"at":"path:line","quote":"exact words"}],"codeBugs":[...]} with no edits (your edits so far are kept). ` +
           `Edits are applied to the file as it is now.`,
       }
     );
@@ -773,7 +839,7 @@ export async function healTests(opts: HealOptions): Promise<HealReport> {
     } catch {
       return undefined;
     }
-    if (!v || !["code-bug", "unclear", "unhealed"].includes(v.status)) return undefined;
+    if (!v || !["code-bug", "app-deviation", "unclear", "unhealed"].includes(v.status)) return undefined;
     return { file: f, status: v.status as HealStatus, note: `${v.note} (nothing it depends on changed since it was last diagnosed)`, failure: v.failure, attempts: 0 };
   };
   log(`${failing.length} failing test file${failing.length === 1 ? "" : "s"}. One worker each, all at once.`);
@@ -792,7 +858,7 @@ export async function healTests(opts: HealOptions): Promise<HealReport> {
       // A partial result fixed what was test-side and handed the rest on: that is progress, not a failed heal, so it earns no strike.
       if (r.status !== "already-green" && !r.partial) recordHealOutcome(opts.repoRoot, r.file, r);
     } catch {}
-    if ((r.status === "code-bug" || r.status === "unclear" || r.status === "unhealed") && !/the model call failed/.test(r.note)) {
+    if ((r.status === "code-bug" || r.status === "app-deviation" || r.status === "unclear" || r.status === "unhealed") && !/the model call failed/.test(r.note)) {
       try {
         saveVerdict(opts.repoRoot, r.file, { status: r.status, note: r.note.replace(/ \(nothing it depends on changed since it was last diagnosed\)$/, ""), failure: r.failure });
       } catch {}
@@ -805,7 +871,7 @@ export async function healTests(opts: HealOptions): Promise<HealReport> {
 }
 
 const icon = (s: HealStatus) =>
-  s === "healed" || s === "rewritten" ? "✓" : s === "removed" ? "✂" : s === "already-green" ? "·" : s === "code-bug" ? "🐞" : s === "unclear" ? "?" : "✗";
+  s === "healed" || s === "rewritten" ? "✓" : s === "removed" ? "✂" : s === "already-green" ? "·" : s === "code-bug" ? "🐞" : s === "app-deviation" ? "⚖" : s === "unclear" ? "?" : "✗";
 
 export function renderHealReport(r: HealReport): string {
   const unchangedNote = r.unchanged ? ` ${r.unchanged} test file(s) unchanged since their last green run were not rerun.` : "";
@@ -813,13 +879,22 @@ export function renderHealReport(r: HealReport): string {
   if (r.failing.length === 0) return "The suite fails but no failing test file could be read from its output, so nothing was changed.";
   const by = (s: HealStatus) => r.results.filter((x) => x.status === s);
   const lines = [
-    `Test healing: ${r.failing.length} red file(s) before. ${by("healed").length} healed, ${by("already-green").length} already passing alone, ${by("code-bug").length} are code bugs, ${by("rewritten").length} rewritten, ${by("removed").length} removed, ${by("unclear").length + by("unhealed").length} left alone.`,
+    `Test healing: ${r.failing.length} red file(s) before. ${by("healed").length} healed, ${by("already-green").length} already passing alone, ${by("code-bug").length} are code bugs, ${by("app-deviation").length} where the app differs from its spec, ${by("rewritten").length} rewritten, ${by("removed").length} removed, ${by("unclear").length + by("unhealed").length} left alone.`,
   ];
   const bugs = by("code-bug");
   const whole = bugs.filter((b) => !b.partial);
   const partial = bugs.filter((b) => b.partial);
   if (partial.length) lines.push("", "Part test, part code. The out-of-date parts of these tests were fixed; what still fails is the CODE, and a fix is queued for it:", ...partial.map((b) => `  - ${b.file}: ${b.note}`));
   if (whole.length) lines.push("", "The CODE is wrong here (tests left untouched; a fix is queued; a test file is removed afterwards only if nothing in it passes, one that fails in part is kept):", ...whole.map((b) => `  - ${b.file}: ${b.note}`));
+  // The app contradicts the written spec the test follows: nothing was changed and nothing is queued. A person decides which is right.
+  const deviating = r.results.filter((x) => x.status === "app-deviation" || (x.deviations && x.deviations.length > 0));
+  if (deviating.length) {
+    lines.push("", "The APP differs from its written spec here (nothing was changed or queued: you decide which is right):");
+    for (const d of deviating) {
+      if (d.status === "app-deviation") lines.push(`  - ${d.file}: ${d.note}`);
+      for (const x of d.deviations ?? []) lines.push(`  - ${d.file}: ${x}`);
+    }
+  }
   const rewritten = by("rewritten");
   if (rewritten.length) lines.push("", "Rewritten from scratch:", ...rewritten.map((b) => `  - ${b.file}: ${b.note}`));
   const gone = by("removed");
