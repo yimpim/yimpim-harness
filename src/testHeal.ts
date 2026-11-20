@@ -24,7 +24,10 @@ import { verifyCites, citeProblem, madeWorse, testsFailing, testsPassing, regres
 import { beginTrial, endTrial, recoverTrial } from "./healCheckpoint.js";
 import { listTestFiles } from "./focusTests.js";
 import { reachableFiles } from "./testGraph.js";
-import { digestFailure } from "./failureDigest.js";
+import { digestFailure, signatureOf } from "./failureDigest.js";
+import { statsOf } from "./benchScore.js";
+import type { SandboxRun, SandboxResult } from "./healSandbox.js";
+import { AbortedError } from "./remote/control.js";
 import { evidenceText } from "./failureEvidence.js";
 import { applyEditsLenient, parseEdits, presentLargeFile, readRange, searchRepo, runProbe, unseenRanges, LARGE_FILE_LINES } from "./healEdits.js";
 import { removeTest, renderRemoval, recordRemoved } from "./testSettle.js";
@@ -79,6 +82,11 @@ export interface HealOptions {
    * Unset: parked causes are reported as they are.
    */
   escalate?: HealCall;
+  /**
+   * Parked causes are worked in a disposable copy of the project by a tool-using agent (see healSandbox.ts), and only the test file comes back, through
+   * the same per-test ratchet. When it is given, it REPLACES `escalate` (the JSON strong pass is not also run).
+   */
+  sandbox?: SandboxRun;
 }
 
 const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
@@ -169,6 +177,47 @@ export function gutted(before: string, after: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Why a test file the SANDBOX produced is not accepted, before anything is run, or undefined. Stricter than `gutted` (which judges a rewrite by a model
+ * that is allowed to restructure): here the agent is only meant to make failing tests pass, so no test may go missing, assertions may not thin out,
+ * nothing may be skipped, and nothing may be narrowed to run alone.
+ */
+export function candidateProblem(before: string, after: string): string | undefined {
+  const a = statsOf(before);
+  const b = statsOf(after);
+  // First, because a test made `.only` also drops out of the test count and would be reported as a missing test.
+  const focus = (s: string) => (s.match(/\b(?:it|test|describe)\.only\s*\(|\bfit\s*\(|\bfdescribe\s*\(/g) ?? []).length;
+  if (focus(after) > focus(before)) return "it narrows the file to some tests with .only";
+  if (b.tests < a.tests) return `it has ${b.tests} tests where there were ${a.tests}`;
+  if (a.asserts >= 4 && b.asserts < Math.ceil(a.asserts * 0.95)) return `it has ${b.asserts} assertions where there were ${a.asserts}`;
+  if (b.skips > a.skips) return "it skips tests that were running";
+  return undefined;
+}
+
+/** The failing tests whose failure carries this cause's error line (a runner prints "● test name" and then its error). */
+export function testsOfCause(output: string, signature: string): string[] {
+  const out: string[] = [];
+  let name: string | undefined;
+  let hit = false;
+  const close = () => {
+    if (name && hit && !out.includes(name)) out.push(name);
+  };
+  for (const line of output.replace(ANSI, "").split(/\r?\n/)) {
+    const m = /^\s*●\s+(.+?)\s*$/.exec(line);
+    if (m) {
+      close();
+      // a "● Console" section or a suite that failed to load is not a test: what follows it belongs to no test
+      const isTest = !/^Console\b/.test(m[1]) && !/^Test suite failed to run/i.test(m[1]);
+      name = isTest ? m[1] : undefined;
+      hit = false;
+    } else if (name && line.trim() && signatureOf(line) === signature) {
+      hit = true;
+    }
+  }
+  close();
+  return out;
+}
+
 const SYSTEM = `You repair a failing test file. Tests and code drifted apart. Failures usually come from a FEW causes, so handle each CAUSE, not each test.
 
 You are pointed at ONE cause at a time (see FOCUS in the message): do that one, with edits, before thinking about the others. The easy and certain causes come first. What you cannot settle quickly you PARK, and you are given the next one; parked causes are looked at again afterwards by a stronger model. Spending your effort on the hardest cause while the easy ones are untouched is the one thing to avoid.
@@ -244,6 +293,16 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   const abs = path.join(repoRoot, file);
   // A trial edit that was never judged (the process was killed after writing it) is put back to the best state before anything else.
   if (recoverTrial(repoRoot, file)) opts.log?.(`  ↺ ${file}: an edit that was being tried when an earlier run was interrupted was undone.`);
+  // A sandbox copy a killed run left behind is removed (this project's only, and never one in use). Loaded on demand: it pulls in the whole tool loop.
+  if (opts.sandbox) {
+    try {
+      const { pruneStaleSandboxes } = await import("./healSandbox.js");
+      const n = pruneStaleSandboxes(repoRoot);
+      if (n > 0) opts.log?.(`  ↺ ${file}: ${n} leftover sandbox cop${n === 1 ? "y" : "ies"} from an interrupted run removed.`);
+    } catch {
+      // nothing to prune, or git is not available: the heal goes on
+    }
+  }
   let original: string;
   try {
     original = fs.readFileSync(abs, "utf-8");
@@ -747,8 +806,138 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   }
   };
 
+  // ------------------------------------------------------------------------------------------ parked causes, in a sandbox
+  /** One line per parked cause that went to the sandbox, for the report. */
+  const sandboxNotes: string[] = [];
+  /** What the first model changed, short: the sandbox agent reads the file itself. */
+  const describeBatches = (): string =>
+    batches
+      .map((b, i) => `  ${i + 1}. ${b.reason.replace(/\s+/g, " ").slice(0, 120)} (${b.edits.length} edit${b.edits.length === 1 ? "" : "s"})`)
+      .join("\n")
+      .slice(0, 1500);
+  const firstWords = (s: string, n = 140) => s.replace(/\s+/g, " ").trim().slice(0, n);
+
+  /**
+   * A test file the sandbox produced, kept ONLY if it makes strictly more tests pass without breaking any that pass now (the same per-test ratchet every
+   * edit goes through), after a cheap integrity check. Nothing but the test file ever gets here: the app's own code is never written by the heal.
+   * A write-ahead record covers a kill between writing and judging.
+   */
+  const mergeCandidate = async (candidate: string, r: SandboxResult): Promise<{ kept: boolean; why: string; gain: number }> => {
+    if (candidate === last) return { kept: false, why: "it changed nothing", gain: 0 };
+    const problem = candidateProblem(last, candidate);
+    if (problem) return { kept: false, why: `its test file was refused: ${problem}`, gain: 0 };
+    const undoTo = last;
+    const before = current;
+    beginTrial(repoRoot, file, undoTo, candidate);
+    fs.writeFileSync(abs, candidate);
+    let after: SuiteRun;
+    try {
+      after = await run(repoRoot, [file]);
+    } catch (e) {
+      fs.writeFileSync(abs, undoTo);
+      endTrial(repoRoot, file);
+      throw e;
+    }
+    const broke = regressions(before.output, after.output, undoTo, candidate);
+    const worse = madeWorse(before.output, after.output);
+    const gain = (testsPassing(after.output) ?? 0) - (testsPassing(before.output) ?? 0);
+    if (broke.length > 0 || worse.worse || gain <= 0) {
+      fs.writeFileSync(abs, undoTo);
+      endTrial(repoRoot, file);
+      const stillFailing = new Set(failingNames(after.output));
+      const fixed = failingNames(before.output).filter((n) => !stillFailing.has(n));
+      const why =
+        broke.length > 0
+          ? `${fixed.length > 0 ? `it fixed ${fixed.slice(0, 3).join(" | ")}${fixed.length > 3 ? " …" : ""}, but ` : ""}it broke ${broke.slice(0, 3).join(" | ")}${broke.length > 3 ? " …" : ""}, which passed before`
+          : worse.worse
+            ? "it made more tests fail"
+            : "it did not make any more tests pass";
+      return { kept: false, why, gain };
+    }
+    endTrial(repoRoot, file);
+    // What it fixed goes in the ledger (every cause that now has fewer failures), and what it settled is no longer parked.
+    const post = causesOf(after.output);
+    for (const b of causesOf(before.output)) {
+      const fixedCount = b.count - (post.find((x) => x.key === b.key)?.count ?? 0);
+      if (fixedCount > 0) ledger.push({ message: b.message, fixed: fixedCount, by: `sandbox: ${firstWords(r.conclusion, 100)}` });
+    }
+    for (const [k, p] of [...parked]) {
+      const now = post.find((x) => x.key === k);
+      if (!now) parked.delete(k);
+      else if (now.count < p.count) parked.set(k, { ...p, count: now.count });
+    }
+    last = candidate;
+    current = after;
+    trace.output = after.output;
+    return { kept: true, why: `+${gain} passing`, gain };
+  };
+
+  /** Each parked cause, biggest first, goes to the sandbox; what comes back goes through mergeCandidate. */
+  const sandboxParked = async (): Promise<void> => {
+    const done = new Set<string>();
+    for (;;) {
+      const entry = [...parked.entries()].filter(([k]) => !done.has(k)).sort((a, b) => b[1].count - a[1].count)[0];
+      if (!entry) break;
+      const [key, p] = entry;
+      done.add(key);
+      const cause = causesOf(current.output).find((c) => c.key === key);
+      if (!cause) {
+        parked.delete(key); // an earlier merge settled it
+        continue;
+      }
+      let r: SandboxResult;
+      try {
+        r = await opts.sandbox!({
+          repoRoot,
+          file,
+          testText: last,
+          failureOutput: current.output,
+          failureDigest: failureText(current.output, repoRoot, file),
+          cause: { message: cause.message, count: cause.count, tests: testsOfCause(current.output, key), reason: p.reason, kind: p.kind },
+          ledger: ledgerLines(),
+          firstModelNotes: describeBatches(),
+        });
+      } catch (e: any) {
+        if (e instanceof AbortedError) throw e; // a user Stop ends the heal
+        parked.set(key, { ...p, reason: `the sandbox failed: ${firstWords(String(e?.message ?? e), 200)}` });
+        sandboxNotes.push(`sandbox: [${cause.count}×] ${firstWords(cause.message, 80)} → failed: ${firstWords(String(e?.message ?? e), 120)}`);
+        continue;
+      }
+      let verdict: string;
+      if (r.stop === "preflight") {
+        verdict = `not run: ${firstWords(r.conclusion, 200)}`;
+      } else if (r.stop === "code-bug") {
+        const evidence = r.appFilesTouched.length > 0 ? ` (evidence: app files changed in the sandbox: ${r.appFilesTouched.slice(0, 5).join(", ")})` : "";
+        parked.set(key, { ...p, kind: "code", reason: `${r.conclusion}${evidence}`.slice(0, 700) });
+        verdict = `app bug: ${firstWords(r.conclusion, 200)}`;
+      } else if (r.candidate) {
+        const m = await mergeCandidate(r.candidate, r);
+        verdict = m.kept ? `kept (${m.why})` : `not kept: ${m.why}`;
+        if (!m.kept) parked.set(key, { ...p, reason: `the sandbox's change was not kept: ${m.why}` });
+      } else {
+        parked.set(key, { ...p, reason: `the sandbox could not settle it (${r.stop}): ${firstWords(r.conclusion, 300)}` });
+        verdict = `stopped (${r.stop}): ${firstWords(r.conclusion, 200)}`;
+      }
+      const line = `sandbox: [${cause.count}×] ${firstWords(cause.message, 80)} → ${verdict} [${r.runs} test run${r.runs === 1 ? "" : "s"}, $${r.cost.toFixed(2)}]`;
+      sandboxNotes.push(line);
+      opts.log?.(`  ${file}: ${line}`);
+    }
+    // What still fails but is not named (its error text changed after the merges) is named now, so the report does not lose it.
+    const now = causesOf(current.output);
+    for (const k of [...parked.keys()]) if (!now.some((c) => c.key === k)) parked.delete(k);
+    for (const c of now) if (!parked.has(c.key)) parked.set(c.key, { kind: "unsure", reason: "it appeared or changed after the sandbox's changes", message: c.message, count: c.count });
+  };
+
   let outcome = await converse(opts.call, "first");
-  if (outcome === "parked-out" && opts.escalate && parked.size > 0) {
+  if (outcome === "parked-out" && opts.sandbox && parked.size > 0) {
+    opts.log?.(`  ↗ ${file}: ${parked.size} cause${parked.size === 1 ? "" : "s"} the first model could not settle go to the sandbox (a disposable copy of the project where a stronger model runs experiments), with what is already fixed.`);
+    await sandboxParked();
+    if (current.ok) {
+      const changed = changedLines(original, last);
+      return { file, status: "healed", note: `the first model fixed what it could and the sandbox settled the rest. ${sandboxNotes.join(" | ")} (${changed} line${changed === 1 ? "" : "s"} changed)`.slice(0, 2300), attempts };
+    }
+  }
+  if (outcome === "parked-out" && opts.escalate && !opts.sandbox && parked.size > 0) {
     // What the first model could not settle goes to the stronger one, in a fresh conversation that begins by saying what is ALREADY FIXED. The ratchet
     // enforces it: an edit that breaks any test that passes now is undone, so the stronger model cannot go backwards.
     const handed = [...parked.values()];
@@ -787,9 +976,10 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
 
   // Every cause left is parked, by the first model and (when there is one) the stronger one.
   const codeParks = [...parked.values()].filter((p) => p.kind === "code");
-  const summary = [...parked.values()].map((p) => `[${p.count}×] ${p.message} — ${p.reason}`).join("; ").slice(0, 1500);
+  const sandboxText = sandboxNotes.length > 0 ? ` ${sandboxNotes.join(" | ")}`.slice(0, 1000) : "";
+  const summary = ([...parked.values()].map((p) => `[${p.count}×] ${p.message} — ${p.reason}`).join("; ").slice(0, 1200) + sandboxText).slice(0, 2200);
   if (codeParks.length > 0) {
-    const note = `${codeParks.map((p) => `${p.message} — ${p.reason}`).join(" ")} Still failing: ${testsFailing(current.output) ?? "?"}.`.slice(0, 2300);
+    const note = `${`${codeParks.map((p) => `${p.message} — ${p.reason}`).join(" ")} Still failing: ${testsFailing(current.output) ?? "?"}.`.slice(0, 1250)}${sandboxText}`.slice(0, 2300);
     const before = testsFailing(first.output);
     const now = testsFailing(current.output);
     if (last !== original && now !== undefined && (before === undefined || now < before)) {

@@ -21,7 +21,7 @@ describe("the readers of a test failure", () => {
   test("the heal worker itself uses it for the first prompt and for every retry", () => {
     const src = read("../src/testHeal.ts");
     // The first prompt, the retry after a failing edit, the "nothing new to apply" turn (every edit sent was already in the file), and the hand-off to
-    // the stronger model.
-    assert.equal(src.split("failureText(current.output, repoRoot, file)").length - 1, 4);
+    // the stronger model, and the digest handed to the sandbox agent (the same one the first model saw, never the raw output).
+    assert.equal(src.split("failureText(current.output, repoRoot, file)").length - 1, 5);
   });
 });
