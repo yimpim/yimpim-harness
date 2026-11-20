@@ -49,6 +49,7 @@ import { checkExistence, existencePlannerSection, renderExistence } from "./exis
 import { type Intent, parseIntentReply, routeFacts } from "./routeIntent.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { makeCommandReviewer } from "./commandReview.js";
+import { isScratchPath } from "./scratch.js";
 import { runSecurityAudit } from "./securityAudit.js";
 import { existingDirOnly, existingFilesOnly, projectLayout, renderLayout } from "./projectLayout.js";
 import { loadRepoMap, recordConfirmedFindings } from "./repoMap.js";
@@ -1251,9 +1252,20 @@ async function snapshotDirtyPaths(repo: RepoTools): Promise<Set<string>> {
 // keeping) even though it should never be semantically reviewed — those are
 // different questions, and conflating them would silently stop QA_REVIEW.md
 // from ever being committed at all.
+/** The task is over: the one-off reports and helper scripts its agents made are removed, so none is left to be committed. */
+function removeScratch(tools: AgentTools): void {
+  try {
+    const gone = tools.cleanScratchFiles();
+    if (gone.length > 0) console.log(`[CLEANUP] Removed ${gone.length} scratch file(s) the agents made: ${gone.slice(0, 6).join(", ")}${gone.length > 6 ? ", …" : ""}`);
+  } catch {
+    /* cleanup is a courtesy, never a reason to fail */
+  }
+}
+
 function isHarnessArtifact(rel: string): boolean {
   const p = rel.replace(/\\/g, "/");
-  return p === "PROGRESS.md" || p === ".agent" || p.startsWith(".agent/");
+  // Scratch files (a test report an agent parsed, a one-off summary script) are not project work and are never committed (scratch.ts).
+  return p === "PROGRESS.md" || p === ".agent" || p.startsWith(".agent/") || isScratchPath(p);
 }
 
 /**
@@ -6824,6 +6836,7 @@ The user wants you to decide, not ask: ${d.choice}`);
     // The task is over: the time and tokens counted for its personas end with it.
     statusBase = undefined;
     resetStep();
+    removeScratch(agentTools);
     // Scoped to just this task, not this whole (possibly multi-task, thanks
     // to looping back to the prompt) process — see currentTaskUsageStart above.
     const taskUsage = events.usageDelta(currentTaskUsageStart);
@@ -7204,6 +7217,7 @@ The user wants you to decide, not ask: ${d.choice}`);
       runningAgentLabels.length = 0;
       statusBase = undefined;
       resetStep();
+      removeScratch(agentTools);
 
       // Both a Stop and a task not completing (phase exhausted its repair
       // budget, empty instructions, a bad attachment, ...) are expected

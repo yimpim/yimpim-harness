@@ -4,6 +4,7 @@ import path from "path";
 import crypto from "crypto";
 import { execFile } from "child_process";
 import type { ReviewRequest, ReviewOutcome } from "./commandReview.js";
+import { cleanScratch, scratchTarget, SCRATCH_DIR } from "./scratch.js";
 import {
   CommandApprovals,
   describeBinary,
@@ -1789,7 +1790,29 @@ export class AgentTools {
     return parts.join("\n\n");
   }
 
+  private readonly sessionStart = Date.now();
+
+  /** Removes the scratch files this session left (see scratch.ts); returns what was removed. */
+  public cleanScratchFiles(): string[] {
+    return cleanScratch(this.repoRoot, this.agentCreatedFiles, this.sessionStart);
+  }
+
   public async writeFile(filePath: string, content: string): Promise<string> {
+    // A NEW one-off report, summary or helper script at the project root is not part of the project: it goes in the scratch folder, which is
+    // never committed and is emptied when the task ends. A file that already exists, or one anywhere else, is written where it was asked.
+    const redirect = scratchTarget(filePath);
+    if (redirect && !fsSync.existsSync(path.resolve(this.repoRoot, filePath))) {
+      const target = path.join(this.repoRoot, redirect);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, content, "utf-8");
+      this.agentCreatedFiles.add(redirect);
+      console.log(`[${this.activeAgent}] + created ${redirect}  (scratch)`);
+      return (
+        `Successfully wrote ${content.length} characters to ${redirect}. "${filePath}" looked like a scratch file (a report, summary or one-off helper), ` +
+        `so it was put in ${SCRATCH_DIR}/ instead of the project: that folder is never committed and is emptied when the task ends. ` +
+        `Use "${redirect}" as its path from now on (for example: node ${redirect}).`
+      );
+    }
     const fullPath = this.resolveSafePath(filePath);
     // Checked before the write so "created" vs "overwrote" reflects what was
     // actually on disk a moment ago, not a guess made after the fact.
