@@ -9,9 +9,18 @@
  * The schema is a union with one branch per kind of reply, so each branch can REQUIRE what that kind of reply needs. A single loose object let the
  * model answer {"verdict":"stale-test"} and leave out the reason and the edits.
  */
-const lookupItem = {
+// A lookup is a whole file (a bare string), a range of lines, a search, or a PROBE: a throwaway copy of the test with one console.log in it. Every one
+// of these has to be sayable here: a schema without "probe" made it impossible for the stronger model to measure anything, and it read instead.
+const probe = {
   type: "object",
-  properties: { path: { type: "string" }, from: { type: "integer" }, to: { type: "integer" }, search: { type: "string" } },
+  properties: { file: { type: "string" }, before: { type: "string" }, log: { type: "string" } },
+  required: ["file", "before", "log"],
+};
+const lookupItem = {
+  anyOf: [
+    { type: "string" },
+    { type: "object", properties: { path: { type: "string" }, from: { type: "integer" }, to: { type: "integer" }, search: { type: "string" }, probe } },
+  ],
 };
 const editItem = {
   type: "object",

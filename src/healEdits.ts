@@ -221,3 +221,19 @@ export async function runProbe(run: RunTests, repoRoot: string, spec: { file?: u
 }
 
 const posixJoin = (dir: string, name: string) => (dir === "." ? name : `${dir}/${name}`);
+
+// ------------------------------------------------------------------------------------------------------------------------ lines already shown
+/** The parts of lines a..b that are NOT inside any of the ranges already shown, in order. Empty when all of it has been seen. */
+export function unseenRanges(a: number, b: number, shown: readonly (readonly [number, number])[]): [number, number][] {
+  const out: [number, number][] = [];
+  let at = a;
+  for (const [s, e] of [...shown].sort((x, y) => x[0] - y[0])) {
+    if (e < at) continue;
+    if (s > b) break;
+    if (s > at) out.push([at, s - 1]);
+    at = Math.max(at, e + 1);
+    if (at > b) break;
+  }
+  if (at <= b) out.push([at, b]);
+  return out;
+}

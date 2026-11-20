@@ -26,7 +26,7 @@ import { listTestFiles } from "./focusTests.js";
 import { reachableFiles } from "./testGraph.js";
 import { digestFailure } from "./failureDigest.js";
 import { evidenceText } from "./failureEvidence.js";
-import { applyEditsLenient, parseEdits, presentLargeFile, readRange, searchRepo, runProbe, LARGE_FILE_LINES } from "./healEdits.js";
+import { applyEditsLenient, parseEdits, presentLargeFile, readRange, searchRepo, runProbe, unseenRanges, LARGE_FILE_LINES } from "./healEdits.js";
 import { removeTest, renderRemoval, recordRemoved } from "./testSettle.js";
 
 export { runSuite, failingTestFiles, type SuiteRun };
@@ -137,7 +137,7 @@ async function gitHistory(repoRoot: string, files: string[]): Promise<string> {
 }
 
 /** A lookup result that carries nothing: a search that matched nothing or could not run. */
-const NO_RESULT = /\n\((no matches|search text too short|the search could not run|the probe printed nothing[^)]*|probe refused[^)]*|probe found no line[^)]*)\)$/;
+const NO_RESULT = /\n\((no matches|search text too short|the search could not run|the probe printed nothing[^)]*|probe refused[^)]*|probe found no line[^)]*|already shown above[^)]*)\)$/;
 
 /** Lines added plus lines removed between two versions (order is ignored: it is a count of what is different, not a diff). */
 export function changedLines(a: string, b: string): number {
@@ -180,7 +180,7 @@ Work like this.
    - CODE DEFECT: the code is wrong. The test asserts documented or sensible behaviour (its comments often cite a spec section) and the code does something else: a regression. Do NOT change the test for these. Say what is wrong and where, as file:line.
    - UNSURE: say so for that cause. Never bend a test to match code that looks wrong, and never change code to match a test that looks old.
    Who is RIGHT is decided by the strongest authority, in this order: (1) the written spec and docs in the repository (docs/, *.md); (2) the commit that last changed the app's behaviour (the evidence names it) and the app's own doc comments (a @deprecated, a note that something is intentional); (3) the app's current code; (4) the test. A test that disagrees with a stronger authority is stale. A test that AGREES with the spec while the app disagrees means the APP deviates from its spec: that is neither a test fix nor yours to change, so say app-deviation (below).
-3. Check a hunch instead of guessing. You may ask to see lines, to search the project, or to run a probe (below).
+3. Check a hunch instead of guessing. You may ask to see lines, to search the project, or to run a probe (below). Reading the code cannot show timing (a debounce, an effect that runs later), what an event carries, or what a mock returns: before you ask for a second range of a file you have already read, MEASURE with a probe instead. Lines you were already shown are not sent again, only the ones you have not seen.
 4. Make the SMALLEST edits that fix the test-side causes. If the mock lacks something, look at how other tests mock the same module and match them.
 Rules for edits: keep every case that is still meaningful, update expected values and calls to match the code, never delete assertions or skip tests to make them pass, never loosen an assertion into one that cannot fail. Mock only what the test already mocked, plus what the code now needs.
 
@@ -266,6 +266,9 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
 
   const sources = [...new Set([...importedSources(repoRoot, file, original), ...referencedFiles(repoRoot, file, original)])];
   const provided = new Set<string>([file, ...sources]);
+  /** Lines of each file already put in front of the model by a lookup, so a range it has seen is not sent again. Reset when the test changes. */
+  const shown = new Map<string, [number, number][]>();
+  let shownFor = "";
   let others: string[] = [];
   try {
     others = reachableFiles(repoRoot, file).filter((f) => !provided.has(f) && !/(^|\/)node_modules\//.test(f));
@@ -466,8 +469,26 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
           // A value at run time, read the way a person would: a throwaway copy of the test with one console.log in it, run once and deleted.
           blocks.push(await runProbe(run, repoRoot, (n as any).probe));
         } else if (n && typeof n === "object" && typeof (n as any).path === "string") {
-          const body = readRange(repoRoot, (n as any).path, (n as any).from, (n as any).to);
-          if (body) blocks.push(body);
+          // Only the lines not yet shown are sent: asking again for what is already above (or for a range that mostly overlaps it) adds weight and no information.
+          const rel = String((n as any).path).replace(/\\/g, "/").replace(/^\.\//, "");
+          if (shownFor !== last) {
+            shown.clear(); // the test changed: its line numbers are not the ones shown before
+            shownFor = last;
+          }
+          const first = readRange(repoRoot, rel, (n as any).from, (n as any).to);
+          const span = first ? /^--- \S+ lines (\d+)-(\d+) of \d+/.exec(first) : null;
+          if (!first || !span) continue;
+          const a = Number(span[1]);
+          const b = Number(span[2]);
+          const have = shown.get(rel) ?? [];
+          const todo = unseenRanges(a, b, have);
+          if (todo.length === 0) {
+            blocks.push(`--- ${rel} lines ${a}-${b}\n(already shown above: lines ${a}-${b} of ${rel})`);
+          } else {
+            const parts = todo.length === 1 && todo[0][0] === a && todo[0][1] === b ? [first] : todo.map(([s, e]) => readRange(repoRoot, rel, s, e)).filter((x): x is string => !!x);
+            blocks.push(...parts);
+          }
+          shown.set(rel, [...have, [a, b]]);
         }
       }
       // Looking is as long as it is useful. What ends it is not a number of rounds but a lookup that turns up nothing new (a file already
@@ -482,7 +503,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         }
         messages.push({
           role: "user",
-          content: `${blocks.length ? blocks.join("\n\n") + "\n\n" : ""}Nothing new turned up (those files are already provided or do not exist, or nothing matched). Decide with what you have.`,
+          content: `${blocks.length ? blocks.join("\n\n") + "\n\n" : ""}Nothing new turned up (those files or lines are already provided or do not exist, or nothing matched). Decide with what you have, or MEASURE what you cannot see by reading: a {"probe"} prints the real value at run time.`,
         });
         continue;
       }
