@@ -19,7 +19,7 @@ import path from "path";
 import process from "process";
 import { pathToFileURL } from "url";
 import { Capabilities, Capability, winSafeCommand } from "./capabilities.js";
-import { DEFAULT_SAMPLE_PNG_BASE64, loadQaSetup, resolveRepoFile, writeFakeCameraFeed } from "./qaSetup.js";
+import { DEFAULT_SAMPLE_PNG_BASE64, loadQaSetup, qaEnvFor, resolveRepoFile, writeFakeCameraFeed } from "./qaSetup.js";
 import { AndroidProfile, IOSProfile, PythonProfile, ReactNativeProfile, WebProfile, findNewestApk, findNewestIOSApp } from "./projectProfile.js";
 
 export interface VisualCapture {
@@ -828,7 +828,9 @@ async function startServer(
   args: string[],
   cwd: string,
   candidateUrls: string[],
-  timeoutMs: number
+  timeoutMs: number,
+  /** The variables the app is started with for QA (qaSetup.ts env: only the allowed names). */
+  qaEnv: Record<string, string> = {}
 ): Promise<ServerHandle> {
   let log = "";
   let detected: string | null = null;
@@ -839,7 +841,7 @@ async function startServer(
     shell: false,
     detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, BROWSER: "none", CI: "1", FORCE_COLOR: "0" },
+    env: { ...process.env, ...qaEnv, BROWSER: "none", CI: "1", FORCE_COLOR: "0" },
   });
 
   const onData = (buf: Buffer) => {
@@ -1225,7 +1227,7 @@ export async function probeWeb(
 
   const pm = profile.packageManager ?? "npm";
   const bin = process.platform === "win32" ? `${pm}.cmd` : pm;
-  const handle = await startServer(bin, ["run", profile.devScript], repoRoot, profile.candidateUrls, 45000);
+  const handle = await startServer(bin, ["run", profile.devScript], repoRoot, profile.candidateUrls, 45000, qaEnvFor(repoRoot));
 
   try {
     if (!handle.url) {
@@ -1255,7 +1257,7 @@ export async function probeExpoWeb(
   const bin = process.platform === "win32" ? "npx.cmd" : "npx";
   // Metro's cold-start bundle-on-first-request can be slower than Vite's dev
   // server -- a longer startServer timeout than probeWeb's 45s.
-  const handle = await startServer(bin, ["expo", "start", "--web"], repoRoot, profile.candidateUrls, 60000);
+  const handle = await startServer(bin, ["expo", "start", "--web"], repoRoot, profile.candidateUrls, 60000, qaEnvFor(repoRoot));
 
   try {
     if (!handle.url) {
@@ -1294,7 +1296,8 @@ export async function probePythonWeb(
     profile.launchArgs,
     repoRoot,
     profile.candidateUrls,
-    45000
+    45000,
+    qaEnvFor(repoRoot)
   );
 
   try {

@@ -37,6 +37,7 @@ import { evidenceText } from "./failureEvidence.js";
 import { isMustPass, mustPassFindings, changedMustPassTexts, runOriginalCopy, reviewDiff } from "./directFix.js";
 import { isTestPath } from "./focusTests.js";
 import { selectForChange } from "./testSelection.js";
+import { describeQaAccess, loadQaSetup } from "./qaSetup.js";
 import { passingTestFiles } from "./testRun.js";
 import { isEvidenceNoise } from "./roadmap.js";
 
@@ -1006,6 +1007,7 @@ export class AutonomousVerifier {
       // this change, then whether the permanent suite moved with the code.
       if (!ledger.hasBlockingFailure()) await this.focusedTestGate(ledger);
       if (!ledger.hasBlockingFailure() && hasRealChange) this.mainSuiteGate(phaseGoal, change!, ledger);
+      if (hasRealChange) this.qaAccessNote(ledger);
       // A phase that changed nothing (a verify-only phase) still has its tests run: the ones not known green since their last run.
       if (!ledger.hasBlockingFailure()) await this.selectedTestGate(hasRealChange ? change : undefined, ledger);
       // A fix task whose must-pass test file was changed around the failing tests: does the code fix stand without those changes, or should a person look?
@@ -2617,6 +2619,21 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
         });
       }
     }
+  }
+
+  /**
+   * What has been arranged for QA beyond sign-in state (mocks, toggles, variables the app is started with, deep links), listed in the evidence so a person can see it. A mock or a
+   * toggle must be off unless its flag is set; this makes every one visible. Informational: it never blocks.
+   */
+  private qaAccessNote(ledger: EvidenceLedger): void {
+    let text = "";
+    try {
+      text = describeQaAccess(loadQaSetup(this.repoRoot));
+    } catch {
+      return;
+    }
+    if (!text) return;
+    ledger.add({ tier: "static", gate: "QA access registered for this project", method: "inspected", status: "pass", blocking: false, detail: text });
   }
 
   private async selectedTestGate(change: ChangeSet | undefined, ledger: EvidenceLedger): Promise<void> {

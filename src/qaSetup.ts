@@ -26,6 +26,12 @@ export interface QaSetup {
   uploadFiles?: string[];
   /** Free text: what this setup represents, for humans and the QA model. */
   notes?: string;
+  /** Screens QA can open directly (a custom scheme the app handles, a universal link, or a route starting with "/"). Opened by the Android and iOS probes' open_link. */
+  deepLinks?: { name: string; url: string }[];
+  /** Variables the app is started with for QA (only the kinds an app reads at build time and that are never secret). */
+  env?: Record<string, string>;
+  /** What is mocked or toggled for QA, and where it is switched on. Listed in the QA evidence so a person can see it. */
+  mockNotes?: string;
   updatedAt?: string;
 }
 
@@ -33,6 +39,13 @@ const MAX_STORAGE_KEYS = 50;
 const MAX_KEY_LEN = 200;
 const MAX_VALUE_LEN = 20_000;
 const MAX_UPLOAD_FILES = 5;
+const MAX_DEEP_LINKS = 10;
+const MAX_ENV = 20;
+const MAX_ENV_VALUE = 200;
+/** Only variables an app reads to pick its mode, named so that nothing secret-shaped can be set. */
+const QA_ENV_NAME = /^(EXPO_PUBLIC_|VITE_|NEXT_PUBLIC_|REACT_APP_|QA_|MOCK_)[A-Z0-9_]*$/;
+/** A scheme that opens something in the app. Never one that runs code or reads a file. */
+const BAD_SCHEME = /^(javascript|data|file|vbscript|blob|about):/i;
 
 // Files that could hold secrets are never offered to a page as an upload or
 // shown to a camera, whatever the model asked for.
@@ -64,6 +77,17 @@ export function isSafeRepoRelativePath(p: string): boolean {
   const norm = path.normalize(p);
   if (norm.startsWith("..") || norm.split(path.sep).includes("..")) return false;
   return !SENSITIVE_FILE.test(norm);
+}
+
+/** A deep link is a URL with a scheme the app handles, or a route starting with a single "/". */
+export function isSafeDeepLink(u: string): boolean {
+  if (!u || u.length > 500 || /[\r\n\s]/.test(u)) return false;
+  if (u.startsWith("/")) return !u.startsWith("//") && !u.includes("\\");
+  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\/?\S+/.test(u) && !BAD_SCHEME.test(u);
+}
+
+export function isSafeQaEnvName(n: string): boolean {
+  return QA_ENV_NAME.test(n);
 }
 
 export function sanitizeQaSetup(raw: any): QaSetup {
@@ -100,6 +124,27 @@ export function sanitizeQaSetup(raw: any): QaSetup {
       .slice(0, MAX_UPLOAD_FILES);
     if (files.length > 0) out.uploadFiles = files;
   }
+  if (Array.isArray(raw.deepLinks)) {
+    const links: { name: string; url: string }[] = [];
+    for (const l of raw.deepLinks) {
+      const url = typeof l?.url === "string" ? l.url.trim() : "";
+      const name = typeof l?.name === "string" ? l.name.trim().slice(0, 60) : "";
+      if (!name || !isSafeDeepLink(url) || links.some((x) => x.name === name)) continue;
+      links.push({ name, url });
+      if (links.length >= MAX_DEEP_LINKS) break;
+    }
+    if (links.length > 0) out.deepLinks = links;
+  }
+  // Accepts {NAME: value} or the tool's [{name, value}] array form. A name that is not one of the allowed kinds, or a value that is not a short string, is dropped.
+  const envEntries: [unknown, unknown][] = Array.isArray(raw.env) ? raw.env.map((e: any) => [e?.name, e?.value]) : raw.env && typeof raw.env === "object" ? Object.entries(raw.env) : [];
+  const env: Record<string, string> = {};
+  for (const [k, v] of envEntries) {
+    if (typeof k !== "string" || !isSafeQaEnvName(k) || typeof v !== "string" || v.length > MAX_ENV_VALUE || /[\r\n]/.test(v)) continue;
+    if (Object.keys(env).length >= MAX_ENV) break;
+    env[k] = v;
+  }
+  if (Object.keys(env).length > 0) out.env = env;
+  if (typeof raw.mockNotes === "string" && raw.mockNotes.trim()) out.mockNotes = raw.mockNotes.trim().slice(0, 500);
   if (typeof raw.notes === "string" && raw.notes.trim()) out.notes = raw.notes.trim().slice(0, 1000);
   if (typeof raw.updatedAt === "string") out.updatedAt = raw.updatedAt;
   return out;
@@ -117,6 +162,11 @@ export function saveQaSetup(repoRoot: string, patch: unknown): QaSetup {
     ...(current.localStorage || incoming.localStorage
       ? { localStorage: { ...current.localStorage, ...incoming.localStorage } }
       : {}),
+    // Links accumulate by name (a later url for the same name wins) and variables accumulate by name, like the storage keys.
+    ...(current.deepLinks || incoming.deepLinks
+      ? { deepLinks: [...(current.deepLinks ?? []).filter((c) => !(incoming.deepLinks ?? []).some((i) => i.name === c.name)), ...(incoming.deepLinks ?? [])].slice(0, MAX_DEEP_LINKS) }
+      : {}),
+    ...(current.env || incoming.env ? { env: { ...current.env, ...incoming.env } } : {}),
     updatedAt: new Date().toISOString(),
   };
   try {
@@ -124,6 +174,20 @@ export function saveQaSetup(repoRoot: string, patch: unknown): QaSetup {
     fsSync.writeFileSync(setupPath(repoRoot), JSON.stringify(merged, null, 2), "utf-8");
   } catch {}
   return merged;
+}
+
+/** The variables the app is started with for QA (already restricted to the allowed names). */
+export function qaEnvFor(repoRoot: string): Record<string, string> {
+  return loadQaSetup(repoRoot).env ?? {};
+}
+
+/** What has been arranged for QA beyond sign-in state, as one readable block for the QA evidence; empty when nothing has. */
+export function describeQaAccess(setup: QaSetup): string {
+  const lines: string[] = [];
+  if (setup.mockNotes) lines.push(`mocked or toggled for QA: ${setup.mockNotes}`);
+  if (setup.env && Object.keys(setup.env).length > 0) lines.push(`started with: ${Object.entries(setup.env).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+  if (setup.deepLinks?.length) lines.push(`deep links: ${setup.deepLinks.map((l) => `${l.name} → ${l.url}`).join(", ")}`);
+  return lines.join("; ");
 }
 
 /** Absolute path of a repo-relative file if it exists and stays in the repo. */
