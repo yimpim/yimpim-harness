@@ -36,6 +36,7 @@ import { digestFailure } from "./failureDigest.js";
 import { evidenceText } from "./failureEvidence.js";
 import { isMustPass, mustPassFindings, changedMustPassTexts, runOriginalCopy, reviewDiff } from "./directFix.js";
 import { isTestPath } from "./focusTests.js";
+import { selectForChange } from "./testSelection.js";
 import { passingTestFiles } from "./testRun.js";
 import { isEvidenceNoise } from "./roadmap.js";
 
@@ -2636,16 +2637,8 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
     const nothingChanged = touched.length === 0;
     try {
       if (!nothingChanged) {
-        sel = selectTests(this.repoRoot, touched);
-        // Tests whose dependencies changed since they last ran (an earlier task that stopped mid-edit, a rename by an editor) are not
-        // reached by THIS change but are stale all the same: run them now, so one red test is found now and not eighteen later.
-        if (!sel.everything) {
-          const stale = staleSince(this.repoRoot, sel.selected);
-          if (stale.length > 0) {
-            sel = { ...sel, selected: [...sel.selected, ...stale], skipped: sel.skipped.filter((t) => !stale.includes(t)) };
-            staleCount = stale.length;
-          }
-        }
+        // The same selection the Editor's own sweep makes before it concludes (testSelection.ts), so the Editor checks exactly what QA will run.
+        ({ sel, staleCount } = selectForChange(this.repoRoot, touched));
       } else {
         // Nothing changed, so there is nothing to select by. Every test runs except those the log shows unchanged since green.
         sel = selectUnverified(this.repoRoot);

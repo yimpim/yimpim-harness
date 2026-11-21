@@ -280,7 +280,7 @@ describe("QA checks again, as blocking findings", () => {
     const src = fs.readFileSync("src/verifierTools.ts", "utf8");
     assert.match(src, /const appChanged = change \? \[\.\.\.change\.modified, \.\.\.change\.added\]\.some\(\(p\) => !isTestPath\(p\) && !isEvidenceNoise\(p\)\) : undefined;/);
     assert.match(src, /for \(const finding of mustPassFindings\(this\.repoRoot, appChanged\)\) \{\s*\n\s*ledger\.add\(\{ tier: "build", gate: "the tests this fix must pass are as written", method: "inspected", status: "fail", blocking: true, detail: finding \}\);/);
-    assert.ok(src.indexOf("mustPassFindings(this.repoRoot, appChanged)") < src.indexOf("sel = selectTests(this.repoRoot, touched)"));
+    assert.ok(src.indexOf("mustPassFindings(this.repoRoot, appChanged)") < src.indexOf("selectForChange(this.repoRoot, touched)"));
   });
 
   test("the original-file check runs after the test gate, and only when nothing blocks yet", () => {

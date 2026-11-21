@@ -693,6 +693,7 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
           continue;
         }
 
+        let sweepNote = "";
         // What the change left behind in the tests, found from its own diff. The Editor knows what it just removed; later stages only see a failing
         // assertion. Handed back once per distinct list (never in a loop), and not for a fix whose tests are the spec: there the test is right.
         if (EDITING_AGENTS.has(agentName) && args.status === "FINISHED_PATCHING" && !anyMustPass()) {
@@ -701,6 +702,24 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
             console.log(`[${displayName}] 🔎 The change left tests naming what it removed or changed: sending it back to update them.`);
             messages.push({ role: "tool", tool_call_id: call.id, name, content: `NOT YET: ${pending}` });
             continue;
+          }
+        }
+
+        // The tests its change can reach are run before it may conclude. One that the change made stale is sent back once for each distinct set of failures; what it
+        // still cannot fix goes to the heal before QA (editorSweep.ts). Not for a fix whose tests are the spec, and never in a loop.
+        if (EDITING_AGENTS.has(agentName) && args.status === "FINISHED_PATCHING" && !anyMustPass()) {
+          const swept = await agentTools.affectedTestsCheck();
+          if (swept?.kind === "bounce") {
+            console.log(`[${displayName}] 🧪 The change breaks tests that passed before it: sending it back to bring them up to date.`);
+            messages.push({ role: "tool", tool_call_id: call.id, name, content: `NOT YET: ${swept.message}` });
+            continue;
+          }
+          if (swept?.kind === "clean" && swept.note) {
+            sweepNote = swept.note;
+            console.log(`[${displayName}] ✓ ${swept.note}`);
+          } else if (swept?.kind === "handed") {
+            sweepNote = swept.note;
+            console.log(`[${displayName}] ⚠️ ${swept.note}`);
           }
         }
 
@@ -718,7 +737,7 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
         for (const d of deltas) console.log(`[AGENT EXIT] Assertion ${d.id} ${d.action.toUpperCase()}: ${d.reason}`);
         emitAgentEnd(rounds, "completed");
         return (
-          `TASK_CONCLUDED: ${args.explanation}` +
+          `TASK_CONCLUDED: ${args.explanation}${sweepNote ? ` (${sweepNote})` : ""}` +
           encodeAssertionDeltas(deltas) +
           encodeTestsNotNeeded(args.testsNotNeeded) +
           (howToVerify ? `${HOW_TO_VERIFY_MARKER}${howToVerify}` : "")
@@ -890,6 +909,10 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
           // read streak is deliberately left where it is.
           console.log(`[${displayName}] ⚙️ Command requested: ${String(args.command ?? "").slice(0, 120)}`);
           toolOutput = await agentTools.runProjectCommand(args);
+        } else if (name === "run_affected_tests" && EDITING_AGENTS.has(agentName)) {
+          // A measurement, like run_test: neither an inspection nor an edit.
+          console.log(`[${displayName}] 🧪 run_affected_tests`);
+          toolOutput = await agentTools.runAffectedTests();
         } else if (name === "run_test") {
           // A measurement: neither an inspection nor an edit (ReadTracker classifies an unknown tool as "other"), so the read streak is left alone.
           console.log(`[${displayName}] 🧪 run_test ${String(args.file ?? "")}${args.namePattern ? ` -t "${String(args.namePattern).slice(0, 60)}"` : ""}`);

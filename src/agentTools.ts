@@ -6,6 +6,7 @@ import { execFile } from "child_process";
 import type { ReviewRequest, ReviewOutcome, ActionReview } from "./commandReview.js";
 import { cleanScratch, scratchTarget, SCRATCH_DIR } from "./scratch.js";
 import { isFocusPath } from "./focusTests.js";
+import type { EditorSweep, SweepOutcome } from "./editorSweep.js";
 import { missingTool, missingToolMessage } from "./projectTools.js";
 import { staleTestReferences, renderReferences, referencesKey, type Reference } from "./testReferences.js";
 import {
@@ -723,6 +724,22 @@ export const RUN_TEST_TOOL = {
 };
 
 /**
+ * The tests the Editor's change can reach, run now (the same selection QA uses), with a digest of what fails. For EDITOR and REPAIR; the heal sandbox is not offered it.
+ * Shell-free and gated like run_test: the code the agent changed is screened before anything runs.
+ */
+export const RUN_AFFECTED_TESTS_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "run_affected_tests",
+    description:
+      "Run the tests your change can reach (the same ones the final verification runs) and get the list of what fails and why. Use it before you conclude, and again after fixing what your change made out of date. " +
+      "Tests that were already failing before this phase are reported separately: they are not yours to fix.",
+    parameters: { type: "object", properties: {}, required: [] as string[] },
+  },
+};
+TOOLS_SCHEMA.push(RUN_AFFECTED_TESTS_TOOL as any);
+
+/**
  * run_test for REPAIR, which edits the real project: the same tool, described for where it runs. Offered only for a failing test, and only to REPAIR (see
  * repairRunTest.ts); everything else that is given the default tool list is still never offered a way to run tests.
  */
@@ -1137,6 +1154,28 @@ export class AgentTools {
     return this.sandboxDeviation(args);
   }
   /** `run_test`: only a heal sandbox binds it; anywhere else it is refused, so no ordinary agent can run tests this way. */
+  private affectedTests?: EditorSweep;
+  /** The Editor's own test sweep (editorSweep.ts): what runs before an Editor or Repair is allowed to conclude, and what run_affected_tests answers with. */
+  public setAffectedTests(s: EditorSweep | undefined): void {
+    this.affectedTests = s;
+  }
+  public async affectedTestsCheck(): Promise<SweepOutcome | undefined> {
+    if (!this.affectedTests) return undefined;
+    try {
+      return await this.affectedTests.check();
+    } catch {
+      return undefined; // a sweep that fails never stands in the way: QA runs the same tests
+    }
+  }
+  public async runAffectedTests(): Promise<string> {
+    if (!this.affectedTests) return "run_affected_tests is not available here";
+    try {
+      return await this.affectedTests.runNow();
+    } catch (e: any) {
+      return `The affected tests could not be run: ${String(e?.message ?? e).slice(0, 200)}`;
+    }
+  }
+
   public async runTest(args: Record<string, unknown>): Promise<string> {
     if (!this.sandboxRunTest) return "run_test is only available in a heal sandbox";
     return this.sandboxRunTest(args);
@@ -1215,6 +1254,7 @@ export class AgentTools {
     this.plannedFiles = plannedFiles.map((p) => p.replace(/\\/g, "/"));
     this.maxFilesPerPhase = maxFiles ?? (this.config as any).limits?.maxFilesPerPhase ?? 0;
     this.currentPhaseName = phaseName;
+    this.affectedTests?.reset(); // a new phase: nothing the Editor's test sweep remembered carries over
   }
 
   /**

@@ -326,6 +326,8 @@ export const ConfigSchema = z.object({
    */
   heal: z
     .object({
+      // Before an Editor or Repair may conclude, the tests its change can reach are run and what the change made stale is fixed (editorSweep.ts).
+      editorSweep: z.boolean().default(true),
       sandbox: z
         .object({
           // Off = the stronger model gets the same JSON conversation the first one had.
