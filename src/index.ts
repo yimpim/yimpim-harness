@@ -51,6 +51,7 @@ import { checkExistence, existencePlannerSection, renderExistence } from "./exis
 import { type Intent, parseIntentReply, routeFacts } from "./routeIntent.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { makeCommandReviewer } from "./commandReview.js";
+import { makePanel, pickJudges } from "./commandPanel.js";
 import { isScratchPath } from "./scratch.js";
 import { runSecurityAudit } from "./securityAudit.js";
 import { existingDirOnly, existingFilesOnly, projectLayout, renderLayout } from "./projectLayout.js";
@@ -4755,11 +4756,27 @@ async function main(): Promise<void> {
   );
   // A security model clears what is plainly harmless before a person is asked about a command; everything else still asks (commandReview.ts).
   if (config.security.commandReview) {
-    agentTools.setCommandReviewer(
-      makeCommandReviewer((messages) =>
-        runLabeledCompletion({ client, models: securityModels(config.models), messages: messages as any, agentName: "SECURITY", jsonMode: true, reason: "Security: reviewing a command" })
-      )
-    );
+    // Several different models judge, and it runs only when all say safe (commandPanel.ts); they are taken from the configured security, planner and repair
+    // models, so whichever models the user chose are the ones that judge. With fewer than two distinct models there is no panel, and the single reviewer stays.
+    const panelCfg = config.security.panel;
+    const judgeModels = panelCfg?.enabled === false ? [] : pickJudges(config.models, { size: panelCfg?.size, models: panelCfg?.models });
+    if (judgeModels.length >= 2) {
+      const panel = makePanel(
+        judgeModels.map((model) => ({
+          model,
+          call: (messages) => runLabeledCompletion({ client, models: [model], messages: messages as any, agentName: "SECURITY", jsonMode: true, reason: `Security panel: ${model}` }),
+        }))
+      );
+      agentTools.setCommandReviewer((req) => panel.reviewCommand(req), { coversElevated: true });
+      agentTools.setActionReviewer((a) => panel.reviewAction(a));
+      console.log(`[SECURITY] Commands and installs are judged by ${judgeModels.length} models (${judgeModels.join(", ")}); a person is asked only if any of them says not safe.`);
+    } else {
+      agentTools.setCommandReviewer(
+        makeCommandReviewer((messages) =>
+          runLabeledCompletion({ client, models: securityModels(config.models), messages: messages as any, agentName: "SECURITY", jsonMode: true, reason: "Security: reviewing a command" })
+        )
+      );
+    }
   }
   // Backs the run_build_check tool: lets EDITOR/REPAIR confirm a patch
   // actually compiles before handing back to QA, reusing the SAME

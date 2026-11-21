@@ -98,6 +98,15 @@ export const ConfigSchema = z.object({
       // A security model reads a command (and any script it runs, in full) before a person is asked, and clears what is plainly harmless.
       // Destructive, network, secret-reading, port-opening or injection-looking commands always go to the person. Off = always ask.
       commandReview: z.boolean().default(true),
+      // With commandReview on: several different models judge each action a person would otherwise be asked about, and it runs only when ALL of them say
+      // safe (commandPanel.ts). Judges are taken from the models configured for the security, planner and repair roles unless `models` names them.
+      panel: z
+        .object({
+          enabled: z.boolean().default(true),
+          size: z.number().int().min(2).max(5).default(3),
+          models: z.array(z.string()).optional(),
+        })
+        .prefault({}),
     })
     .prefault({}),
   uiDesign: z

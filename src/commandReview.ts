@@ -27,6 +27,19 @@ export interface ReviewRequest {
   repoRoot: string;
   /** Repo-relative files the agent created this session. */
   created: string[];
+  /** What the command policy knows about it (why it needs extra care, that it was approved before but its files changed), for the reviewer to weigh. */
+  notes?: string[];
+}
+
+/** Something other than a command that a person would be asked to approve: a dependency install plan, a package to add. */
+export interface ActionReview {
+  kind: "dependency-plan" | "package";
+  /** What it is, as a person would be shown it. */
+  label: string;
+  purpose: string;
+  /** The facts the harness collected (registry facts, warnings, the commands of the plan). */
+  details: string;
+  repoRoot: string;
 }
 
 export interface ReviewOutcome {
