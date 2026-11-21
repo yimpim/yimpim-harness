@@ -32,7 +32,8 @@ describe("the wiring", () => {
     assert.ok(!src.includes(".slice(-40).join(\"\n\").slice(-4000)") && !heal.includes(".slice(-40).join(\"\n\").slice(-4000)"), "the raw tail is gone");
   });
   test("Discovery is told which files the request names, ahead of the repo-map shortlist", () => {
-    assert.ok(src.includes("${namedLeads}${discoveryShortlist}"));
+    // the named files, then the lines the request cites and existence verified (both about the request), then the guessed shortlist
+    assert.ok(src.includes("${namedLeads}${preReadSection}${discoveryShortlist}"));
     assert.ok(src.includes("The request names these files, so start with them"));
   });
   test("a plan sent back for more detail says why", () => {

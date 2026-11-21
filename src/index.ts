@@ -49,6 +49,7 @@ import { renderLog, runSuiteLogged } from "./testLog.js";
 import { fixTaskFor, isFixTask, savePendingFixes, loadPendingFixes, settlePendingFixes } from "./testSettle.js";
 import { directFixFor, setMustPass } from "./directFix.js";
 import { taskQuestionMode, isNewProject } from "./questionScope.js";
+import { parseCodeRefs, resolveOnDisk, type CodeRef } from "./codeContext.js";
 import { checkExistence, existencePlannerSection, renderExistence, JUDGE_SYSTEM, JUDGE_WHOLE_SYSTEM, JUDGE_COMBINE_SYSTEM } from "./existence.js";
 import { roadmapCompleteAnswer, cacheKey, readCache, writeCache, newTally, countCall, renderTally } from "./existenceSupport.js";
 import { type Intent, parseIntentReply, routeFacts } from "./routeIntent.js";
@@ -105,6 +106,8 @@ let roadmapIntent: { action: unknown; request: unknown } | null = null;
 let turnDocuments: string[] = [];
 // What the code already has for this request (set when the request is classified, used once by the Planner).
 let existenceSection = "";
+// The line-numbered places existence verified (file and lines): put into Discovery's prompt, never re-read.
+let existenceRefs: CodeRef[] = [];
 
 /** Prints what a repo-map re-derivation changed; silent when nothing did. */
 function logMapSync(result: ReturnType<typeof syncRepoMap>, heading: string): void {
@@ -678,6 +681,7 @@ async function checkWhatExists(text: string, client: OpenRouterClient, config: A
             'To build them, ask again without "before we work": for example "finish what is left in <the brief>". The check runs again and only those are planned.'
         );
         existenceSection = existencePlannerSection(found);
+        existenceRefs = found.excerpts ?? [];
         existenceChecked = { text, remaining: left };
         lastAudit = { request: text.slice(0, 3000), report: renderExistence(found).slice(0, 8000) };
         return "handled";
@@ -687,6 +691,7 @@ async function checkWhatExists(text: string, client: OpenRouterClient, config: A
         return "handled";
       }
       existenceSection = existencePlannerSection(found);
+      existenceRefs = found.excerpts ?? [];
       existenceChecked = { text, remaining: found.items.filter((i) => i.verdict !== "built" && i.verdict !== "manual").length };
     } else if (found.note) {
       console.log("[EXISTS] " + found.note);
@@ -840,6 +845,7 @@ async function answerIfQuestion(
   if (intent === "program") {
     existenceChecked = null;
     existenceSection = "";
+    existenceRefs = [];
     return "program";
   }
   if (intent === "roadmap") return "roadmap";
@@ -850,6 +856,7 @@ async function answerIfQuestion(
   if (intent === "audit") return "audit";
   if (intent !== "question") {
     existenceSection = "";
+    existenceRefs = [];
     existenceChecked = null;
     // Before anything is planned: what does this ask for that the code already has? Only the rest is built.
     if (intent === "task" && (await checkWhatExists(text, client, config, repoRoot)) === "handled") return "handled";
@@ -5318,6 +5325,8 @@ async function main(): Promise<void> {
     let handled = false;
     await asOwnTask(("Audit: " + request).slice(0, 200), async () => {
       existenceSection = "";
+      existenceRefs = [];
+    existenceRefs = [];
       existenceChecked = null;
       handled = (await checkWhatExists(request, client, config, repoRoot, true)) === "handled";
       return true;
@@ -6170,14 +6179,34 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
 
     // Files the request itself names are where its author says the work is (a fix task from a failing test names the code and the line).
     // They are the first leads, ahead of a shortlist guessed from the repo map, which on this kind of task picked unrelated files.
+    const citedByUser: CodeRef[] = (() => {
+      try {
+        return resolveOnDisk(repoRoot, parseCodeRefs(instructions));
+      } catch {
+        return [];
+      }
+    })();
     const namedLeads = (() => {
       try {
         const named = userNamedFiles(instructions, repoRoot);
-        return named.length > 0 ? `\n\nThe request names these files, so start with them (read the part it points at, not necessarily all of it): ${named.join(", ")}` : "";
+        // A file the request cites with lines keeps them ("app/x.tsx:120-160"): the author's pointer is part of the lead.
+        const label = (f: string) => {
+          const c = citedByUser.filter((r) => r.file === f && r.from !== undefined);
+          return c.length > 0 ? `${f}:${c.map((r) => (r.to === r.from ? `${r.from}` : `${r.from}-${r.to}`)).join(",")}` : f;
+        };
+        return named.length > 0 ? `\n\nThe request names these files, so start with them (read the part it points at, not necessarily all of it): ${named.map(label).join(", ")}` : "";
       } catch {
         return "";
       }
     })();
+    // Discovery starts with nothing shown. What it is told up front (the lines the request cites, the places existence verified) is written into its prompt, from the files as they are now,
+    // and ONLY those ranges are recorded as shown to it: a read of anything else is sent in full, a read of these returns only what is not already here.
+    const discoveryLedger = agentTools.readLedger;
+    discoveryLedger.begin("DISCOVERY");
+    const preRead = direct ? { text: "", included: [] } : discoveryLedger.inject("DISCOVERY", [...citedByUser.filter((r) => r.from !== undefined), ...existenceRefs], 8000);
+    const preReadSection = preRead.text
+      ? `\n\nLINES ALREADY READ FOR YOU (real line numbers of the current files: the request cites some, the check of what already exists verified the rest; do not read these ranges again, read only other lines):\n${preRead.text}`
+      : "";
 
     const discoveryText = `${DISCOVERY_SYSTEM}
 
@@ -6192,7 +6221,7 @@ ${JSON.stringify(memory, null, 2)}
 Instructions:
 Evaluate if the Existing Codebase Memory and known components provide sufficient context.
 - If YES: Conclude immediately.
-- If NO: Use search_code, get_file_outline, or read_file to find missing targets. Call register_component for any key screens/models you locate.${namedLeads}${discoveryShortlist}
+- If NO: Use search_code, get_file_outline, or read_file to find missing targets. Call register_component for any key screens/models you locate.${namedLeads}${preReadSection}${discoveryShortlist}
 
 You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DISCOVERY_ROUND_BUDGET} turns your tools are removed and you must write your findings from what you have. Write taskFindings from what you have confirmed, and put what you could not confirm in uncertainties.`;
     const discoveryPrompt = usingDiscoveryVision ? buildUserContent(discoveryText, imageAttachments) : discoveryText;
@@ -6210,6 +6239,7 @@ You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DI
       agentName: "DISCOVERY",
       visionMode: usingDiscoveryVision,
       tools: DISCOVERY_TOOLS_SCHEMA,
+      readStage: "DISCOVERY",
     });
     // If Discovery ran out of turns and wrote nothing usable, the Planner still
     // gets the files it read (marked unconfirmed) instead of an empty allowlist.
@@ -6330,8 +6360,20 @@ You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DI
       : "";
 
 
+    // The Planner starts with nothing shown. The lines Discovery read (the files it chose first) are written into its prompt, up to a cap, from the files as they are now, and only what is
+    // written is recorded as shown to it. Each pass of the Planner is a new conversation: it begins again from exactly this (the prompt every pass includes).
+    const plannerForward = direct
+      ? { text: "", included: [] as { file: string; from: number; to: number }[] }
+      : agentTools.readLedger.forward("DISCOVERY", "PLANNER", 8000, mergeUnique(extractDiscoveryTargetFiles(discoveryOutput), userFiles));
+    const plannerReadSection = plannerForward.text
+      ? `\n\nLINES DISCOVERY ALREADY READ (real line numbers of the current files; do not read these ranges again):\n${plannerForward.text}`
+      : "";
+    const startPlannerConversation = () => {
+      agentTools.readLedger.begin("PLANNER");
+      for (const r of plannerForward.included) agentTools.readLedger.record("PLANNER", r.file, r.from, r.to);
+    };
     const plannerPrompt = `User Request:
-${instructions.trim()}${userDocsSection}${lastFailureSection}${securitySection}${existenceSection}
+${instructions.trim()}${userDocsSection}${lastFailureSection}${securitySection}${existenceSection}${plannerReadSection}
 
 Discovery Findings:
 ${discoveryOutput}
@@ -6371,6 +6413,8 @@ ${memory.liveRules.map((r) => `- ${r}`).join("\n") || "None"}`;
       agentTools,
       models: config.models.planner,
       agentName: "PLANNER",
+      readStage: "PLANNER",
+      onConversationStart: startPlannerConversation,
       tools: PLANNER_TOOLS_SCHEMA,
       verifyOnly,
     });
@@ -6440,6 +6484,8 @@ ${discoveryOutput ?? ""}`,
         agentTools,
         models: config.models.planner,
         agentName: "PLANNER",
+        readStage: "PLANNER",
+        onConversationStart: startPlannerConversation,
         tools: PLANNER_TOOLS_SCHEMA,
         retryOf: retryOfId ?? lastWorkerId,
         attempt: plannerAttempt,
@@ -6523,6 +6569,8 @@ ${discoveryOutput ?? ""}`,
         agentTools,
         models: config.models.planner,
         agentName: "PLANNER",
+        readStage: "PLANNER",
+        onConversationStart: startPlannerConversation,
         tools: PLANNER_TOOLS_SCHEMA,
         retryOf: firstPlannerWorkerId,
         attempt: plannerAttempt,
