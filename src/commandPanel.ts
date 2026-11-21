@@ -252,7 +252,8 @@ export function makePanel(judges: Judge[]): Panel {
     async reviewAction(a) {
       const steer = injectionIn(`${a.label}\n${a.purpose}\n${a.details}`);
       if (steer) return { allow: false, why: steer };
-      const what = a.kind === "package" ? "add a software package to the project" : "run a dependency install plan";
+      const what =
+        a.kind === "package" ? "add a software package to the project" : a.kind === "file-deletion" ? "delete files the agent marked for removal" : "run a dependency install plan";
       const body = [
         `ACTION: ${what}`,
         `What: ${a.label}`,
@@ -260,7 +261,9 @@ export function makePanel(judges: Judge[]): Panel {
         `Details the harness collected:\n${a.details}`,
         a.kind === "package"
           ? "Judge whether this package looks like a legitimate, established one for what the project needs, and whether the warnings suggest malware, typosquatting, an abandoned or hijacked package, or an install script that runs code."
-          : "Judge whether running these install commands could run unseen code, reach outside the project, or damage what is there.",
+          : a.kind === "file-deletion"
+            ? "Judge whether deleting exactly these files could lose the user's work. Throwaway files the agent itself created this run (scratch scripts, probes, temporary tests), and files git tracks and has not changed (git can restore them), are normal clean-up and safe. Files the user wrote that git does not have, files with uncommitted changes, anything that looks like the user's real work, and a large number of files are not safe."
+            : "Judge whether running these install commands could run unseen code, reach outside the project, or damage what is there.",
       ]
         .filter((l) => l !== "")
         .join("\n");

@@ -907,6 +907,27 @@ ${diffShown}${truncationNote}`;
   return review;
 }
 
+const clip = (s: string, n: number): string => {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > n ? `${t.slice(0, n - 1).trimEnd()}…` : t;
+};
+
+/**
+ * The review as a person reads it in the console: the reviewer's summary, how many requirements were met, unconfirmed or missing, and ONLY the missing ones in
+ * full (they are what needs action). The unconfirmed ones and the concerns are listed once, as QA advisories, right after, so printing them here too showed
+ * every one of them twice. The whole review is still printed, for /verbose (renderReview).
+ */
+export function renderReviewBrief(review: StaticReview): string {
+  const met = review.findings.filter((f) => f.status === "satisfied").length;
+  const missing = review.findings.filter((f) => f.status === "missing");
+  const unconfirmed = review.findings.length - met - missing.length;
+  const lines: string[] = [`${clip(review.summary, 280)}  (✓ ${met} met · ? ${unconfirmed} unconfirmed · ✗ ${missing.length} missing)`];
+  if (review.reviewUnavailable) lines.push(`  (static reviewer unavailable: ${review.reviewUnavailable})`);
+  for (const f of missing) lines.push(`  ✗ ${clip(f.requirement, 160)} — ${clip(f.evidence, 260)}`);
+  if (unconfirmed > 0 || review.concerns.length > 0) lines.push("  (the unconfirmed items and concerns are listed below; /verbose shows the whole review)");
+  return lines.join("\n");
+}
+
 export function renderReview(review: StaticReview): string {
   const lines: string[] = [];
   lines.push(review.summary);

@@ -293,6 +293,8 @@ export interface LabeledCompletionOptions {
   jsonMode?: boolean;
   /** Hold the JSON reply to a schema where the model supports it (see CompleteOptions.structured); implies JSON mode elsewhere. */
   structured?: { name: string; schema: unknown };
+  /** Make the model think first, at this effort (see CompleteOptions.reasoning). */
+  reasoning?: "low" | "medium" | "high";
   /** Same meaning as AgentRunOptions' own retryOf/attempt/reason — set when
    *  this call is a corrective/retry pass of an earlier worker. */
   retryOf?: string;
@@ -325,6 +327,7 @@ export async function runLabeledCompletion(options: LabeledCompletionOptions): P
       agent: agentName,
       ...(options.jsonMode ? { jsonMode: true } : {}),
       ...(options.structured ? { structured: options.structured } : {}),
+      ...(options.reasoning ? { reasoning: options.reasoning } : {}),
     });
     const text =
       typeof response === "string"

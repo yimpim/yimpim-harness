@@ -32,10 +32,13 @@ const ROUTINE: RegExp[] = [
   // A model call that came back fine on the first try. A retry, a failure and a slow call are different lines and stay.
   /^\[API\] \S+ \([A-Z_ -]+\) ✔ \(/,
   /^\[MEMORY\]/,
-  // The files an agent opened and the searches it ran while looking: the same files are listed again as they are changed.
-  /^\[[A-Z_ ]+\] (🔎 )?(Bounded inspection|Reading discovery target|Read file:|Searched code with pattern)/,
+  // The files an agent opened and the searches it ran while looking: for an agent that EDITS, the same files are listed again as they are changed. Not for
+  // the stages that only read (Discovery and the Planner): what they read is all they show, and without it a stage that takes minutes is silent. (The repair Planner's are still hidden: it is given its files.)
+  /^\[(?!(?:DISCOVERY|PLANNER)\b)[A-Z_ ]+\] (🔎 )?(Bounded inspection|Reading discovery target|Read file:|Searched code with pattern)/,
   // The environment report printed ahead of every verification.
   /^\[QA\] Project profile:/,
+  // The whole static review: the line before it has the summary, the counts and what is missing, and the rest is listed once as advisories.
+  /^\[QA\] Static review \(full\):/,
   /^\[QA\] Running build gate:/,
   /^\[QA GATE\] ✓/,
   /^\[QA ADVISORY\] ✓/,

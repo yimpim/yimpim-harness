@@ -5,6 +5,7 @@ import process from "process";
 import readline from "readline/promises";
 import { emitKeypressEvents } from "node:readline";
 import { execFile } from "child_process";
+import { escapesProject, describeStagedDeletions } from "./deletionEvidence.js";
 import { promisify } from "util";
 import { AgentConfig } from "./config.js";
 import { OpenRouterClient } from "./openrouter.js";
@@ -2393,6 +2394,46 @@ async function confirmStagedDeletions(
       reason: why,
     });
 
+  const removeAll = async (): Promise<void> => {
+    let removed = 0;
+    for (const f of staged) {
+      try {
+        fs.unlinkSync(path.join(repoRoot, f));
+        removed++;
+      } catch (err: any) {
+        console.warn(`[CLEANUP] ⚠️ Could not remove ${f}: ${err.message}`);
+      }
+    }
+    console.log(`[CLEANUP] ✓ Removed ${removed}/${staged.length} file(s).`);
+    if (removed < staged.length) {
+      await flagManual(`${staged.length - removed} of these could not be removed automatically — see the warning above.`);
+    }
+  };
+
+  // Before a person is asked: the security panel judges the deletion (commandPanel.ts), shown where each file came from and whether git can restore it.
+  // All judges safe = it is done, even with nobody here. Otherwise the person is asked, and sees what the judges said.
+  let panelNote = "";
+  const outside = escapesProject(staged);
+  if (!outside) {
+    const evidence = describeStagedDeletions(repoRoot, staged, { createdThisRun: (f) => agentTools.createdThisRun(f), reasonOf: (f) => agentTools.getDeletionReason(f) });
+    const review = await agentTools.reviewAction({
+      kind: "file-deletion",
+      label: `${staged.length} file(s) the agent staged for deletion`,
+      purpose: "clean up files the agent marked for removal during this run",
+      details: evidence.join("\n"),
+      repoRoot,
+    });
+    if (review?.allow) {
+      console.log(`[SECURITY] ✔ Deleting without asking: ${review.why}`);
+      await removeAll();
+      return;
+    }
+    if (review) {
+      panelNote = review.why;
+      console.log(`[SECURITY] ✋ Needs a person: ${review.why}`);
+    }
+  }
+
   // Same "is anyone actually here to ask" guard the git-push prompt above
   // uses — an unattended run must never stall waiting for a confirmation
   // nobody's there to give, and deleting nothing is always the safe default.
@@ -2410,7 +2451,7 @@ async function confirmStagedDeletions(
       kind: "blocking",
       prompt:
         `${staged.length} file(s) were staged for deletion this run:\n${staged.map((f) => `- ${f}`).join("\n")}\n\n` +
-        `Remove them now?`,
+        `${panelNote ? `Security review: ${panelNote}\n\n` : ""}Remove them now?`,
       fallback: "no",
       askedAt: new Date().toISOString(),
     },
@@ -2423,19 +2464,7 @@ async function confirmStagedDeletions(
     return;
   }
 
-  let removed = 0;
-  for (const f of staged) {
-    try {
-      fs.unlinkSync(path.join(repoRoot, f));
-      removed++;
-    } catch (err: any) {
-      console.warn(`[CLEANUP] ⚠️ Could not remove ${f}: ${err.message}`);
-    }
-  }
-  console.log(`[CLEANUP] ✓ Removed ${removed}/${staged.length} file(s).`);
-  if (removed < staged.length) {
-    await flagManual(`${staged.length - removed} of these could not be removed automatically — see the warning above.`);
-  }
+  await removeAll();
   // Left uncommitted deliberately: reviewAndResolvePendingChanges already
   // reviews and commits exactly this kind of leftover working-tree change at
   // the start of the next task, rather than this function needing its own
@@ -4764,7 +4793,8 @@ async function main(): Promise<void> {
       const panel = makePanel(
         judgeModels.map((model) => ({
           model,
-          call: (messages) => runLabeledCompletion({ client, models: [model], messages: messages as any, agentName: "SECURITY", jsonMode: true, reason: `Security panel: ${model}` }),
+          call: (messages) =>
+            runLabeledCompletion({ client, models: [model], messages: messages as any, agentName: "SECURITY", jsonMode: true, reasoning: panelCfg?.reasoning ?? "medium", reason: `Security panel: ${model}` }),
         }))
       );
       agentTools.setCommandReviewer((req) => panel.reviewCommand(req), { coversElevated: true });
@@ -4903,9 +4933,21 @@ async function main(): Promise<void> {
     const nxt = rm ? nextUnits(rm, 1)[0] : undefined;
     if (!rm || !nxt) return;
     const pr = roadmapProgress(rm);
-    let go = roadmapAutoContinue;
-    // Not acknowledged yet: the spending notice is part of THIS question, so one answer settles both.
+    // A roadmap goes on from one unit to the next by itself: the user can stop it at any time, and a unit that fails stops it (the failure path
+    // clears roadmapAutoContinue and never reaches here). interaction.confirmContinue brings the "Continue?" question back.
+    const asking = config.interaction.confirmContinue;
+    let go = roadmapAutoContinue || !asking;
+    // Not acknowledged yet: when asking, the spending notice is part of THIS question, so one answer settles both.
     const noticeHere = !rm.costNoticeAckedAt;
+    if (go && !asking && noticeHere) {
+      // Said once, not asked: the run goes on, as it already does when nobody is there to answer.
+      console.log("[ROADMAP] " + ROADMAP_SPEND_NOTICE + " The roadmap continues on its own; stop it at any time.");
+      const fresh = loadRoadmap(repoRoot);
+      if (fresh && !fresh.costNoticeAckedAt) {
+        fresh.costNoticeAckedAt = new Date().toISOString();
+        saveRoadmap(repoRoot, fresh);
+      }
+    }
     if (!go) {
       const answer = (
         await askAnywhere(
@@ -7181,7 +7223,8 @@ The user wants you to decide, not ask: ${d.choice}`);
       const queued = loadTaskQueue(repoRoot);
       if (queued.length > 0) {
         const next = queued[0];
-        if (autoContinueConfirmed) {
+        if (autoContinueConfirmed || !config.interaction.confirmContinue) {
+          // (Also when the user has not asked to be asked: interaction.confirmContinue is off by default, and they can stop at any time.)
           // Already said yes to this backlog — run the next one straight
           // through, no re-ask. See autoContinueConfirmed's own comment:
           // asking again here on every single clean finish (the original

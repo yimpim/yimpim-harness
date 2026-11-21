@@ -39,6 +39,11 @@ export interface CompleteOptions {
    */
   structured?: { name: string; schema: unknown };
   temperature?: number;
+  /**
+   * Ask the model to think before it answers, at this effort, whatever the settings turn off for this agent (deepseek.reasoningOff) and whatever the model
+   * does by default. For a caller whose answer must be reasoned (the security panel). A model that cannot take the field is called again without it.
+   */
+  reasoning?: "low" | "medium" | "high";
   /** Agent role, recorded against token usage so tiering can be measured. */
   agent?: string;
   /** Overrides the default idle-stream timeout (see readStreamedCompletion) — exposed mainly for tests. */
@@ -539,7 +544,7 @@ export class OpenRouterClient {
           }
 
           // Backend choice, price ceiling and reasoning (DeepSeek's own settings first, then the global sort): see requestTuning.ts.
-          const tuned = tuneRequest(model, agent, this.config, { reasoningRejected });
+          const tuned = tuneRequest(model, agent, this.config, { reasoningRejected, forceReasoning: options?.reasoning });
           if (tuned.provider) bodyPayload.provider = tuned.provider;
           if (tuned.reasoning) bodyPayload.reasoning = tuned.reasoning;
           else if (malformedTries > 0 && !reasoningRejected) bodyPayload.reasoning = { effort: malformedTries % 2 === 1 ? "low" : "medium" };
@@ -679,8 +684,8 @@ export class OpenRouterClient {
               // The model refused `reasoning: none` (its thinking cannot be turned off): say so once and send the call again without it,
               // rather than failing an agent over a cost setting. Not counted against the attempt budget or the model's health.
               if (bodyPayload.reasoning && !reasoningRejected && isReasoningRejected(response.status, errorBody)) {
+                console.log(options?.reasoning ? `[${agent}] ${model} does not accept a thinking setting. Sending the call again without it.` : `[${agent}] ${model} will not turn its thinking off. Sending the call again with its default.`);
                 reasoningRejected = true;
-                console.log(`[${agent}] ${model} will not turn its thinking off. Sending the call again with its default.`);
                 attempt--;
                 continue;
               }
