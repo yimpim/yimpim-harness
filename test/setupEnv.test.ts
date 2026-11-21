@@ -647,3 +647,17 @@ describe("Flutter on ARM64 Linux: no arm64 archive is published, so the stable c
     assert.ok(setup.includes("if (picked) {"), "a build with a published checksum always takes the archive route");
   });
 });
+
+describe("QA reads headlessWebQaOnly from machine.json", () => {
+  test("no device on a machine that cannot run an emulator: the reason names Expo web and unit tests; a device that is attached still counts; otherwise nothing changes", async () => {
+    const { headlessNote } = await import("../src/capabilities.js");
+    const none = { available: false, detail: "no booted Android device or emulator is attached" };
+    assert.match(headlessNote(none, true).detail, /cannot run an Android emulator[\s\S]*Expo web and unit tests/);
+    assert.equal(headlessNote(none, true).available, false);
+    assert.equal(headlessNote(none, false), none, "an ordinary machine keeps its own message");
+    const attached = { available: true, detail: "emulator-5554", bin: "adb" };
+    assert.equal(headlessNote(attached, true), attached, "a physical device is still used");
+    const caps = src("src/capabilities.ts");
+    assert.ok(caps.includes("readMachineRecord(os.homedir())?.headlessWebQaOnly === true"));
+  });
+});

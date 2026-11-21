@@ -8,8 +8,10 @@
 
 import { execFileSync } from "child_process";
 import fsSync from "fs";
+import os from "os";
 import path from "path";
 import process from "process";
+import { readMachineRecord } from "./envSetup/machine.js";
 import type { ProjectProfile } from "./projectProfile.js";
 
 export interface Capability {
@@ -477,6 +479,15 @@ function relevantKeys(profile?: import("./projectProfile.js").ProjectProfile): S
   return keys;
 }
 
+/**
+ *  records headlessWebQaOnly when this machine cannot run an emulator (no usable /dev/kvm). A physical device that is attached still counts; when there is none,
+ * the reason is stated so QA goes to Expo web and unit tests instead of waiting for an emulator that can never start.
+ */
+export function headlessNote(cap: Capability, headless: boolean): Capability {
+  if (cap.available || !headless) return cap;
+  return UNAVAILABLE("this machine cannot run an Android emulator (no usable /dev/kvm, recorded by setup-env): QA uses Expo web and unit tests; attach a physical device to test on Android");
+}
+
 export async function probeCapabilities(
   repoRoot: string,
   profile?: import("./projectProfile.js").ProjectProfile,
@@ -487,6 +498,7 @@ export async function probeCapabilities(
   deviceOverrides?: { androidDeviceSerial?: string; iosSimulatorUdid?: string }
 ): Promise<Capabilities> {
   const want = relevantKeys(profile);
+  const headless = readMachineRecord(os.homedir())?.headlessWebQaOnly === true;
 
   const adb = want.has("adb") ? probeAdb() : NOT_APPLICABLE("no Android stack detected");
   const xcodebuild = want.has("xcodebuild") ? probeXcodebuild() : NOT_APPLICABLE("no iOS stack detected");
@@ -503,7 +515,7 @@ export async function probeCapabilities(
     gradleWrapper: want.has("gradleWrapper") ? probeGradleWrapper(repoRoot) : NOT_APPLICABLE("no Android stack detected"),
     adb,
     androidDevice: want.has("androidDevice")
-      ? probeAndroidDevice(adb, deviceOverrides?.androidDeviceSerial)
+      ? headlessNote(probeAndroidDevice(adb, deviceOverrides?.androidDeviceSerial), headless)
       : NOT_APPLICABLE("no Android stack detected"),
     xcodebuild,
     iosSimulator: want.has("iosSimulator")
