@@ -9,7 +9,7 @@
  */
 import { collectFiles, type FileText } from "./securityAudit.js";
 import type { BuiltUnit } from "./roadmap.js";
-import { parseCodeRefs, resolveRefs, type CodeRef } from "./codeContext.js";
+import { parseCodeRefs, resolveRefs, mergeRefs, locateQuote, type CodeRef } from "./codeContext.js";
 
 export type Msg = { role: "system" | "user"; content: string };
 export type Call = (messages: Msg[]) => Promise<string>;
@@ -45,6 +45,8 @@ export interface Checked {
   /** For a partial one: what is still missing. */
   missing: string;
   note: string;
+  /** Where the verified evidence (and any lines the request cited) is, as file and line range: what the stages after existence are told so they do not read it again. */
+  placed?: CodeRef[];
 }
 
 export interface ExistenceResult {
@@ -54,6 +56,8 @@ export interface ExistenceResult {
   /** Every requirement is built, with verified evidence: there is nothing to do. */
   allBuilt: boolean;
   note: string;
+  /** The places the verified evidence is in, merged (at most 12): handed forward as line-numbered excerpts. */
+  excerpts?: CodeRef[];
 }
 
 const clip = (v: unknown, n: number) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
@@ -609,7 +613,22 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
       }
     })
   );
-  return o.requirements.map((r) => out.get(r.id)!);
+  return o.requirements.map((r) => {
+    const c = out.get(r.id)!;
+    if (c.verdict !== "built" && c.verdict !== "partial") return c;
+    return { ...c, placed: placesOf(c, byRel, citedFor(r)) };
+  });
+}
+
+/** Each verified quote as the lines around where it is in its file (a few before, the quote, a few after), and the lines the request cited for this requirement. */
+export function placesOf(c: Checked, byRel: Map<string, string>, cited: CodeRef[]): CodeRef[] {
+  const out: CodeRef[] = [];
+  for (const e of c.evidence) {
+    const text = byRel.get(e.file);
+    const at = text === undefined ? undefined : locateQuote(text, e.quote);
+    if (at !== undefined) out.push({ file: e.file, from: Math.max(1, at - 3), to: at + e.quote.split(/\r?\n/).length + 8 });
+  }
+  return [...out, ...cited.filter((x) => x.from !== undefined)];
 }
 
 // ---------------------------------------------------------------------------
@@ -657,7 +676,8 @@ export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult>
   a.onRequirements?.(parsed.requirements.length);
   const items = await checkRequirements({ call: a.call, cheapCall: a.cheapCall, repoRoot: a.repoRoot, requirements: parsed.requirements, shortlist: a.shortlist, built: a.built, exclude: a.exclude, sourceText: `${a.request}\n${a.docs ?? ""}` });
   const checkable = items.filter((i) => i.verdict !== "manual");
-  return { applies: true, items, allBuilt: checkable.length > 0 && checkable.every((i) => i.verdict === "built"), note: "" };
+  const excerpts = mergeRefs(items.flatMap((i) => i.placed ?? [])).slice(0, 12);
+  return { applies: true, items, allBuilt: checkable.length > 0 && checkable.every((i) => i.verdict === "built"), note: "", ...(excerpts.length > 0 ? { excerpts } : {}) };
 }
 
 const place = (e: Evidence) => `${e.file}: \`${e.quote.replace(/`/g, "'").slice(0, 110)}\``;

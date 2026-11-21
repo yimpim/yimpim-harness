@@ -99,6 +99,13 @@ export interface AgentRunOptions {
    */
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
   /**
+   * The stage this conversation is, for the task's read ledger (agentTools.readLedger): its reads are recorded under this name, so lines it has already been shown are not sent again.
+   * Unset (the editor, repair): reads are exactly what they were.
+   */
+  readStage?: string;
+  /** Called when this conversation starts, before anything is read: the place to begin the stage's ledger and put into its context what the stage is told up front. */
+  onConversationStart?: () => void;
+  /**
    * Marks this run as a corrective/retry pass of an earlier worker doing the
    * same step (e.g. the Planner re-run after its first plan failed
    * validation, or after clarifying-question answers) — not REPAIR, which is
@@ -348,6 +355,12 @@ export async function runLabeledCompletion(options: LabeledCompletionOptions): P
 }
 
 export async function runToolAgent(options: AgentRunOptions): Promise<string> {
+  if (!options.readStage) return runToolAgentConversation(options);
+  options.onConversationStart?.();
+  return options.agentTools.withReadStage(options.readStage, () => runToolAgentConversation(options));
+}
+
+async function runToolAgentConversation(options: AgentRunOptions): Promise<string> {
   const { prompt, client, config, agentTools, models, agentName, repo } = options;
   let availableTools = options.tools ?? TOOLS_SCHEMA;
   // The repair Planner diagnoses a failure from the evidence it is given and

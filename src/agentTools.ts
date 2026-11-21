@@ -1,4 +1,5 @@
 import fs from "fs/promises";
+import { ReadLedger } from "./codeContext.js";
 import fsSync from "fs";
 import path from "path";
 import crypto from "crypto";
@@ -1211,12 +1212,31 @@ export class AgentTools {
   /** Install plans the user already approved this phase, so a retry after an edit does not re-ask. */
   private approvedInstallPlans = new Set<string>();
 
+  /**
+   * What each stage of this task (discovery, the planner) has been shown of the project's files, so an overlapping read sends only the lines it has not been shown, and a file that
+   * changed on disk is forgotten. Reads are counted against the stage set by withReadStage; with none set (the editor, repair) a read is exactly what it was.
+   */
+  public readonly readLedger: ReadLedger;
+  private readStage: string | undefined;
+
+  /** Runs one stage's conversation with its reads recorded in the ledger under that stage's name. The stage starts with nothing shown unless the caller injected something first. */
+  public async withReadStage<T>(stage: string, fn: () => Promise<T>): Promise<T> {
+    const before = this.readStage;
+    this.readStage = stage;
+    try {
+      return await fn();
+    } finally {
+      this.readStage = before;
+    }
+  }
+
   constructor(
     repoRoot: string,
     config: AgentConfig,
     askFn?: (question: string, fallback: string, kind?: "approval") => Promise<string>
   ) {
     this.repoRoot = path.resolve(repoRoot);
+    this.readLedger = new ReadLedger(this.repoRoot);
     this.config = config;
     this.askFn =
       askFn ??
@@ -1950,6 +1970,22 @@ export class AgentTools {
       if (start > end) {
         return `[Invalid range for ${filePath}: startLine (${start}) is after endLine (${end}).]`;
       }
+      // Lines this stage has already been shown are not sent again (only the part it has not seen is), unless the file changed since.
+      const stage = this.readStage;
+      const key = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+      if (stage) {
+        const todo = this.readLedger.unseen(stage, key, start, end);
+        if (todo.length === 0) {
+          return `[${filePath}: lines ${start}-${end} were already shown to you earlier in this conversation and the file has not changed, so they are not sent again.]`;
+        }
+        if (!(todo.length === 1 && todo[0][0] === start && todo[0][1] === end)) {
+          const body = todo.map(([a, b]) => `[lines ${a}-${b}]\n${lines.slice(a - 1, b).join("\n")}`).join("\n...\n");
+          if (body.length <= cap) {
+            for (const [a, b] of todo) this.readLedger.record(stage, key, a, b);
+            return `[${filePath}: showing lines ${todo.map(([a, b]) => `${a}-${b}`).join(", ")} of ${total} total; the rest of ${start}-${end} was already shown above]\n${body}${clampNote}`;
+          }
+        }
+      }
       const slice = lines.slice(start - 1, end).join("\n");
       if (slice.length > cap) {
         return (
@@ -1958,9 +1994,17 @@ export class AgentTools {
           `showing the first ${cap}. Request a narrower line range to see the rest.]`
         );
       }
+      if (stage) this.readLedger.record(stage, key, start, end);
       return `[${filePath}: showing lines ${start}-${end} of ${total} total]\n${slice}${clampNote}`;
     }
 
+    // Whole-file read: one this stage has already been shown, and that has not changed, is not sent again.
+    const wholeStage = this.readStage;
+    const wholeKey = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+    const wholeLines = content.split("\n").length;
+    if (wholeStage && this.readLedger.unseen(wholeStage, wholeKey, 1, wholeLines).length === 0) {
+      return `[${filePath}: all ${wholeLines} lines were already shown to you earlier in this conversation and the file has not changed, so it is not sent again.]`;
+    }
     // Whole-file read, unchanged except the hint now also points at ranges.
     if (content.length > cap) {
       return (
@@ -1969,6 +2013,8 @@ export class AgentTools {
         `Use startLine/endLine to read a specific range of this file, or get_file_outline/search_code to locate one.]`
       );
     }
+    // Recorded as shown only when every line really is in what is returned (not cut, no line shortened).
+    if (wholeStage && clamped === 0) this.readLedger.record(wholeStage, wholeKey, 1, wholeLines);
     return content + clampNote;
   }
 
