@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runQuestionnaire, parseBatch, wantsQuestionnaire, withDesignUnit, writeDesignBrief, DECIDE_FOR_ME, MAX_ROUNDS, type AskedQuestion } from "../src/intake.js";
+import { runQuestionnaire, parseBatch, questionnaireMessages, wantsQuestionnaire, withDesignUnit, writeDesignBrief, DECIDE_FOR_ME, MAX_ROUNDS, MAX_FOLLOW_UP_QUESTIONS, type AskedQuestion } from "../src/intake.js";
 import { createRoadmap } from "../src/roadmapFlow.js";
 import { loadRoadmap } from "../src/roadmap.js";
 import { readDesignBrief } from "../src/uiDesign.js";
@@ -230,6 +230,81 @@ describe("the roadmap for a new product", () => {
     await createRoadmap(flow(m, asker((q) => q.options[0]).ask), { goal: "add recipes, sharing and a shopping list", verifyExisting: false });
     assert.ok(!m.calls.some((c) => c.kind === "questionnaire"));
     assert.equal(m.calls.filter((c) => c.kind === "plan").length, 1);
+  });
+});
+
+describe("the planner says which units build screens", () => {
+  test("buildsUi from the planner's own answer is stored on the unit and decides the design dependency, whatever the words are", async () => {
+    const m = model({
+      plan: {
+        units: [
+          // a screen-sounding title that the planner says builds no UI, and a UI unit with no screen words at all
+          { title: "Offline screen cache", area: "Data", summary: "Keep screens' data on the device", buildsUi: false, acceptance: ["Works offline"] },
+          { title: "Fridge", area: "Core", summary: "Show what is in the fridge", buildsUi: true, acceptance: ["Shows items"] },
+        ],
+        conventions: [],
+        questions: [],
+        assumptions: [],
+      },
+    });
+    const res = await createRoadmap({ repoRoot: root, complete: m.complete, ask: asker((q) => q.options[0]).ask, questionMode: "essential" }, { goal: "a fridge app", verifyExisting: false });
+    assert.equal(res.ok, true, res.text);
+    const units = loadRoadmap(root)!.units;
+    const by = (t: string) => units.find((u) => u.title === t)!;
+    assert.equal(by("Offline screen cache").buildsUi, false);
+    assert.equal(by("Fridge").buildsUi, true);
+    const depTitles = (t: string) => by(t).deps.map((id) => units.find((u) => u.id === id)?.title);
+    assert.ok(depTitles("Fridge").includes("Design system"));
+    assert.ok(!depTitles("Offline screen cache").includes("Design system"), "the word 'screen' in the title did not make it a UI unit");
+  });
+  test("a unit that did not say is judged by its words, as a fallback only; a value that is not a plain boolean is ignored", () => {
+    const w = withDesignUnit([{ title: "Home screen", area: "UI" }, { title: "Storage", area: "Data" }, { title: "Settings", area: "Core", buildsUi: false }]);
+    assert.deepEqual(w.find((d) => d.title === "Home screen")!.deps, ["Design system"]);
+    assert.deepEqual(w.find((d) => d.title === "Storage")!.deps ?? [], []);
+    assert.deepEqual(w.find((d) => d.title === "Settings")!.deps ?? [], []);
+    const src = fs.readFileSync("src/roadmapPlan.ts", "utf8");
+    assert.match(src, /u\?\.buildsUi === true \|\| u\?\.buildsUi === "true"/);
+    assert.equal((src.match(/"deps":\[\],"buildsUi":false,"acceptance":\[""\]\}/g) ?? []).length, 3, "all three unit shapes the planner is shown");
+    assert.match(src, /"buildsUi": true when the unit builds or changes screens, components or styling a person sees, false for data, storage, networking, build or configuration work/);
+  });
+});
+
+describe("what the dry run showed, tightened", () => {
+  const many = (n: number, perSection = 5) => ({
+    sections: Array.from({ length: Math.ceil(n / perSection) }, (_, s) => ({
+      id: `s${s}`,
+      title: `Section ${s}`,
+      questions: Array.from({ length: Math.min(perSection, n - s * perSection) }, (_, i) => Q(`Question ${s}.${i}`)),
+    })),
+  });
+  test("a model that asks too much is cut off: 15 questions in all, 3 in a section, earliest first; a follow-up round is smaller (6)", () => {
+    const b = parseBatch(JSON.stringify(many(40)));
+    assert.equal(b.sections.reduce((n, s) => n + s.questions.length, 0), 15, "eight sections of five would be 40; three each would be 24; the total stops it at 15");
+    assert.ok(b.sections.every((s) => s.questions.length <= 3), "never more than three in a section");
+  });
+  test("the cap is on the total, and the first sections keep theirs", () => {
+    const b = parseBatch(JSON.stringify(many(100, 3)));
+    assert.equal(b.sections.reduce((n, s) => n + s.questions.length, 0), 15);
+    assert.deepEqual(b.sections.map((s) => s.questions.length), [3, 3, 3, 3, 3]);
+    const follow = parseBatch(JSON.stringify(many(100, 3)), MAX_FOLLOW_UP_QUESTIONS);
+    assert.equal(follow.sections.reduce((n, s) => n + s.questions.length, 0), 6);
+  });
+  test("the instructions say what the dry run showed was missing", () => {
+    const text = questionnaireMessages("a fridge app", undefined)[0].content;
+    assert.match(text, /at most 15 questions in all and at most 3 in any section; fewer is better/);
+    assert.match(text, /make sense whatever the earlier answers were[\s\S]*'Not applicable: just me'/);
+    assert.match(text, /'look' section asks up to 3 separate questions: the feel, light or dark or both, and whether they have colours, a logo or apps they like/);
+    assert.match(text, /'edges' section asks at least one situation about losing information, and, when anyone else's information could be involved, one about privacy/);
+  });
+  test("a follow-up round uses the smaller cap in the flow", async () => {
+    const m = model({ followUp: many(30, 3) });
+    const a = asker((q) => q.options[0]);
+    await runQuestionnaire({ complete: m.complete, ask: a.ask }, { goal: "x" });
+    assert.equal(a.asked.length, 3 + 6, "the first round's 3 plus at most 6 follow-ups");
+  });
+  test("a starter template is a new build for the questionnaire too", () => {
+    const flow = fs.readFileSync("src/intake.ts", "utf8");
+    assert.ok(flow.includes("return !args.referenceDir && isNewProject(repoRoot);"));
   });
 });
 
