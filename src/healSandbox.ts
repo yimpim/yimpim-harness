@@ -401,10 +401,10 @@ const TO_END = 1_000_000_000;
 
 /**
  * When to stop an agent that is not making progress, judged by what it has done and what it has LEARNED, never by a count of rounds:
- *  1. the same test result N times in a row with no change made in between;
- *  2. N rounds of edits with no test run (editing blind);
- *  3. 2N rounds that learned nothing new: no edit, no test run, and no look at anything not already seen (re-reading lines already read, a search
- *     already made, recording a deviation, a refused run, a tool it was not offered).
+ * 1. the same test result N times in a row with no change made in between;
+ * 2. N rounds of edits with no test run (editing blind);
+ * 3. 2N rounds that learned nothing new: no edit, no test run, and no look at anything not already seen (re-reading lines already read, a search
+ * already made, recording a deviation, a refused run, a tool it was not offered).
  * Reading lines it has not read, or a search it has not made, IS progress: a benchmark run showed a model reading a 3,683-line app file in new chunks, the
  * way a person does, and being stopped for "reading" just before its first experiment. What it has seen is remembered per file as line ranges; the files
  * are finite, so new reading runs out, and the dollar budget bounds it in any case. A test run whose result is new, or an edit followed by a run, resets all.
@@ -528,46 +528,85 @@ export function fingerprintOf(output: string, root: string): string {
 
 const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}\n… (cut)` : s);
 
+/** Extracts the failing it/test blocks from the test file so the sandbox agent does not spend 10 rounds searching for them. */
+function extractFailingBlocks(testText: string, tests: string[], maxChars = 6000): string {
+  const lines = testText.split(/\r?\n/);
+  const out: string[] = [];
+  let used = 0;
+  for (const full of tests.slice(0, 8)) {
+    const title = full.split(" > ").pop()?.trim();
+    if (!title) continue;
+    const idx = lines.findIndex((l) => /\b(?:it|test)(?:\.(?:only|skip))?\s*\(/.test(l) && l.includes(title.slice(0, 60)));
+    if (idx < 0) continue;
+    const start = Math.max(0, idx - 2);
+    let depth = 0;
+    let opened = false;
+    let end = Math.min(lines.length - 1, idx + 70);
+    for (let i = idx; i <= end; i++) {
+      for (const ch of lines[i]) {
+        if (ch === "{") {
+          depth++;
+          opened = true;
+        } else if (ch === "}") {
+          depth--;
+        }
+      }
+      if (opened && depth <= 0) {
+        end = i;
+        break;
+      }
+    }
+    const snippet = `// ${full} (lines ${start + 1}-${end + 1})\n` + lines.slice(start, end + 1).join("\n");
+    if (used + snippet.length > maxChars) break;
+    out.push(snippet);
+    used += snippet.length;
+  }
+  return out.join("\n\n");
+}
+
 /** Short on purpose: the agent reads the files it needs with read_file instead of being handed 170k characters of them. */
-export function buildSandboxPrompt(a: { file: string; lineCount: number; cause: SandboxCause; ledger: string[]; firstModelNotes: string; failureDigest: string; deviationTestCap?: number }): string {
-  const tests = a.cause.tests.slice(0, 30).map((t) => `    - ${t}`).join("\n") + (a.cause.tests.length > 30 ? `\n    … and ${a.cause.tests.length - 30} more` : "");
-  const ledger = a.ledger.length > 0 ? a.ledger.slice(0, 20).join("\n") + (a.ledger.length > 20 ? `\n  … and ${a.ledger.length - 20} more fixed causes` : "") : "  (every test not listed above)";
+export function buildSandboxPrompt(a: { file: string; lineCount: number; testText?: string; cause: SandboxCause; ledger: string[]; firstModelNotes: string; failureDigest: string; deviationTestCap?: number }): string {
+  const tests = a.cause.tests.slice(0, 30).map((t) => ` - ${t}`).join("\n") + (a.cause.tests.length > 30 ? `\n … and ${a.cause.tests.length - 30} more` : "");
+  const ledger = a.ledger.length > 0 ? a.ledger.slice(0, 20).join("\n") + (a.ledger.length > 20 ? `\n … and ${a.ledger.length - 20} more fixed causes` : "") : " (every test not listed above)";
+  const testBlocks = a.testText ? extractFailingBlocks(a.testText, a.cause.tests) : "";
   return [
     "You are fixing ONE cause of failing tests in a JavaScript/TypeScript project, in a disposable SANDBOX copy of the project.",
     "",
     "THE CAUSE",
-    `  [${a.cause.count}×] ${a.cause.message}`,
-    "  Failing tests:",
+    ` [${a.cause.count}×] ${a.cause.message}`,
+    " Failing tests:",
     tests,
-    `  What the first model said about it (it may be wrong): ${cut(a.cause.reason, 500)}`,
-    ...(a.cause.kind === "code" ? ["  The first model believed the APP is wrong here (the spec and the app disagree). That is for YOU to settle: see the rule below."] : []),
-    ...(a.cause.refs && a.cause.refs.length > 0 ? [`  Places it named (check them, do not trust them): ${a.cause.refs.join(", ")}`] : []),
+    ` What the first model said about it (it may be wrong): ${cut(a.cause.reason, 500)}`,
+    ...(a.cause.kind === "code" ? [" The first model believed the APP is wrong here (the spec and the app disagree). That is for YOU to settle: see the rule below."] : []),
+    ...(a.cause.refs && a.cause.refs.length > 0 ? [` Places it named (check them, do not trust them): ${a.cause.refs.join(", ")}`] : []),
     "",
     "WHAT ALREADY PASSES AND MUST KEEP PASSING",
     ledger,
     ...(a.firstModelNotes ? ["", "WHAT THE FIRST MODEL CHANGED", cut(a.firstModelNotes, 1000)] : []),
     "",
     `THE TEST FILE: ${a.file} (${a.lineCount} lines). Read it with read_file using line ranges. Search with search_code.`,
+    ...(testBlocks ? ["", "FAILING TEST CODE (already extracted — do not re-read these ranges):", cut(testBlocks, 6500)] : []),
     "",
     "THE FAILURE NOW (this file run on its own)",
     cut(a.failureDigest, 3000),
     "",
     "HOW TO WORK",
+    "- Keep read_file calls focused (at most 120 lines around a search_code match) instead of reading large multi-hundred-line blocks.",
     "- Reading code cannot show timing (debounces, effects that run later), what an event carries, or what a mock returns. MEASURE: add console.log",
-    "  anywhere (the test or the app code), change a wait, then run_test with a namePattern for one test, and read the output. Repeat. This is a",
-    "  sandbox: experiments cost nothing and are thrown away.",
+    " anywhere (the test or the app code), change a wait, then run_test with a namePattern for one test, and read the output. Repeat. This is a",
+    " sandbox: experiments cost nothing and are thrown away.",
     "- Only the TEST FILE comes back to the real project, and only if it makes more tests pass without breaking any that pass now. Changes to app",
-    "  code are thrown away (they are fine for logging). Remove your console.log lines from the test file before you finish.",
+    " code are thrown away (they are fine for logging). Remove your console.log lines from the test file before you finish.",
     "- Fix the TEST when it is out of date. The app's code, its doc comments, the written spec (docs/ or *.md) and recent commits are the authority.",
     "- Never delete tests or assertions, never skip tests, never loosen an assertion into one that cannot fail.",
     "",
     "WHEN THE TEST AND THE APP DISAGREE, decide which of two things it is:",
     "- DEFECT: the app is wrong in a way that blocks a user, crashes, loses data, or sends or shows WRONG FUNCTIONAL DATA. NEVER bend the test for it.",
-    "  Show it at run time (run_test, console.log), then conclude with CANNOT_LOCATE starting \"APP BUG:\", naming file:line and the output that shows it.",
+    " Show it at run time (run_test, console.log), then conclude with CANNOT_LOCATE starting \"APP BUG:\", naming file:line and the output that shows it.",
     "- DEVIATION: the app WORKS but differs from the spec in a cosmetic way (a label or its casing, wording, order, styling, spacing). Change the TEST to",
-    `  expect what the working app does, so progress goes on, then call record_deviation for each one with the app's file:line and the spec's file:line`,
-    `  (both must exist). Keep every check: change the expected value or the selector, never remove or weaken an assertion. At most ${a.deviationTestCap ?? DEFAULT_DEVIATION_TEST_CAP} tests`,
-    "  may change. A test change that depends on a deviation with no valid record, or with a reference that does not exist, is thrown away.",
+    ` expect what the working app does, so progress goes on, then call record_deviation for each one with the app's file:line and the spec's file:line`,
+    ` (both must exist). Keep every check: change the expected value or the selector, never remove or weaken an assertion. At most ${a.deviationTestCap ?? DEFAULT_DEVIATION_TEST_CAP} tests`,
+    " may change. A test change that depends on a deviation with no valid record, or with a reference that does not exist, is thrown away.",
     "- Not sure it is only cosmetic? It is a defect.",
     "",
     "When the cause's tests pass (run them), or when you are sure the app is at fault, call conclude_task: FINISHED_PATCHING with what you changed and",
@@ -693,7 +732,7 @@ export function createSandboxRun(deps: {
       let error: Error | undefined;
       try {
         returned = await runToolAgent({
-          prompt: buildSandboxPrompt({ file: a.file, lineCount: a.testText.split(/\r?\n/).length, cause: a.cause, ledger: a.ledger, firstModelNotes: a.firstModelNotes, failureDigest: a.failureDigest, deviationTestCap: deps.deviationTestCap }),
+          prompt: buildSandboxPrompt({ file: a.file, lineCount: a.testText.split(/\r?\n/).length, testText: a.testText, cause: a.cause, ledger: a.ledger, firstModelNotes: a.firstModelNotes, failureDigest: a.failureDigest, deviationTestCap: deps.deviationTestCap }),
           repo: createRepoTools(sandbox.root, deps.config),
           repoRoot: sandbox.root,
           client: deps.client,
@@ -762,7 +801,7 @@ export function sandboxFor(deps: { client: OpenRouterClient; config: AgentConfig
     client: deps.client,
     config: deps.config,
     models: deps.repairModels.slice(1),
-    budgetUsd: cfg?.budgetUsd ?? 0.75,
+    budgetUsd: cfg?.budgetUsd ?? 1.75,
     stagnation: cfg?.stagnation ?? 3,
     deviationTestCap: cfg?.deviationTestCap ?? DEFAULT_DEVIATION_TEST_CAP,
     run: deps.run ?? runSuiteLogged,

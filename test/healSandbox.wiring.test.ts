@@ -16,7 +16,7 @@ const src = (f: string) => fs.readFileSync(f, "utf8");
 describe("configuration", () => {
   test("the defaults: on, $0.75 per cause, three rounds of patience, at most 12 tests per deviation", () => {
     const c = ConfigSchema.parse({});
-    assert.deepEqual(c.heal.sandbox, { enabled: true, budgetUsd: 0.75, stagnation: 3, deviationTestCap: 12 });
+    assert.deepEqual(c.heal.sandbox, { enabled: true, budgetUsd: 1.75, stagnation: 3, deviationTestCap: 12 });
   });
   test("each key can be set, and a nonsense value is refused", () => {
     assert.deepEqual(config({ sandbox: { enabled: false, budgetUsd: 0, stagnation: 5, deviationTestCap: 4 } }).heal.sandbox, { enabled: false, budgetUsd: 0, stagnation: 5, deviationTestCap: 4 });
@@ -80,7 +80,7 @@ describe("the three places a heal is started all ask sandboxFor, and use the JSO
   test("the stronger chain is every repair model after the first, and the budget and patience come from the setting", () => {
     const s = src("src/healSandbox.ts");
     assert.match(s, /models: deps\.repairModels\.slice\(1\)/);
-    assert.match(s, /budgetUsd: cfg\?\.budgetUsd \?\? 0\.75/);
+    assert.match(s, /budgetUsd: cfg\?\.budgetUsd \?\? 1\.75/);
     assert.match(s, /stagnation: cfg\?\.stagnation \?\? 3/);
     assert.match(s, /deviationTestCap: cfg\?\.deviationTestCap \?\? DEFAULT_DEVIATION_TEST_CAP/);
   });

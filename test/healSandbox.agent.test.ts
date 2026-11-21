@@ -240,11 +240,11 @@ describe("what comes back, and what does not", () => {
 
 describe("what stops it: its own word, the user's budget, or no progress. Never a count of rounds.", () => {
   test("the budget is the user's number, in dollars: it stops before the call that would pass it", async () => {
-    const { result, count } = await go(Array.from({ length: 50 }, () => ({ calls: [read()], cost: 0.3 })), { budgetUsd: 0.75, stagnation: 1000 });
+    const { result, count } = await go(Array.from({ length: 50 }, () => ({ calls: [read()], cost: 0.3 })), { budgetUsd: 1.75, stagnation: 1000 });
     assert.equal(result.stop, "budget");
-    assert.equal(count(), 3, "$0.30 × 3 = $0.90 ≥ $0.75: no fourth call");
-    assert.match(result.conclusion, /\$0\.90 of \$0\.75/);
-    assert.ok(Math.abs(result.cost - 0.9) < 1e-9);
+    assert.equal(count(), 6, "$0.30 × 5 = $1.50 is under $1.75, so a sixth call is made; $0.30 × 6 = $1.80 ≥ $1.75: no seventh");
+    assert.match(result.conclusion, /\$1\.80 of \$1\.75/);
+    assert.ok(Math.abs(result.cost - 1.8) < 1e-9);
   });
 
   test("no budget (0) means no dollar stop", async () => {
@@ -335,7 +335,8 @@ describe("what stops it: its own word, the user's budget, or no progress. Never 
     fs.writeFileSync(path.join(repo, FILE), START); // unchanged on disk; the agent writes suspicious code into a NEW test file
     const evil = { name: "write_file", args: { path: "__tests__/zz.test.ts", content: "test('x', () => { require('child_process').execSync('rm -rf /'); });\n" } };
     const { result } = await go([{ calls: [evil] }, ...Array.from({ length: 20 }, () => ({ calls: [runT()] }))]);
-    assert.equal(result.stop, "stagnation");
+    // the message says why if the sandbox itself ever fails to start (seen once, under the load of the full parallel suite, never in isolation)
+    assert.equal(result.stop, "stagnation", `stopped as "${result.stop}": ${result.conclusion}`);
     assert.equal(result.runs, 0, "nothing was ever run");
   });
 });
@@ -534,7 +535,8 @@ describe("the rule the stronger model works by: defect or deviation", () => {
   test("it is still short with the rule in it, even with huge inputs", () => {
     const big = "x".repeat(50_000);
     const p = prompt({ cause: { ...CAUSE, kind: "code", refs: Array.from({ length: 8 }, (_, i) => `src/file${i}.ts:${i}`), tests: Array.from({ length: 100 }, (_, i) => `t${i}`), reason: big }, ledger: Array.from({ length: 100 }, (_, i) => `  - fixed ${i}`), firstModelNotes: big, failureDigest: big });
-    assert.ok(p.length < 8000, `prompt is ${p.length} characters`);
+    // Without the failing tests' own code (which has its own 6,500-character bound, see the next tests): the rule text, the cause, the ledger, the digest.
+    assert.ok(p.length < 8500, `prompt is ${p.length} characters`);
   });
 });
 
