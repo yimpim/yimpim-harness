@@ -10,6 +10,7 @@
 import { createRunTestSession } from "./sandboxRunTest.js";
 import { makeCommandReviewer } from "./commandReview.js";
 import { securityReviewCall } from "./healSandbox.js";
+import { panelReviewerFor } from "./securityPanel.js";
 import { runSuiteLogged } from "./testLog.js";
 import type { OpenRouterClient } from "./openrouter.js";
 import type { AgentConfig } from "./config.js";
@@ -24,7 +25,8 @@ export const REPAIR_RUN_TEST_NOTE =
 export function repairRunTestFor(deps: { client: OpenRouterClient; config: AgentConfig; repoRoot: string; run?: RunTests; log?: (line: string) => void }): (args: Record<string, unknown>) => Promise<string> {
   const session = createRunTestSession({
     root: deps.repoRoot,
-    gate: { review: makeCommandReviewer(securityReviewCall(deps.client, deps.config, "Security: reviewing code before a repair test run")) },
+    // The panel of judges when two or more different models are configured, else the single security model.
+    gate: { review: panelReviewerFor(deps.client, deps.config) ?? makeCommandReviewer(securityReviewCall(deps.client, deps.config, "Security: reviewing code before a repair test run")) },
     fallbackRun: deps.run ?? runSuiteLogged,
     preapproveCurrent: true,
     purpose: "repair: run the failing test in the project",

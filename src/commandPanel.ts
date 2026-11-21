@@ -213,7 +213,20 @@ export function makePanel(judges: Judge[]): Panel {
 
   return {
     async reviewCommand(req) {
-      const { files, unreadable } = filesToRead(req);
+      const read = filesToRead(req);
+      const files = [...read.files];
+      let unreadable = read.unreadable;
+      // The code the agent changed that this run would load (a test run's gate): shown in full too, or the judges would be judging a command that names none of it.
+      for (const rel of req.show ?? []) {
+        if (unreadable || files.some((f) => f.rel === rel)) continue;
+        try {
+          const abs = path.join(req.repoRoot, rel);
+          if (fs.statSync(abs).size > 80_000) unreadable = `${rel} is too large to read in full`;
+          else files.push({ rel, text: fs.readFileSync(abs, "utf8") });
+        } catch {
+          unreadable = `${rel} could not be read`;
+        }
+      }
       if (unreadable) return { allow: false, why: `${unreadable}, so the judges cannot be shown all of it; a person decides` };
       const script = scriptContext(req);
       const allText = [req.argv.join(" "), req.purpose, ...(req.notes ?? []), script?.text ?? "", ...files.map((f) => f.text), ...(script?.files ?? []).map((f) => f.text)].join("\n");
