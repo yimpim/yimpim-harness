@@ -9,6 +9,7 @@
  */
 import { collectFiles, type FileText } from "./securityAudit.js";
 import type { BuiltUnit } from "./roadmap.js";
+import { parseCodeRefs, resolveRefs, type CodeRef } from "./codeContext.js";
 
 export type Msg = { role: "system" | "user"; content: string };
 export type Call = (messages: Msg[]) => Promise<string>;
@@ -156,7 +157,7 @@ const count = (hay: string, needle: string, cap: number): number => {
 };
 
 /** The files most likely to implement a requirement, with the matching lines. Test, doc and generated files are not candidates. */
-export function findCandidates(req: Requirement, files: FileText[], lower: Map<string, string>, boost: Set<string> = new Set(), maxFiles = 4, deep = false, strong: Set<string> = new Set()): Candidate[] {
+export function findCandidates(req: Requirement, files: FileText[], lower: Map<string, string>, boost: Set<string> = new Set(), maxFiles = 4, deep = false, strong: Set<string> = new Set(), cited: CodeRef[] = []): Candidate[] {
   const notEvidence = req.kind === "test" ? NOT_EVIDENCE_TESTS_OK : NOT_EVIDENCE;
   const terms = req.terms.map((t) => t.toLowerCase());
   const words = wordsOf(req.text);
@@ -176,10 +177,79 @@ export function findCandidates(req: Requirement, files: FileText[], lower: Map<s
     }
     if (boost.has(f.rel)) score += 4;
     if (strong.has(f.rel)) score += 15;
+    // A file the request itself cites is where its author says the work is: it ranks above anything found by words.
+    if (cited.some((c) => c.file === f.rel)) score += CITED_SCORE;
     if (score > 0) scored.push({ f, score });
   }
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, maxFiles).map(({ f, score }) => ({ file: f.rel, score, snippet: deep ? windows(f.text, [...terms, ...words], 16, 7000, 5) : windows(f.text, [...terms, ...words]) }));
+  return scored.slice(0, maxFiles).map(({ f, score }) => {
+    const here = cited.filter((c) => c.file === f.rel && c.from !== undefined);
+    const own = deep ? windows(f.text, [...terms, ...words], 16, 7000, 5) : windows(f.text, [...terms, ...words]);
+    return { file: f.rel, score, snippet: here.length > 0 ? citedSnippet(f.text, here, own, deep) : own };
+  });
+}
+
+const CITED_SCORE = 25;
+const CITED_MAX_CHARS = 6000;
+const CITED_MAX_CHARS_DEEP = 12000;
+
+/** Numbered lines (the same "12: code" form as the windows, so a quote is copied the same way). */
+function numberedLines(lines: string[], from: number, to: number): string {
+  return lines.slice(from - 1, to).map((l, k) => `${from + k}: ${l.slice(0, 200)}`).join("\n");
+}
+
+/** The cited lines first (bounded), then the keyword windows if there is room: the author's pointer, then the search's. */
+function citedSnippet(text: string, refs: CodeRef[], windowsText: string, deep: boolean): string {
+  const lines = text.split(/\r?\n/);
+  const cap = deep ? CITED_MAX_CHARS_DEEP : CITED_MAX_CHARS;
+  const parts: string[] = [];
+  let used = 0;
+  for (const r of refs) {
+    const from = Math.max(1, r.from!);
+    const to = Math.min(lines.length, Math.max(from, r.to ?? from));
+    const block = numberedLines(lines, from, to).slice(0, Math.max(0, cap - used));
+    if (!block) break;
+    parts.push(block);
+    used += block.length;
+  }
+  const lead = parts.join("\n...\n");
+  return used < cap / 4 ? `${lead}\n...\n${windowsText}`.slice(0, cap) : lead;
+}
+
+/**
+ * The places a requirement points at. They come from the requirement's own words and search terms, and, because the model that wrote the requirement may have left a range out,
+ * from the request's own text for any file the requirement names. Test, doc and generated files are not evidence, so a citation of one is not a lead (a test requirement excepted).
+ */
+export function citationsFor(req: Requirement, sourceRefs: CodeRef[], lineCounts: { rel: string; lines: number }[]): CodeRef[] {
+  const own = parseCodeRefs(`${req.text}\n${req.terms.join("\n")}`);
+  const last = (p: string) => p.split("/").pop()!.toLowerCase();
+  const named = new Set(own.map((r) => last(r.file)));
+  const fromSource = sourceRefs.filter((r) => r.from !== undefined && named.has(last(r.file)));
+  const notEvidence = req.kind === "test" ? NOT_EVIDENCE_TESTS_OK : NOT_EVIDENCE;
+  return resolveRefs([...own, ...fromSource], lineCounts).filter((r) => !notEvidence.test(r.file));
+}
+
+/** A file this long is sent to the whole-file round as the parts that matter, not every line. */
+export const WHOLE_FILE_MAX_LINES = 900;
+const WHOLE_FILE_PAD = 40;
+
+/** The parts of a long file that matter to the requirements that point at it: what they cite (with some lines around it), and where their words match. */
+function partsOfFile(text: string, cited: CodeRef[], reqs: Requirement[]): string {
+  const lines = text.split(/\r?\n/);
+  const ranges = cited
+    .filter((c) => c.from !== undefined)
+    .map((c) => [Math.max(1, c.from! - WHOLE_FILE_PAD), Math.min(lines.length, (c.to ?? c.from!) + WHOLE_FILE_PAD)] as [number, number])
+    .sort((a, b) => a[0] - b[0]);
+  const merged: [number, number][] = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1] + 1) last[1] = Math.max(last[1], r[1]);
+    else merged.push([...r]);
+  }
+  const out = merged.map(([a, b]) => numberedLines(lines, a, Math.min(b, a + 400)));
+  const terms = [...new Set(reqs.flatMap((r) => [...r.terms.map((t) => t.toLowerCase()), ...wordsOf(r.text)]))];
+  out.push(windows(text, terms, 16, 7000, 5));
+  return out.join("\n...\n").slice(0, 24000);
 }
 
 /** Up to two windows of numbered lines around the lines that match the most terms. */
@@ -337,6 +407,8 @@ export interface CheckOptions {
   /** Files the project's own map ranks for this request: they are searched first. */
   shortlist?: string[];
   files?: FileText[];
+  /** The request and any document it names, as the person wrote them: the places they cite (file.kt:1720-2040) are read where they are cited. */
+  sourceText?: string;
 }
 
 /** Checks each requirement against the code. Never throws: a requirement the model could not judge is "unclear". */
@@ -352,6 +424,14 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
   const boost = new Set((o.shortlist ?? []).map((p) => p.replace(/\\/g, "/")));
   const leads = new Map(o.requirements.map((r) => [r.id, unitsFor(r, o.built ?? [])]));
   const strongFor = (r: Requirement) => new Set(leads.get(r.id)!.flatMap((u) => u.files.map((f) => f.replace(/\\/g, "/"))));
+  // The places the request cites: found once, in the request's own words, and handed to every look at a requirement that names them.
+  const lineCounts = files.map((f) => ({ rel: f.rel, lines: f.text.split(/\r?\n/).length }));
+  const sourceRefs = o.sourceText ? parseCodeRefs(o.sourceText) : [];
+  const citedMemo = new Map<string, CodeRef[]>();
+  const citedFor = (r: Requirement): CodeRef[] => {
+    if (!citedMemo.has(r.id)) citedMemo.set(r.id, citationsFor(r, sourceRefs, lineCounts));
+    return citedMemo.get(r.id)!;
+  };
   const out = new Map<string, Checked>();
   // A manual step (a test to run on a server, a decision for the owner) is not something the code can show: it is neither built nor missing.
   for (const r of o.requirements.filter((x) => x.kind === "manual")) {
@@ -362,7 +442,7 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
   for (const r of o.requirements.filter((x) => x.kind !== "manual" && inReference(x))) {
     out.set(r.id, { req: r, verdict: "manual", evidence: [], missing: "", note: "It names a file in the reference folder, which is the source being ported from, not code this project has; it cannot be checked against the code." });
   }
-  const withCode = o.requirements.filter((r) => r.kind !== "manual" && !out.has(r.id)).map((req) => ({ req, cands: findCandidates(req, files, lower, boost, 4, false, strongFor(req)) }));
+  const withCode = o.requirements.filter((r) => r.kind !== "manual" && !out.has(r.id)).map((req) => ({ req, cands: findCandidates(req, files, lower, boost, 4, false, strongFor(req), citedFor(req)) }));
   // A requirement that matches no code at all is missing: no model needs to be asked, and an empty project costs nothing.
   const asked = withCode.filter(({ req, cands }) => {
     if (cands.length > 0) return true;
@@ -428,7 +508,7 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
     const c = out.get(r.id);
     return c && (c.verdict === "partial" || c.verdict === "unclear") && c.note !== "No code in the project matched it.";
   });
-  const deepFor = new Map(again.map((req) => [req.id, findCandidates(req, files, lower, boost, 8, true, strongFor(req))]));
+  const deepFor = new Map(again.map((req) => [req.id, findCandidates(req, files, lower, boost, 8, true, strongFor(req), citedFor(req))]));
   const secondBatches: (typeof again)[] = [];
   for (let i = 0; i < again.length; i += 2) secondBatches.push(again.slice(i, i + 2));
   await Promise.all(secondBatches.map(async (chunk) => {
@@ -456,14 +536,24 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
     const c = out.get(r.id);
     return c && (c.verdict === "partial" || c.verdict === "unclear") && c.note !== "No code in the project matched it.";
   });
-  const filesOf = new Map(undecided.map((req) => [req.id, findCandidates(req, files, lower, boost, 3, false, strongFor(req)).map((c) => c.file)]));
+  const filesOf = new Map(undecided.map((req) => [req.id, findCandidates(req, files, lower, boost, 3, false, strongFor(req), citedFor(req)).map((c) => c.file)]));
   const askedAbout = new Map<string, Requirement[]>();
   for (const req of undecided) for (const file of filesOf.get(req.id)!) askedAbout.set(file, [...(askedAbout.get(file) ?? []), req]);
   const seen = new Map<string, { file: string; c: Checked }[]>();
+  const partialFiles = new Set<string>();
   await Promise.all(
     [...askedAbout].map(async ([file, reqs]) => {
-      const numbered = byRel.get(file)!.split(/\r?\n/).map((l, i) => `${i + 1}: ${l}`).join("\n");
-      const user = `The file ${file} (complete):\n${numbered}\n\nThe requirements to judge against it:\n${reqs.map((r) => `### ${r.id}: ${r.text}`).join("\n")}`;
+      const text = byRel.get(file)!;
+      const total = text.split(/\r?\n/).length;
+      const citedHere = reqs.flatMap((r) => citedFor(r).filter((c) => c.file === file));
+      // A long file that a request points into is sent as the parts that matter. A requirement judged from parts can say it is not THERE, never that it is not in the file.
+      const partial = total > WHOLE_FILE_MAX_LINES && citedHere.some((c) => c.from !== undefined);
+      if (partial) partialFiles.add(file);
+      const body = partial ? partsOfFile(text, citedHere, reqs) : text.split(/\r?\n/).map((l, i) => `${i + 1}: ${l}`).join("\n");
+      const head = partial
+        ? `The file ${file} has ${total} lines. Only parts of the file are shown (the lines the request points at, and the lines where the requirements' words match). If the part that would implement a requirement is not among them, answer unclear, not missing:`
+        : `The file ${file} (complete):`;
+      const user = `${head}\n${body}\n\nThe requirements to judge against it:\n${reqs.map((r) => `### ${r.id}: ${r.text}`).join("\n")}`;
       let raws: Raw[] = [];
       try {
         raws = parseVerdicts(await o.call([{ role: "system", content: JUDGE_WHOLE_SYSTEM }, { role: "user", content: user }]));
@@ -472,7 +562,11 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
       }
       for (const req of reqs) {
         const raw = raws.find((r) => r.id === req.id);
-        if (raw) seen.set(req.id, [...(seen.get(req.id) ?? []), { file, c: settle(raw, req, byRel) }]);
+        if (!raw) continue;
+        let c = settle(raw, req, byRel);
+        // Only parts of this file were shown: "nothing here" is not "not in the file".
+        if (partialFiles.has(file) && c.verdict === "missing") c = { ...c, verdict: "unclear", note: `Not seen in the parts of ${file} that were checked (the file was not read in full). ${c.note}`.trim() };
+        seen.set(req.id, [...(seen.get(req.id) ?? []), { file, c }]);
       }
     })
   );
@@ -561,7 +655,7 @@ export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult>
   }
   if (!parsed || !parsed.applies) return none;
   a.onRequirements?.(parsed.requirements.length);
-  const items = await checkRequirements({ call: a.call, cheapCall: a.cheapCall, repoRoot: a.repoRoot, requirements: parsed.requirements, shortlist: a.shortlist, built: a.built, exclude: a.exclude });
+  const items = await checkRequirements({ call: a.call, cheapCall: a.cheapCall, repoRoot: a.repoRoot, requirements: parsed.requirements, shortlist: a.shortlist, built: a.built, exclude: a.exclude, sourceText: `${a.request}\n${a.docs ?? ""}` });
   const checkable = items.filter((i) => i.verdict !== "manual");
   return { applies: true, items, allBuilt: checkable.length > 0 && checkable.every((i) => i.verdict === "built"), note: "" };
 }

@@ -12,6 +12,9 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { excerptAround, type Digest } from "./failureDigest.js";
 import { isTestPath } from "./focusTests.js";
+import { SAFE, numbered, readRange, unseenRanges } from "./codeContext.js";
+
+const OUTLINE = /^\s*(?:describe|it|test|context|suite|beforeEach|beforeAll|afterEach|afterAll)\b.*[(`'"]|^\s*def test_|^\s*func Test|^\s*@Test|^\s*fun\s+[`\w]|^\s*(?:public |private )?(?:void|async def)\s+test/;
 
 const execFileAsync = promisify(execFile);
 
@@ -105,14 +108,6 @@ export function applyEdits(content: string, edits: Edit[]): { ok: true; text: st
   return { ok: true, text };
 }
 
-const numbered = (lines: string[], from: number, to: number): string => {
-  const width = String(to).length;
-  const rows: string[] = [];
-  for (let n = from; n <= to; n++) rows.push(`${String(n).padStart(width)}| ${lines[n - 1]}`);
-  return rows.join("\n");
-};
-
-const OUTLINE = /^\s*(?:describe|it|test|context|suite|beforeEach|beforeAll|afterEach|afterAll)\b.*[(`'"]|^\s*def test_|^\s*func Test|^\s*@Test|^\s*fun\s+[`\w]|^\s*(?:public |private )?(?:void|async def)\s+test/;
 
 /** A large file in parts: its top (imports, mocks, setup), the regions the failure points at, and an outline, all with line numbers. */
 export function presentLargeFile(original: string, file: string, digest: Digest | undefined, repoRoot: string): string {
@@ -142,24 +137,6 @@ export function presentLargeFile(original: string, file: string, digest: Digest 
   return out.join("\n");
 };
 
-export const SAFE = (rel: string) => !rel.startsWith("..") && !path.isAbsolute(rel) && !/(^|\/)(\.git|\.agent|node_modules)(\/|$)/.test(rel);
-
-/** Lines `from..to` of a repository file, numbered. Undefined when the file is missing or off limits. */
-export function readRange(repoRoot: string, relRaw: string, from = 1, to = from + 199): string | undefined {
-  const rel = relRaw.replace(/\\/g, "/").replace(/^\.\//, "");
-  if (!SAFE(rel)) return undefined;
-  try {
-    const abs = path.join(repoRoot, rel);
-    if (!fs.statSync(abs).isFile()) return undefined;
-    const lines = fs.readFileSync(abs, "utf-8").split(/\r?\n/);
-    const a = Math.max(1, Math.floor(Number(from)) || 1);
-    const b = Math.min(lines.length, Math.max(a, Math.floor(Number(to)) || a + 199), a + 399);
-    return `--- ${rel} lines ${a}-${b} of ${lines.length}\n${numbered(lines, a, b)}`;
-  } catch {
-    return undefined;
-  }
-}
-
 /** A literal search of the repository's tracked files: where a name is defined, used or mocked. */
 export async function searchRepo(repoRoot: string, pattern: string): Promise<string> {
   const p = String(pattern ?? "").trim().slice(0, 200);
@@ -173,7 +150,8 @@ export async function searchRepo(repoRoot: string, pattern: string): Promise<str
   }
 }
 
-export { excerptAround };
+// The reading layer lives in codeContext.ts (shared with existence, discovery and the planner); these stay importable from here.
+export { excerptAround, SAFE, readRange, unseenRanges };
 
 // ------------------------------------------------------------------------------------------------------------------------------ probe
 
@@ -222,18 +200,3 @@ export async function runProbe(run: RunTests, repoRoot: string, spec: { file?: u
 
 const posixJoin = (dir: string, name: string) => (dir === "." ? name : `${dir}/${name}`);
 
-// ------------------------------------------------------------------------------------------------------------------------ lines already shown
-/** The parts of lines a..b that are NOT inside any of the ranges already shown, in order. Empty when all of it has been seen. */
-export function unseenRanges(a: number, b: number, shown: readonly (readonly [number, number])[]): [number, number][] {
-  const out: [number, number][] = [];
-  let at = a;
-  for (const [s, e] of [...shown].sort((x, y) => x[0] - y[0])) {
-    if (e < at) continue;
-    if (s > b) break;
-    if (s > at) out.push([at, s - 1]);
-    at = Math.max(at, e + 1);
-    if (at > b) break;
-  }
-  if (at <= b) out.push([at, b]);
-  return out;
-}
