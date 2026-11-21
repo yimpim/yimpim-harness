@@ -4211,6 +4211,12 @@ async function main(): Promise<void> {
     return;
   }
   if (args.command === "init") { process.exitCode = cmdInit(args.repoRoot, args.yes); return; }
+  // setup-env installs software and may use sudo: it is started only by a person, from here. It is not a tool, a slash command or a roadmap step (envSetup/setup.ts).
+  if (args.command === "setup-env") {
+    const { runSetupEnv } = await import("./envSetup/setup.js");
+    process.exitCode = await runSetupEnv(process.argv.slice(3));
+    return;
+  }
 
   // First run: nobody should have to read docs to get started.
   if (args.command === "run" && needsSetup() && !args.yes) {

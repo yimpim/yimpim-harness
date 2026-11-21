@@ -12,6 +12,7 @@ import { Config } from "./config.js";
 import { probeCapabilities, Capabilities } from "./capabilities.js";
 import { detectProject, ProjectProfile } from "./projectProfile.js";
 import { apiKeyStatus, describeBackend, detectStaleEnvKey } from "./secrets.js";
+import { toolchainChecks } from "./envSetup/doctorChecks.js";
 
 export interface DoctorReport {
   /** False only when something makes a run impossible. */
@@ -28,6 +29,8 @@ interface Check {
   ok: boolean;
   /** A failed required check blocks the run. */
   required: boolean;
+  /** A problem that is not a blocker but is serious (an exposed login, a missing aapt2): drawn as a failure, never stops a run. */
+  severity?: "fail";
   detail: string;
   /** What the user loses if this stays missing. */
   impact?: string;
@@ -37,7 +40,7 @@ interface Check {
 function renderChecks(title: string, checks: Check[], lines: string[]): void {
   lines.push(`${title}`);
   for (const c of checks) {
-    const icon = c.ok ? OK : c.required ? BAD : WARN;
+    const icon = c.ok ? OK : c.required || c.severity === "fail" ? BAD : WARN;
     lines.push(`  ${icon} ${c.label}: ${c.detail}`);
     if (!c.ok && c.impact) lines.push(`      impact: ${c.impact}`);
     if (!c.ok && c.fix) lines.push(`      fix:    ${c.fix}`);
@@ -377,6 +380,17 @@ export async function runDoctor(
   } else {
     lines.push(`  ${WARN} project detection failed: ${detectionError}`);
     lines.push("");
+  }
+
+  // The machine itself: which toolchains are installed, and whether the host is safe to leave running. Read-only; each problem says what to run.
+  try {
+    renderChecks(
+      "Developer toolchains and host security (yimpim setup-env installs the toolchains)",
+      toolchainChecks().map((c) => ({ label: c.label, ok: c.status === "pass", required: false, ...(c.status === "fail" ? { severity: "fail" as const } : {}), detail: c.detail, ...(c.fix ? { fix: c.fix } : {}) })),
+      lines
+    );
+  } catch (err: any) {
+    lines.push(`  ${WARN} the machine checks could not run: ${String(err?.message ?? err).slice(0, 120)}`, "");
   }
 
   lines.push("Models");

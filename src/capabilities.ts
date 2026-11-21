@@ -335,7 +335,8 @@ export function probeJava(): Capability {
  * command, Java-dependent or not.
  */
 export function javaAwareEnv(java: Capability, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const merged: NodeJS.ProcessEnv = { ...env };
+  // Commands an agent runs carry this marker; setup-env refuses to start when it is set.
+  const merged: NodeJS.ProcessEnv = { ...env, YIMPIM_AGENT_CONTEXT: "1" };
   if (java.bin && fsSync.existsSync(path.join(java.bin, "bin"))) {
     merged.JAVA_HOME = java.bin;
     const sep = process.platform === "win32" ? ";" : ":";
