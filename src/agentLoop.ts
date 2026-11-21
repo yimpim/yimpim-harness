@@ -15,6 +15,7 @@ import { promptView } from "./repoMap.js";
 import { designSystemForPrompt, detectUiStack } from "./uiDesign.js";
 import { coreRulesBlock } from "./uiKnowledge.js";
 import { securityForPrompt } from "./securityPlan.js";
+import { toolsHint } from "./projectTools.js";
 
 /**
  * A short "→ N result(s)" suffix for a read-only tool's log line, built from
@@ -178,6 +179,12 @@ export function buildContextualSystemPrompt(
   // PLANNER_SYSTEM's implementation-decomposition rules unchanged.
   if (agentName === "PLANNER" || agentName === "planner") {
     persona = `${persona}\n\n${verifyOnly ? PLANNER_VERIFY_SYSTEM : PLANNER_SYSTEM}`;
+  }
+
+  // The tools the project already has (its test runner, its scripts), so an editing agent uses them and does not guess one that is not installed.
+  if (agentName === "EDITOR" || agentName === "REPAIR") {
+    const hint = toolsHint(repoRoot);
+    if (hint) persona += `\n\n${hint}`;
   }
 
   // 1. Inject AGENT.md if present

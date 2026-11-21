@@ -5,6 +5,8 @@ import crypto from "crypto";
 import { execFile } from "child_process";
 import type { ReviewRequest, ReviewOutcome, ActionReview } from "./commandReview.js";
 import { cleanScratch, scratchTarget, SCRATCH_DIR } from "./scratch.js";
+import { isFocusPath } from "./focusTests.js";
+import { missingTool, missingToolMessage } from "./projectTools.js";
 import { staleTestReferences, renderReferences, referencesKey, type Reference } from "./testReferences.js";
 import {
   CommandApprovals,
@@ -1027,7 +1029,7 @@ export class AgentTools {
    */
   private plannerInspectedRanges = new Map<string, Array<{ start?: number; end?: number }>>();
   private plannerMaxInspectedFiles = PLANNER_MAX_INSPECTED_FILES;
-  private maxFilesPerPhase = 20;
+  private maxFilesPerPhase = 0; // 0 = no limit
   private currentPhaseName?: string;
   private activeAgent = "EDITOR";
   /** Accumulates across the WHOLE run — never reset by beginPhase. */
@@ -1096,6 +1098,8 @@ export class AgentTools {
   private agentCreatedDirs = new Set<string>();
   private commandReviewer?: (req: ReviewRequest) => Promise<ReviewOutcome>;
   private reviewerCoversElevated = false;
+  /** Programs the project does not have that were already declined once (so asking for one again asks a person). */
+  private missingToolRefused = new Set<string>();
   private actionReviewer?: (a: ActionReview) => Promise<ReviewOutcome>;
 
   /**
@@ -1204,7 +1208,7 @@ export class AgentTools {
     this.commandMemo.clear();
     this.dependencyRequestMemo.clear();
     this.plannedFiles = plannedFiles.map((p) => p.replace(/\\/g, "/"));
-    this.maxFilesPerPhase = maxFiles ?? (this.config as any).limits?.maxFilesPerPhase ?? 20;
+    this.maxFilesPerPhase = maxFiles ?? (this.config as any).limits?.maxFilesPerPhase ?? 0;
     this.currentPhaseName = phaseName;
   }
 
@@ -1550,7 +1554,7 @@ export class AgentTools {
     const key = relPath.replace(/\\/g, "/");
     if (this.filesWritten.has(key)) return;
 
-    if (this.filesWritten.size >= this.maxFilesPerPhase) {
+    if (this.maxFilesPerPhase > 0 && this.filesWritten.size >= this.maxFilesPerPhase) {
       throw new Error(
         `[WRITE BUDGET] This phase has already modified ${this.filesWritten.size} files ` +
           `(limit ${this.maxFilesPerPhase}) and "${relPath}" would be another. ` +
@@ -1571,11 +1575,12 @@ export class AgentTools {
     this.filesWritten.add(key);
 
     if (this.plannedFiles.length > 0) {
-      const expected = this.plannedFiles.some((p) => key === p || key.endsWith(`/${p}`) || p.endsWith(`/${key}`));
+      // The focused tests the harness has the Editor write for every change are never in a plan: they are not a stray edit, so they are not warned about.
+      const expected = isFocusPath(key) || this.plannedFiles.some((p) => key === p || key.endsWith(`/${p}`) || p.endsWith(`/${key}`));
       if (!expected) {
         console.warn(
           `[SCOPE] ⚠️ "${relPath}" is outside this phase's planned files ` +
-            `(${this.filesWritten.size}/${this.maxFilesPerPhase} used).`
+            (this.maxFilesPerPhase > 0 ? `(${this.filesWritten.size}/${this.maxFilesPerPhase} used).` : `(${this.filesWritten.size} file(s) written this phase).`)
         );
       }
     }
@@ -2408,6 +2413,18 @@ export class AgentTools {
         `PATH). It is probably not installed. Do not retry it: report this as a manual step so the user can ` +
         `install it.`
       );
+    }
+
+    // A program the project does not have (npx for something that is not installed): there is nothing for a person to decide, because the answer is "use what the
+    // project has". It is declined with what the project has, so the Editor corrects itself, BEFORE any judge is asked (three model calls for a program that is not
+    // even installed would be wasted). Asked again for the same program, the judges and a person decide.
+    if (decision.verdict === "ask") {
+      const missing = missingTool(decision.argv, this.repoRoot);
+      if (missing && !this.missingToolRefused.has(missing.toLowerCase())) {
+        this.missingToolRefused.add(missing.toLowerCase());
+        console.log(`[SECURITY] ✋ Not run, and no one needs to be asked: ${label} — "${missing}" is not installed in this project. The Editor is told what is.`);
+        return missingToolMessage(missing, this.repoRoot);
+      }
     }
 
     // Before a person is asked: a security model reads what is being run (a script in full) and clears what is plainly harmless. Destructive,
