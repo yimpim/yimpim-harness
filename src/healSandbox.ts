@@ -18,6 +18,7 @@ import { OpenRouterClient, type FunctionTool } from "./openrouter.js";
 import type { AgentConfig } from "./config.js";
 import { AgentTools, TOOLS_SCHEMA, RUN_TEST_TOOL, RECORD_DEVIATION_TOOL } from "./agentTools.js";
 import { validateDeviation, describeDeviation, DEFAULT_DEVIATION_TEST_CAP, type DeviationRecord } from "./healDeviation.js";
+import { testTitleOf, lineOfTest } from "./testNames.js";
 import { runToolAgent, runLabeledCompletion } from "./agentLoop.js";
 import { securityModels } from "./securityPlan.js";
 import { runSuiteLogged } from "./testLog.js";
@@ -528,30 +529,15 @@ export function fingerprintOf(output: string, root: string): string {
 
 const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}\n… (cut)` : s);
 
-/**
- * The title of the test itself, from the name a runner prints. Jest joins the describe blocks and the test with " › " (U+203A), which is NOT the
- * ASCII ">": splitting on " > " (as this once did) left the whole "Suite › Group › test" string, which appears on no line of the test file, so
- * no failing test's code was ever found. A name with no " › " is the title as it stands (a title may itself contain ">", e.g. "expects x > 0").
- */
-export function testTitleOf(full: string): string {
-  const parts = full.split(/\s+›\s+/);
-  return parts[parts.length - 1].trim();
-}
+export { testTitleOf };
 
 /** Extracts the failing it/test blocks from the test file so the sandbox agent does not spend 10 rounds searching for them. */
 export function extractFailingBlocks(testText: string, tests: string[], maxChars = 6000): string {
   const lines = testText.split(/\r?\n/);
   const out: string[] = [];
   let used = 0;
-  const isTestLine = (l: string) => /\b(?:it|test)(?:\.(?:only|skip|each))?\s*\(/.test(l);
   for (const full of tests.slice(0, 8)) {
-    // The title after the last " › ". A formatter that joins with " > " instead (the benchmark's own listing does) is tried second, only when no " › " is in the name.
-    const candidates = [testTitleOf(full), ...(!full.includes("›") && full.includes(" > ") ? [full.split(" > ").pop()!.trim()] : [])].filter((t) => t.length > 0);
-    let idx = -1;
-    for (const title of candidates) {
-      idx = lines.findIndex((l) => isTestLine(l) && l.includes(title.slice(0, 60)));
-      if (idx >= 0) break;
-    }
+    const idx = lineOfTest(lines, full);
     if (idx < 0) continue;
     const start = Math.max(0, idx - 2);
     let depth = 0;
@@ -613,6 +599,8 @@ export function buildSandboxPrompt(a: { file: string; lineCount: number; testTex
     " sandbox: experiments cost nothing and are thrown away.",
     "- Only the TEST FILE comes back to the real project, and only if it makes more tests pass without breaking any that pass now. Changes to app",
     " code are thrown away (they are fine for logging). Remove your console.log lines from the test file before you finish.",
+    "- reference/ (when the project has it) holds the original implementation and the spec, and it is large. Use search_code to find the one function or rule",
+    "  you need and read just that range; do not read it front to back. You may read all of it if you must.",
     "- Fix the TEST when it is out of date. The app's code, its doc comments, the written spec (docs/ or *.md) and recent commits are the authority.",
     "- Never delete tests or assertions, never skip tests, never loosen an assertion into one that cannot fail.",
     "",
