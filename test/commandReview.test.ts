@@ -151,9 +151,10 @@ describe("the review", () => {
 
 describe("the wiring", () => {
   const read = (p: string) => fs.readFileSync(new URL(p, import.meta.url), "utf-8").replace(/\r\n/g, "\n");
-  test("only a normal-risk ask is reviewed, a clear 'safe' skips the question, and the reviewer's reason is shown when it asks", () => {
+  test("only a normal-risk ask is reviewed by a single reviewer (an elevated one only by the panel), a clear 'safe' skips the question, and the reviewer's reason is shown when it asks", () => {
     const t = read("../src/agentTools.ts");
-    assert.ok(t.includes('decision.verdict === "ask" && decision.risk === "normal" && this.commandReviewer'));
+    assert.ok(t.includes('decision.verdict === "ask" && (decision.risk === "normal" || this.reviewerCoversElevated) && this.commandReviewer'));
+    assert.ok(t.includes("this.reviewerCoversElevated = Boolean(fn && opts.coversElevated);"), "elevated is covered only when the caller says the reviewer is the panel");
     assert.ok(t.includes('if (decision.verdict === "ask" && !clearedByReview) {'));
     assert.ok(t.includes("`Security review: ${reviewNote}`"));
     assert.ok(read("../src/index.ts").includes("if (config.security.commandReview) {"));

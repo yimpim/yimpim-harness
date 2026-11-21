@@ -3,7 +3,7 @@ import fsSync from "fs";
 import path from "path";
 import crypto from "crypto";
 import { execFile } from "child_process";
-import type { ReviewRequest, ReviewOutcome } from "./commandReview.js";
+import type { ReviewRequest, ReviewOutcome, ActionReview } from "./commandReview.js";
 import { cleanScratch, scratchTarget, SCRATCH_DIR } from "./scratch.js";
 import { staleTestReferences, renderReferences, referencesKey, type Reference } from "./testReferences.js";
 import {
@@ -1095,10 +1095,21 @@ export class AgentTools {
   private agentCreatedFiles = new Set<string>();
   private agentCreatedDirs = new Set<string>();
   private commandReviewer?: (req: ReviewRequest) => Promise<ReviewOutcome>;
+  private reviewerCoversElevated = false;
+  private actionReviewer?: (a: ActionReview) => Promise<ReviewOutcome>;
 
-  /** A security review that may clear a normal-risk command before a person is asked (see commandReview.ts). */
-  public setCommandReviewer(fn: ((req: ReviewRequest) => Promise<ReviewOutcome>) | undefined): void {
+  /**
+   * A security review that may clear a command before a person is asked (see commandReview.ts, commandPanel.ts). The single reviewer clears only
+   * normal-risk commands; a panel of judges (coversElevated) is trusted with the ones that need extra care too, since it is shown why they do.
+   */
+  public setCommandReviewer(fn: ((req: ReviewRequest) => Promise<ReviewOutcome>) | undefined, opts: { coversElevated?: boolean } = {}): void {
     this.commandReviewer = fn;
+    this.reviewerCoversElevated = Boolean(fn && opts.coversElevated);
+  }
+
+  /** The same review for a dependency install plan and for a package to add (see commandPanel.ts). */
+  public setActionReviewer(fn: ((a: ActionReview) => Promise<ReviewOutcome>) | undefined): void {
+    this.actionReviewer = fn;
   }
 
   /** Set only on the AgentTools of a heal sandbox: what `run_test` does. */
@@ -2099,7 +2110,23 @@ export class AgentTools {
       // Already said yes to this exact command this phase: do not ask again
       // just because the model edited the manifest and is re-running it.
       if (this.approvedInstallPlans.has(planSummary)) return true;
-      const question = `${this.activeAgent} wants to run: ${planSummary}\nApprove? (yes/no)`;
+      // Before a person is asked: the security panel judges the plan (commandPanel.ts). All judges safe = it runs; otherwise the person sees what they said.
+      let panelNote = "";
+      if (this.actionReviewer) {
+        try {
+          const review = await this.actionReviewer({ kind: "dependency-plan", label: planSummary, purpose: `${this.activeAgent} needs dependencies installed`, details: planSummary, repoRoot: this.repoRoot });
+          if (review.allow) {
+            console.log(`[SECURITY] ✔ Allowed without asking: ${planSummary} — ${review.why}`);
+            this.approvedInstallPlans.add(planSummary);
+            return true;
+          }
+          panelNote = review.why;
+          console.log(`[SECURITY] ✋ Needs a person: ${planSummary} — ${review.why}`);
+        } catch {
+          // a review that fails never allows
+        }
+      }
+      const question = `${this.activeAgent} wants to run: ${planSummary}${panelNote ? `\nSecurity review: ${panelNote}` : ""}\nApprove? (yes/no)`;
       // Same banner askUser prints: askFn's own terminal prompt is just
       // "Your answer: ", so without this the question text only ever reached
       // a paired phone and the terminal showed a bare, unexplained prompt.
@@ -2272,10 +2299,33 @@ export class AgentTools {
       ];
 
       let cleared = true;
-      if (assessment.level === "confirm") {
+      let panelCleared = false;
+      let packagePanelNote = "";
+      if (assessment.level === "confirm" && this.actionReviewer) {
+        try {
+          const review = await this.actionReviewer({
+            kind: "package",
+            label: `${ecosystem} package "${name}" ${choice.version}`,
+            purpose: reason ?? "",
+            details: [`Facts: ${facts2.join("; ")}.`, ...(warn.length ? ["Warnings:", ...warn] : [])].join("\n"),
+            repoRoot: this.repoRoot,
+          });
+          if (review.allow) {
+            panelCleared = true;
+            console.log(`[SECURITY] ✔ Allowed without asking: ${name} ${choice.version} — ${review.why}`);
+            body.push(`The security panel approved adding it despite the warnings: ${review.why}`);
+          } else {
+            packagePanelNote = review.why;
+            console.log(`[SECURITY] ✋ Needs a person: ${name} ${choice.version} — ${review.why}`);
+          }
+        } catch {
+          // a review that fails never allows
+        }
+      }
+      if (assessment.level === "confirm" && !panelCleared) {
         const question =
           `${this.activeAgent} wants to add ${ecosystem} package "${name}" ${choice.version}` +
-          `${reason ? ` (${reason})` : ""}.\nThings worth a look:\n${warn.join("\n")}\nAdd it anyway? (yes/no)`;
+          `${reason ? ` (${reason})` : ""}.\nThings worth a look:\n${warn.join("\n")}${packagePanelNote ? `\nSecurity review: ${packagePanelNote}` : ""}\nAdd it anyway? (yes/no)`;
         console.log("\n==========================================");
         console.log(" [USER INTERACTION REQUIRED] ");
         console.log("==========================================");
@@ -2349,7 +2399,7 @@ export class AgentTools {
     // network, secret-reading, port-opening or steering text, and anything the review cannot settle, still goes to the person.
     let reviewNote = "";
     let clearedByReview = false;
-    if (decision.verdict === "ask" && decision.risk === "normal" && this.commandReviewer) {
+    if (decision.verdict === "ask" && (decision.risk === "normal" || this.reviewerCoversElevated) && this.commandReviewer) {
       try {
         const review = await this.commandReviewer({
           argv: decision.argv,
@@ -2358,6 +2408,11 @@ export class AgentTools {
           cwd: decision.cwd,
           repoRoot: this.repoRoot,
           created: [...this.agentCreatedFiles],
+          notes: [
+            ...(decision.risk === "elevated" && decision.elevatedBecause ? [`needs extra care: ${decision.elevatedBecause}`] : []),
+            ...(decision.changedSinceApproval ? ["it was approved before, but files it runs have changed since"] : []),
+            ...(decision.nativeProgram ? ["it is a compiled program, not a script"] : []),
+          ],
         });
         if (review.allow) {
           clearedByReview = true;
