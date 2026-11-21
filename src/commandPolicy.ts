@@ -559,6 +559,10 @@ export function evaluateCommand(command: string, opts: EvaluateOptions): Command
   const { argv } = tokens;
 
   const exe = executableName(argv[0]);
+  // Installing a machine's toolchains is for a person at a command line. Denied outright, whatever runs it (yimpim, yp, node dist/index.js, npx, npm run).
+  if (argv.some((a) => a === "setup-env" || a.endsWith("/setup-env") || a.endsWith("\\setup-env"))) {
+    return { verdict: "deny", reason: "setting up the machine's environment (setup-env) is for a person to run themselves, never an agent" };
+  }
   if (DENIED[exe]) return { verdict: "deny", reason: `\`${exe}\`: ${DENIED[exe]}` };
   const add = analyzePackageAdd(argv);
   if (add) {

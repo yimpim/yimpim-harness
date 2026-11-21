@@ -99,6 +99,7 @@ export function scrubbedEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Pro
     if (!KEEP.has(k.toUpperCase()) && (SECRET_NAME.test(k) || SECRET_PREFIX.test(k))) continue;
     out[k] = v;
   }
+  out.YIMPIM_AGENT_CONTEXT = "1";
   out.CI = "true";
   out.FORCE_COLOR = "0";
   out.NO_COLOR = "1";
