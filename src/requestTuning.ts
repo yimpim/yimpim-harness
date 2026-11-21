@@ -28,7 +28,7 @@ export interface TuningConfig {
 
 export interface Tuned {
   provider?: Record<string, unknown>;
-  reasoning?: { effort: "none" };
+  reasoning?: { effort: "none" | "low" | "medium" | "high" };
 }
 
 export const isDeepseek = (model: string): boolean => /^deepseek\//i.test(model);
@@ -37,7 +37,12 @@ export const isDeepseek = (model: string): boolean => /^deepseek\//i.test(model)
  * What to add to the request body. `reasoningRejected` is set once the model has refused `effort: "none"` (a model whose reasoning
  * cannot be turned off): the request is then sent without it.
  */
-export function tuneRequest(model: string, agent: string, cfg: TuningConfig | undefined, state: { reasoningRejected?: boolean } = {}): Tuned {
+export function tuneRequest(
+  model: string,
+  agent: string,
+  cfg: TuningConfig | undefined,
+  state: { reasoningRejected?: boolean; forceReasoning?: "low" | "medium" | "high" } = {}
+): Tuned {
   const out: Tuned = {};
   const global = cfg?.provider?.sort;
   const ds = isDeepseek(model) ? cfg?.deepseek : undefined;
@@ -55,6 +60,12 @@ export function tuneRequest(model: string, agent: string, cfg: TuningConfig | un
   }
   if (Object.keys(provider).length > 0) out.provider = provider;
 
+  // A call that must think (a security judge) asks for it by name, whatever the settings turn off for this agent and whatever the model does when it is
+  // not asked. A model that refuses the field is retried without it (reasoningRejected), the same as for the "none" above.
+  if (state.forceReasoning && !state.reasoningRejected) {
+    out.reasoning = { effort: state.forceReasoning };
+    return out;
+  }
   if (ds && !state.reasoningRejected) {
     const a = agent.toUpperCase();
     if ((ds.reasoningOff ?? []).some((r) => r && a.startsWith(r.toUpperCase()))) out.reasoning = { effort: "none" };

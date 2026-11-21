@@ -65,7 +65,7 @@ import {
   recordObservedLaunch,
   stepsActuallyTapped,
 } from "./navGraph.js";
-import { ChangeSet, collectChangeSet, renderReview, staticQaReview, splitDiffByFile, type StaticReview } from "./staticQa.js";
+import { ChangeSet, collectChangeSet, renderReview, renderReviewBrief, staticQaReview, splitDiffByFile, type StaticReview } from "./staticQa.js";
 import { renderFinding, renderReview as renderSecurityReview, securityReview } from "./securityReview.js";
 import { loadTaskSecurity, securityModels, writeTaskSecurity } from "./securityPlan.js";
 import { Attachment } from "./attachments.js";
@@ -2478,7 +2478,8 @@ Respond ONLY with JSON: {"status": "PASS"|"DEFECT"|"INCONCLUSIVE"${isBrowserSurf
     const review = await staticQaReview(goal, change, { ask: (s, u) => this.askJson(s, u) }, contextNote);
     await this.securityGate(goal, change, review, ledger);
 
-    console.log(`[QA] Static review:\n${renderReview(review)}`);
+    console.log(`[QA] Static review: ${renderReviewBrief(review)}`);
+    console.log(`[QA] Static review (full):\n${renderReview(review)}`); // verbose only (consoleView.ts): the brief above carries what a person acts on
 
     if (review.reviewUnavailable) {
       ledger.add({

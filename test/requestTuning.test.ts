@@ -91,7 +91,8 @@ describe("no provider under the price cap", () => {
 describe("the wiring", () => {
   const src = fs.readFileSync(new URL("../src/openrouter.ts", import.meta.url), "utf-8").replace(/\r\n/g, "\n");
   test("the request body takes provider and reasoning from the tuning, and the old sort-only block is gone", () => {
-    assert.match(src, /tuneRequest\(model, agent, this\.config, \{ reasoningRejected \}\)/);
+    // (a call that must think, a security judge, asks for it: `forceReasoning`, see panelReasoning.test.ts)
+    assert.match(src, /tuneRequest\(model, agent, this\.config, \{ reasoningRejected, forceReasoning: options\?\.reasoning \}\)/);
     assert.match(src, /bodyPayload\.reasoning = tuned\.reasoning/);
     assert.doesNotMatch(src, /bodyPayload\.provider = \{ sort: providerSort \}/);
   });

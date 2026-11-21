@@ -72,6 +72,26 @@ function git(cwd: string, args: string[]): string {
 
 const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
+/**
+ * A git command that may be retried: the ones that write (a snapshot of the working tree, a new worktree) can fail for a moment when something else holds the
+ * repository's index (an editor's git integration, a file watcher, antivirus on Windows, or another git call in the same instant). That is not a reason to give
+ * up on a sandbox, so it is tried again a few times, a little later each time. The reason git gave (stderr) is kept in the error, so a real failure says why.
+ */
+export function gitRetry(cwd: string, args: string[], delaysMs: number[] = [80, 250, 600]): string {
+  let last: any;
+  for (let i = 0; i <= delaysMs.length; i++) {
+    try {
+      return git(cwd, args);
+    } catch (e: any) {
+      last = e;
+      if (i < delaysMs.length) sleep(delaysMs[i]);
+    }
+  }
+  const why = String(last?.stderr ?? "").trim().split(/\r?\n/)[0]?.slice(0, 160);
+  if (why) last.message = `${String(last.message ?? "").split(/\r?\n/)[0]} (${why})`;
+  throw last;
+}
+
 export async function createSandbox(opts: {
   repoRoot: string;
   file: string;
@@ -92,7 +112,7 @@ export async function createSandbox(opts: {
       return { ok: false, reason: "the project is not at the top of its git repository, so a sandbox copy cannot be made" };
     }
     // A commit holding the working tree's tracked changes, made WITHOUT touching the working tree, the index or the stash list. Empty when nothing changed.
-    const snap = git(repoRoot, ["stash", "create"]).trim();
+    const snap = gitRetry(repoRoot, ["stash", "create"]).trim();
     base = snap || git(repoRoot, ["rev-parse", "HEAD"]).trim();
   } catch (e: any) {
     return { ok: false, reason: `could not snapshot the project: ${firstLine(e)}` };
@@ -101,7 +121,7 @@ export async function createSandbox(opts: {
   const root = path.join(BASE_DIR(), `${hash8(repoRoot)}-${Date.now().toString(36)}`);
   try {
     fs.mkdirSync(BASE_DIR(), { recursive: true });
-    git(repoRoot, ["worktree", "add", "--detach", root, base]);
+    gitRetry(repoRoot, ["worktree", "add", "--detach", root, base]);
   } catch (e: any) {
     removeSandboxDir(root, repoRoot);
     return { ok: false, reason: `git worktree add failed: ${firstLine(e)}` };

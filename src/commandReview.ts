@@ -33,7 +33,7 @@ export interface ReviewRequest {
 
 /** Something other than a command that a person would be asked to approve: a dependency install plan, a package to add. */
 export interface ActionReview {
-  kind: "dependency-plan" | "package";
+  kind: "dependency-plan" | "package" | "file-deletion";
   /** What it is, as a person would be shown it. */
   label: string;
   purpose: string;

@@ -1509,6 +1509,21 @@ export class AgentTools {
     return [...this.filesPendingDeletion];
   }
 
+  /** True when the agent itself created this file during the run (so it is the agent's own scratch, not the user's work). */
+  public createdThisRun(relPath: string): boolean {
+    return this.agentCreatedFiles.has(relPath.replace(/\\/g, "/").replace(/^\.\//, ""));
+  }
+
+  /** The panel's judgement of an action that would otherwise ask a person; undefined when no panel (or reviewer) is set. */
+  public async reviewAction(a: ActionReview): Promise<ReviewOutcome | undefined> {
+    if (!this.actionReviewer) return undefined;
+    try {
+      return await this.actionReviewer(a);
+    } catch {
+      return undefined; // a review that fails never allows
+    }
+  }
+
   /** The reason recorded for a staged path, if one was given. */
   public getDeletionReason(relPath: string): string | undefined {
     return this.deletionReasons.get(relPath.replace(/\\/g, "/").replace(/^\.\//, ""));

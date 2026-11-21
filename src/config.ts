@@ -105,6 +105,9 @@ export const ConfigSchema = z.object({
           enabled: z.boolean().default(true),
           size: z.number().int().min(2).max(5).default(3),
           models: z.array(z.string()).optional(),
+          // How hard each judge thinks before answering. Always on: a judge that answers without reasoning is the weak link, whatever the model's default
+          // or deepseek.reasoningOff says. Reasoning tokens are billed as output, so this is the cost knob.
+          reasoning: z.enum(["low", "medium", "high"]).default("medium"),
         })
         .prefault({}),
     })
@@ -222,6 +225,11 @@ export const ConfigSchema = z.object({
     .prefault({}),
   interaction: z
     .object({
+      /**
+       * Ask "Continue? [yes next / yes to all / no]" between the units of a roadmap and between queued tasks. Off by default: the work goes on by itself, the
+       * user can stop it at any time, and a unit that fails stops it. On brings the question back, for someone who wants to approve each step.
+       */
+      confirmContinue: z.boolean().default(false),
       /**
        * When true, sign-off points that would otherwise pause for a human at
        * the keyboard (a QA visual advisory on an otherwise-passing phase, a
