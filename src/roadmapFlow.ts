@@ -36,6 +36,7 @@ import {
 import { coverageFiles, scanReference } from "./referenceInventory.js";
 import { checkRequirements, type Checked } from "./existence.js";
 import { looksEssential, type QuestionMode } from "./planner.js";
+import { runQuestionnaire, wantsQuestionnaire, withDesignUnit, writeDesignBrief, type IntakeAnswer } from "./intake.js";
 import { ModelCall, Question, answersAsConventions, proposeChanges, synthesizeIdea, synthesizePort } from "./roadmapPlan.js";
 
 export interface FlowDeps {
@@ -45,6 +46,8 @@ export interface FlowDeps {
   ask?: (q: Question) => Promise<string>;
   /** Which open points are asked (see QuestionMode). Defaults to "essential": only what is hard to undo. */
   questionMode?: QuestionMode;
+  /** Checks the libraries the plan's conventions name against the real registry; one line each, written into the conventions (conventionPackages.ts). */
+  packageNotes?: (conventions: string[]) => Promise<string[]>;
 }
 
 /** After this many failed attempts a unit is parked as blocked instead of retried forever. */
@@ -110,6 +113,11 @@ export async function createRoadmap(
 
   let synth;
   let inventory;
+  // A new product gets the full questionnaire (intake.ts); what it assumed and what it learned about the look are kept for the roadmap and the design brief.
+  let intakeAssumptions: string[] = [];
+  let intakeRan = false;
+  let lookAndFeel: IntakeAnswer[] = [];
+  let briefCorrection: string | undefined;
   const answered: { question: string; answer: string }[] = [];
   const decided: { question: string; answer: string; essential: boolean }[] = [];
   if (args.referenceDir) {
@@ -120,8 +128,32 @@ export async function createRoadmap(
     answered.push(...settled.answered);
     decided.push(...settled.decided);
   } else {
-    synth = await synthesizeIdea({ goal: args.goal, complete: deps.complete, docs: args.docs });
-    if (synth.questions.length > 0) {
+    const intake =
+      deps.ask && (deps.questionMode ?? "essential") !== "autonomous" && wantsQuestionnaire(deps.repoRoot, args)
+        ? await runQuestionnaire({ complete: deps.complete, ask: deps.ask }, { goal: args.goal, docs: args.docs })
+        : undefined;
+    if (intake && intake.answered.length + intake.decided.length + intake.assumptions.length > 0) {
+      intakeRan = true;
+      answered.push(...intake.answered);
+      decided.push(...intake.decided.map((d) => ({ question: d.question, answer: d.answer, essential: false })));
+      intakeAssumptions = intake.assumptions;
+      lookAndFeel = intake.look;
+      briefCorrection = intake.correction;
+      // One planning call, with everything the person said: the questions were already asked.
+      synth = await synthesizeIdea({
+        goal: args.goal,
+        complete: deps.complete,
+        docs: args.docs,
+        answers: [
+          ...intake.answered.map((a) => `${a.question} -> ${a.answer}`),
+          ...intake.decided.map((a) => `${a.question} -> ${a.answer} (decided for you: nobody was asked)`),
+          ...(intake.correction ? [`Correction to the brief -> ${intake.correction}`] : []),
+        ],
+      });
+    } else {
+      synth = await synthesizeIdea({ goal: args.goal, complete: deps.complete, docs: args.docs });
+    }
+    if (!intakeRan && synth.questions.length > 0) {
       const settled = await settleQuestions(deps, synth.questions);
       answered.push(...settled.answered);
       decided.push(...settled.decided);
@@ -166,6 +198,13 @@ export async function createRoadmap(
     synth = { ...synth, drafts, warnings: [...synth.warnings, `Planned as the ${listed.jobs.length} jobs listed in the request, in that order.`] };
   }
 
+  // A new product's look is settled before any screen is built: the person's answers become design-system/BRIEF.md, the first unit makes the design system, and every unit that
+  // builds screens depends on it. Units that do not (the data model, storage) do not, so they can be built first.
+  if (intakeRan && !byJobs) {
+    writeDesignBrief(deps.repoRoot, args.goal, lookAndFeel, briefCorrection);
+    synth = { ...synth, drafts: withDesignUnit(synth.drafts) };
+  }
+
   // Before the roadmap is written: which of these units does the project already have? Those are not planned again.
   let checked: Checked[] = [];
   if (!args.referenceDir && !byJobs && args.verifyExisting !== false) {
@@ -183,10 +222,23 @@ export async function createRoadmap(
 
   const rm = emptyRoadmap(args.goal, args.referenceDir ? (args.docs ? "mixed" : "port") : "idea");
   if (inventory && !byJobs) rm.reference = { dir: inventory.dir, fileCount: coverageFiles(inventory).length, scannedAt: new Date().toISOString() };
+  // The libraries the plan names are checked before it is saved: one that cannot be installed is flagged now, not found by a ticket that fails.
+  let packageNotes: string[] = [];
+  if (deps.packageNotes) {
+    try {
+      packageNotes = await deps.packageNotes(synth.conventions);
+    } catch {
+      packageNotes = [];
+    }
+  }
   const unasked = synth.questions.filter((q) => !answered.some((a) => a.question === q.question) && !decided.some((d) => d.question === q.question));
   setConventions(rm, [
     ...synth.conventions,
+    ...packageNotes,
     ...answersAsConventions(answered),
+    ...(briefCorrection ? [`Correction to the brief: ${briefCorrection}`] : []),
+    // From the request or the brief, or decided for the person: listed so they can be corrected in one go.
+    ...intakeAssumptions.map((a) => `Assumed, not confirmed: ${a}`),
     // Decided from the request and the code, and listed so they can be corrected in one go.
     ...decided.map((d) => `${d.essential ? "REVIEW: " : ""}Decided without asking: ${d.question} -> ${d.answer}`),
     // What nobody could be asked is written down as an assumption, not buried.

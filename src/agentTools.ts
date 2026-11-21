@@ -8,6 +8,7 @@ import { cleanScratch, scratchTarget, SCRATCH_DIR } from "./scratch.js";
 import { isFocusPath } from "./focusTests.js";
 import type { EditorSweep, SweepOutcome } from "./editorSweep.js";
 import { missingTool, missingToolMessage } from "./projectTools.js";
+import { lookAlikeOf } from "./packageNames.js";
 import { staleTestReferences, renderReferences, referencesKey, type Reference } from "./testReferences.js";
 import {
   CommandApprovals,
@@ -2357,7 +2358,17 @@ export class AgentTools {
       };
     }
 
-    const head = `[${assessment.level === "block" ? "REFUSED" : facts.lookupError ? "UNVERIFIED" : "VERIFIED"}] ${ecosystem}:${name}`;
+    // A name one or two keystrokes from a very popular package is how a look-alike gets installed; the registry's facts cannot say so. And a package with a known advisory is never
+  // waved through by a model. Either one is put to a PERSON, whatever the security judges would say.
+  const lookAlike = facts.exists && assessment.level !== "block" ? lookAlikeOf(ecosystem, name) : undefined;
+  const personOnly: string[] = [];
+  if (lookAlike) {
+    personOnly.push(`the name looks like "${lookAlike}", a very popular package: a look-alike name is how a malicious package gets installed`);
+    assessment = { level: "confirm", warnings: [{ level: "confirm", text: personOnly[0] }, ...assessment.warnings] };
+  }
+  if (vulns?.checked && vulns.ids.length > 0) personOnly.push("it has a known security advisory");
+
+  const head = `[${assessment.level === "block" ? "REFUSED" : facts.lookupError ? "UNVERIFIED" : "VERIFIED"}] ${ecosystem}:${name}`;
     const lines: string[] = [head];
     const warn = assessment.warnings.map((w) => `  - ${w.text}`);
 
@@ -2395,7 +2406,7 @@ export class AgentTools {
       let cleared = true;
       let panelCleared = false;
       let packagePanelNote = "";
-      if (assessment.level === "confirm" && this.actionReviewer) {
+      if (assessment.level === "confirm" && this.actionReviewer && personOnly.length === 0) {
         try {
           const review = await this.actionReviewer({
             kind: "package",

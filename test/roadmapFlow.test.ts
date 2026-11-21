@@ -34,6 +34,9 @@ const repo = (files: Record<string, string> = {}): string => {
   return dir;
 };
 
+// An existing app (more than ten source files). A completely new product gets the questionnaire instead (intake.test.ts); these tests are about the questions an existing app is asked.
+const APP: Record<string, string> = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`src/f${i}.ts`, "export {};\n"]));
+
 const IDEA = {
   units: [
     { title: "Accounts", area: "Foundation", summary: "Sign up.", deps: [], acceptance: ["sign in works"] },
@@ -46,7 +49,7 @@ const IDEA = {
 
 describe("planning from an idea", () => {
   test("in the ask-everything mode, the questions are asked and the plan is redone with the answers", async () => {
-    const d = repo();
+    const d = repo(APP);
     const calls: Msg[][] = [];
     const asked: string[] = [];
     const out = await createRoadmap(
@@ -74,7 +77,7 @@ describe("planning from an idea", () => {
   });
 
   test("by default a point that is not hard to undo is decided, recorded, and the plan redone, with nobody asked", async () => {
-    const d = repo();
+    const d = repo(APP);
     const calls: Msg[][] = [];
     const asked: string[] = [];
     await createRoadmap(

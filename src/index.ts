@@ -56,6 +56,7 @@ import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { makeCommandReviewer } from "./commandReview.js";
 import { makePanel, pickJudges } from "./commandPanel.js";
 import { EditorSweep, healerFor } from "./editorSweep.js";
+import { makePackageNotes } from "./conventionPackages.js";
 import { panelReviewerFor } from "./securityPanel.js";
 import { isScratchPath } from "./scratch.js";
 import { runSecurityAudit } from "./securityAudit.js";
@@ -4927,6 +4928,8 @@ async function main(): Promise<void> {
     repoRoot,
     // A completely new build gets the full questionnaire; otherwise the person's own setting.
     questionMode: taskQuestionMode(config.planning.questions, { newProject: isNewProject(repoRoot), inRoadmapUnit: false }),
+    // The libraries the plan names are looked up in the real registry before the roadmap is saved.
+    packageNotes: makePackageNotes(),
     complete: (messages) =>
       runLabeledCompletion({ client, models: config.models.planner, messages: messages as any, agentName: "ROADMAP_PLANNER", jsonMode: true, reason: "Planning the roadmap" }),
     ask:
@@ -4935,10 +4938,11 @@ async function main(): Promise<void> {
             askChoice({
               id: `roadmap_q_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
               kind: "blocking",
-              prompt: q.question,
+              // A question can say why it matters, and carries the answer most people want: that is what is taken when nobody answers in time.
+              prompt: q.why ? `${q.question}\n(${q.why})` : q.question,
               choices: q.options.length > 0 ? q.options : undefined,
               allowCustom: true,
-              fallback: "",
+              fallback: q.recommended ?? "",
               askedAt: new Date().toISOString(),
             })
         : undefined,

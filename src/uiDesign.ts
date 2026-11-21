@@ -599,8 +599,20 @@ export function designSystemExists(repoRoot: string): boolean {
  * Writes the design system when the request calls for one. Never throws; never overwrites an existing
  * design system unless asked to; returns null when nothing was needed or nothing could be made.
  */
+/** The person's own words about the look (design-system/BRIEF.md, written from the questionnaire), or "" when there is none. */
+export function readDesignBrief(repoRoot: string): string {
+  try {
+    return fs.readFileSync(path.join(repoRoot, DESIGN_DIR, "BRIEF.md"), "utf8").slice(0, 1600);
+  } catch {
+    return "";
+  }
+}
+
 export async function ensureDesignSystem(ctx: EnsureContext): Promise<EnsureResult | null> {
   const stack = detectUiStack(ctx.repoRoot);
+  // When the person was asked about the look, the system is built from what they said and not from assumptions.
+  const brief = readDesignBrief(ctx.repoRoot);
+  const request = brief ? `${ctx.request.slice(0, 1500)}\n\nThe person's own words about the look and feel (follow them; a line marked "decided" was not answered by them):\n${brief}` : ctx.request.slice(0, 1500);
   const dir = path.join(ctx.repoRoot, DESIGN_DIR);
   let decision: UiDecision | null = null;
   try {
@@ -612,7 +624,7 @@ export async function ensureDesignSystem(ctx: EnsureContext): Promise<EnsureResu
           {
             role: "user",
             content:
-              `The request:\n${ctx.request.slice(0, 1500)}\n\nThe project: ${stack.platform}; ${stack.frameworks.join(", ") || "no framework found"}; ${stack.hasUi ? "has existing UI" : "no UI yet"}.\n\nPlaybooks (id: name — kinds of product):\n` +
+              `The request:\n${request.slice(0, 3200)}\n\nThe project: ${stack.platform}; ${stack.frameworks.join(", ") || "no framework found"}; ${stack.hasUi ? "has existing UI" : "no UI yet"}.\n\nPlaybooks (id: name — kinds of product):\n` +
               PLAYBOOKS.map((p) => `${p.id}: ${p.name} — ${p.aka.split(" ").slice(0, 8).join(" ")}`).join("\n") +
               `\n\nProduct list (id: name), pick the closest row or null:\n${productMenu()}`,
           },
@@ -639,7 +651,7 @@ export async function ensureDesignSystem(ctx: EnsureContext): Promise<EnsureResu
         ctx.models,
         [
           { role: "system", content: directionSystem(playbook, stack, platform, product, brand) },
-          { role: "user", content: `The request:\n${ctx.request.slice(0, 1500)}\n\nThe folder name is "${path.basename(ctx.repoRoot)}". Choose the design direction.` },
+          { role: "user", content: `The request:\n${request.slice(0, 3200)}\n\nThe folder name is "${path.basename(ctx.repoRoot)}". Choose the design direction.` },
         ],
         "design direction",
         true
