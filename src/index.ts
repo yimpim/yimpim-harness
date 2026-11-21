@@ -48,7 +48,8 @@ import { sandboxFor } from "./healSandbox.js";
 import { renderLog, runSuiteLogged } from "./testLog.js";
 import { fixTaskFor, isFixTask, savePendingFixes, loadPendingFixes, settlePendingFixes } from "./testSettle.js";
 import { directFixFor, setMustPass } from "./directFix.js";
-import { checkExistence, existencePlannerSection, renderExistence } from "./existence.js";
+import { checkExistence, existencePlannerSection, renderExistence, JUDGE_SYSTEM, JUDGE_WHOLE_SYSTEM, JUDGE_COMBINE_SYSTEM } from "./existence.js";
+import { roadmapCompleteAnswer, cacheKey, readCache, writeCache, newTally, countCall, renderTally } from "./existenceSupport.js";
 import { type Intent, parseIntentReply, routeFacts } from "./routeIntent.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { makeCommandReviewer } from "./commandReview.js";
@@ -618,8 +619,33 @@ async function checkWhatExists(text: string, client: OpenRouterClient, config: A
     }
     // An audit with no document named falls back to the active roadmap's own brief: "are we done with the roadmap?"
     const roadmapBrief = reportOnly && !docs ? loadRoadmap(repoRoot)?.brief : undefined;
-    const found = await checkExistence({
-      call: (messages) => runLabeledCompletion({ client, models: config.models.planner, messages: messages as any, agentName: "EXISTENCE", jsonMode: true, reason: reportOnly ? "Checking the work against the document" : "Checking what already exists" }),
+    // A finished roadmap whose code has not changed since its last unit answers "what is left?" from its own record: no model is asked.
+    if (reportOnly && !docs) {
+      const quick = roadmapCompleteAnswer(repoRoot);
+      if (quick) {
+        console.log("\n✅ [EXISTS] " + quick.text);
+        lastAudit = { request: text.slice(0, 3000), report: quick.text };
+        return "handled";
+      }
+    }
+    // The same question about the same code as an earlier check: its result, with no model call.
+    const cKey = cacheKey(repoRoot, text, docs || roadmapBrief);
+    const cached = readCache(repoRoot, cKey);
+    const tally = newTally();
+    // The first look at each requirement is made by a cheaper model; the planner's model settles what that does not, and checks a sample.
+    const cheapModels = config.existence.tiered === false ? [] : (config.models.existence ?? config.models.discovery);
+    const useCheap = cheapModels.length > 0 && cheapModels.join("|") !== config.models.planner.join("|");
+    const counted = (tier: "cheap" | "strong", models: string[]) => async (messages: any[]): Promise<string> => {
+      const out = await runLabeledCompletion({ client, models, messages: messages as any, agentName: "EXISTENCE", jsonMode: true, reason: reportOnly ? "Checking the work against the document" : "Checking what already exists" });
+      const sys = String(messages[0]?.content ?? "");
+      const label = sys === JUDGE_WHOLE_SYSTEM ? "whole-file" : sys === JUDGE_COMBINE_SYSTEM ? "combine" : sys === JUDGE_SYSTEM ? "judge" : "extract";
+      countCall(tally, label, tier, messages.map((m) => String(m?.content ?? "")).join(""), out);
+      return out;
+    };
+    if (cached) console.log("[EXISTS] Same question, same code as the last check: showing that result (no model was asked).");
+    const found = cached ?? await checkExistence({
+      call: counted("strong", config.models.planner),
+      ...(useCheap ? { cheapCall: counted("cheap", cheapModels) } : {}),
       repoRoot,
       request: text,
       docs: docs || (roadmapBrief ? `The roadmap's brief:\n${roadmapBrief}` : docs),
@@ -630,6 +656,11 @@ async function checkWhatExists(text: string, client: OpenRouterClient, config: A
       built: builtByUnits(repoRoot),
       exclude: [loadRoadmap(repoRoot)?.reference?.dir ?? ""],
     });
+    if (!cached) {
+      writeCache(repoRoot, cKey, found);
+      const tallied = renderTally(tally);
+      if (tallied) console.log(tallied);
+    }
     if (found.applies) {
       console.log("\n🔎 [EXISTS] Checked what this asks for against the code (each quote below was verified in the file):\n" + renderExistence(found));
       if (reportOnly && !found.allBuilt) {
