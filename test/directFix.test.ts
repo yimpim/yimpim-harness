@@ -160,7 +160,10 @@ describe("the wiring", () => {
     assert.ok(index.includes("Discovery and the Planner are skipped"));
   });
   test("the set of tests a fix is for is set for EVERY task, so it never leaks into the next one", () => {
-    assert.ok(index.includes("setMustPass(direct ? direct.tests : []);"));
+    // Called for every task, not inside `if (direct)`: an ordinary task passes an empty list, which clears whatever the last fix task locked. It is given
+    // the project's root and the saved names of the failing tests, so that only THEIR assertions are locked.
+    assert.ok(index.includes("setMustPass(direct ? direct.tests : [], repoRoot, { failing: failingByFile });"));
+    assert.ok(index.includes("if (direct) for (const p of loadPendingFixes(repoRoot)) failingByFile[p.file] = p.tests ?? [];"), "the names are read only when there is a fix task");
   });
   test("the verifier does not excuse a test the fix is for as already failing, and says the fix is not done", () => {
     const v = read("../src/verifierTools.ts");

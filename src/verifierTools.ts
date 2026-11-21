@@ -34,7 +34,8 @@ import { sandboxFor } from "./healSandbox.js";
 import { runSuiteLogged, selectUnverified, loadLog, staleSince, healParked } from "./testLog.js";
 import { digestFailure } from "./failureDigest.js";
 import { evidenceText } from "./failureEvidence.js";
-import { isMustPass } from "./directFix.js";
+import { isMustPass, mustPassFindings, changedMustPassTexts, runOriginalCopy, reviewDiff } from "./directFix.js";
+import { isTestPath } from "./focusTests.js";
 import { passingTestFiles } from "./testRun.js";
 import { isEvidenceNoise } from "./roadmap.js";
 
@@ -1006,6 +1007,8 @@ export class AutonomousVerifier {
       if (!ledger.hasBlockingFailure() && hasRealChange) this.mainSuiteGate(phaseGoal, change!, ledger);
       // A phase that changed nothing (a verify-only phase) still has its tests run: the ones not known green since their last run.
       if (!ledger.hasBlockingFailure()) await this.selectedTestGate(hasRealChange ? change : undefined, ledger);
+      // A fix task whose must-pass test file was changed around the failing tests: does the code fix stand without those changes, or should a person look?
+      if (!ledger.hasBlockingFailure()) await this.mustPassOriginalGate(ledger);
 
       // Tier 2 — semantic: does the diff plausibly implement the stated goal.
       // Needs an actual diff to review — skipped entirely for a verify-only
@@ -2589,7 +2592,39 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
    * failure is checked against the last commit: one that was already red there is not this phase's doing; it is healed
    * (the stale test updated) and, if it stays red, reported without blocking. Only a failure the phase introduced blocks.
    */
+  /**
+   * For a fix whose must-pass test file was changed (setup, a mock, a new test): the ORIGINAL file, as it was when the fix began, is run against the fixed
+   * code. If it passes, the code fix stands on its own. If it does not, the fix needed changes to the file's setup, which is allowed, but it is the one place
+   * a test could have been made to pass by the way it was set up, so it is flagged for a person to review, with what changed. Never blocking: the
+   * assertions are already known to be as written (that is the gate above), and the Editor's version passes (this runs only when the gates before it did).
+   */
+  private async mustPassOriginalGate(ledger: EvidenceLedger, run: (root: string, files: string[]) => Promise<{ ok: boolean; output: string }> = runSuiteLogged): Promise<void> {
+    for (const c of changedMustPassTexts(this.repoRoot)) {
+      const gate = `the original ${c.file} against the fixed code`;
+      const r = await runOriginalCopy(run, this.repoRoot, c.file, c.original);
+      if (r.ok) {
+        ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: false, detail: `${c.file} was changed (not in what its failing tests assert), and the ORIGINAL file passes against the fixed code too: the fix stands on its own` });
+      } else {
+        ledger.add({
+          tier: "build",
+          gate,
+          method: "executed",
+          status: "inconclusive",
+          blocking: false,
+          detail: `REVIEW THE TEST CHANGES: the original ${c.file} does not pass against the fixed code, so the fix needed changes to the file's setup (its failing tests' assertions are as written). What changed:\n${reviewDiff(c.original, c.current).join("\n")}`,
+        });
+      }
+    }
+  }
+
   private async selectedTestGate(change: ChangeSet | undefined, ledger: EvidenceLedger): Promise<void> {
+    // A fix for failing tests has to make them pass by fixing the CODE. What the failing tests assert may not change (the Editor's write tools refuse that
+    // at once, but a command or another tool could do it), no test may disappear or be skipped, and a change set with no application code in it cannot be
+    // a fix: a test that passes then passes because the TEST changed. Each is blocking, whatever else the gate finds. The file's setup may change freely.
+    const appChanged = change ? [...change.modified, ...change.added].some((p) => !isTestPath(p) && !isEvidenceNoise(p)) : undefined;
+    for (const finding of mustPassFindings(this.repoRoot, appChanged)) {
+      ledger.add({ tier: "build", gate: "the tests this fix must pass are as written", method: "inspected", status: "fail", blocking: true, detail: finding });
+    }
     let sel: ReturnType<typeof selectTests>;
     let staleCount = 0;
     // Files the tools themselves write (build logs, caches, review notes) are not changes to the code under test. A verify-only phase

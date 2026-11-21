@@ -18,7 +18,7 @@ import { OpenRouterClient, type FunctionTool } from "./openrouter.js";
 import type { AgentConfig } from "./config.js";
 import { AgentTools, TOOLS_SCHEMA, RUN_TEST_TOOL, RECORD_DEVIATION_TOOL } from "./agentTools.js";
 import { validateDeviation, describeDeviation, DEFAULT_DEVIATION_TEST_CAP, type DeviationRecord } from "./healDeviation.js";
-import { testTitleOf, lineOfTest } from "./testNames.js";
+import { testTitleOf, lineOfTest, testBlockEnd } from "./testNames.js";
 import { runToolAgent, runLabeledCompletion } from "./agentLoop.js";
 import { securityModels } from "./securityPlan.js";
 import { runSuiteLogged } from "./testLog.js";
@@ -540,23 +540,7 @@ export function extractFailingBlocks(testText: string, tests: string[], maxChars
     const idx = lineOfTest(lines, full);
     if (idx < 0) continue;
     const start = Math.max(0, idx - 2);
-    let depth = 0;
-    let opened = false;
-    let end = Math.min(lines.length - 1, idx + 70);
-    for (let i = idx; i <= end; i++) {
-      for (const ch of lines[i]) {
-        if (ch === "{") {
-          depth++;
-          opened = true;
-        } else if (ch === "}") {
-          depth--;
-        }
-      }
-      if (opened && depth <= 0) {
-        end = i;
-        break;
-      }
-    }
+    const end = testBlockEnd(lines, idx, 70);
     const snippet = `// ${full} (lines ${start + 1}-${end + 1})\n` + lines.slice(start, end + 1).join("\n");
     // A block too big for what is left is skipped, not the end of the list: a smaller one after it may still fit.
     if (used + snippet.length > maxChars) continue;

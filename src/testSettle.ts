@@ -138,6 +138,8 @@ export interface PendingFix {
   reason: string;
   /** The end of the failing run, so the fix starts from the real output. */
   failure?: string;
+  /** The names of the failing tests, as the runner printed them: the fix may not change what THESE assert (see directFix.ts). */
+  tests?: string[];
 }
 
 const pendingPath = (root: string) => path.join(root, ".agent", "test-fixes.json");

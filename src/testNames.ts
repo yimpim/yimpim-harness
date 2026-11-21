@@ -29,6 +29,28 @@ export function lineOfTest(lines: string[], full: string): number {
 }
 
 /**
+ * Where a test block that starts on line `idx` (0-based) ends: the line where its braces close again. Counts braces on each line, which is rough (a brace
+ * in a string or a regex counts) but is the same on both sides of any comparison, and is bounded: a block that never closes within `maxLines` ends there.
+ */
+export function testBlockEnd(lines: string[], idx: number, maxLines = 400): number {
+  let depth = 0;
+  let opened = false;
+  const last = Math.min(lines.length - 1, idx + maxLines);
+  for (let i = idx; i <= last; i++) {
+    for (const ch of lines[i]) {
+      if (ch === "{") {
+        depth++;
+        opened = true;
+      } else if (ch === "}") {
+        depth--;
+      }
+    }
+    if (opened && depth <= 0) return i;
+  }
+  return last;
+}
+
+/**
  * The names in the order their tests appear in the file (neighbouring tests share setup, so a batch of them has one thing to learn, not three). A name
  * not found in the file goes after the others and keeps its place among the unfound.
  */

@@ -32,6 +32,7 @@ import { events } from "./events.js";
 import { diffStore } from "./diffStore.js";
 import { isJunkScreenName } from "./navGraph.js";
 import { sanitizeQaSetup, saveQaSetup } from "./qaSetup.js";
+import { isMustPass, lockedProblem, refusalFor } from "./directFix.js";
 import { DEFAULT_MAX_ENTRIES, fingerprintOf, mergeComponentEntry } from "./repoMap.js";
 
 const execFileAsync = promisify(execFile);
@@ -1429,6 +1430,7 @@ export class AgentTools {
     if (typeof relPath !== "string" || relPath.trim() === "") {
       throw new Error("stage_file_for_deletion requires a non-empty 'path'.");
     }
+    this.assertNotDeletingMustPass(relPath);
 
     const key = relPath
       .trim()
@@ -1880,7 +1882,33 @@ export class AgentTools {
     return cleanScratch(this.repoRoot, this.agentCreatedFiles, this.sessionStart);
   }
 
+  private relOf(filePath: string): string {
+    return path.relative(this.repoRoot, path.resolve(this.repoRoot, filePath)).replace(/\\/g, "/");
+  }
+
+  /**
+   * The tests a fix is FOR are its spec, so what the failing tests ASSERT may not change, but nothing else about their file is locked: a fix that changes a
+   * hook's signature or needs a new mock must be free to update the setup (shared by every test in a big file), and to add new tests. Checked on the text the
+   * file WOULD hold, before it is written, so the Editor is told at once what it may not do; QA checks again afterwards (a command could change the file).
+   * An ordinary task has no must-pass files, so nothing here applies to it.
+   */
+  private assertMustPassIntact(filePath: string, newText: string): void {
+    const rel = this.relOf(filePath);
+    if (!isMustPass(rel)) return;
+    const problem = lockedProblem(rel, newText);
+    if (problem) throw new Error(refusalFor(rel, problem));
+  }
+
+  /** Deleting a must-pass test file removes the very tests the fix is for: refused, whatever else is allowed. */
+  private assertNotDeletingMustPass(filePath: string): void {
+    const rel = this.relOf(filePath);
+    if (isMustPass(rel)) {
+      throw new Error(refusalFor(rel, "it may not be deleted (it holds the failing tests this fix has to make pass)"));
+    }
+  }
+
   public async writeFile(filePath: string, content: string): Promise<string> {
+    this.assertMustPassIntact(filePath, content);
     // A NEW one-off report, summary or helper script at the project root is not part of the project: it goes in the scratch folder, which is
     // never committed and is emptied when the task ends. A file that already exists, or one anywhere else, is written where it was asked.
     const redirect = scratchTarget(filePath);
@@ -1958,6 +1986,7 @@ export class AgentTools {
     // Function form: prevents $&, $1, $' in the replacement from being expanded
     // as regex substitution patterns and silently corrupting the file.
     const patched = content.replace(find, () => repl);
+    this.assertMustPassIntact(filePath, patched); // checked on what the file WOULD hold, before a byte is written
     await fs.writeFile(fullPath, hadCrlf ? patched.replace(/\n/g, "\r\n") : patched, "utf-8");
     // Registered only AFTER the bytes are on disk: registering up front meant a
     // patch that failed to find its search block (or hit the write budget) had

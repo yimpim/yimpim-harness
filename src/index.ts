@@ -45,7 +45,7 @@ import { healTests, renderHealReport, failingTestFiles, failureText, fixItemsFor
 import { HEAL_REPLY_STRUCTURED } from "./healSchema.js";
 import { sandboxFor } from "./healSandbox.js";
 import { renderLog, runSuiteLogged } from "./testLog.js";
-import { fixTaskFor, isFixTask, savePendingFixes, settlePendingFixes } from "./testSettle.js";
+import { fixTaskFor, isFixTask, savePendingFixes, loadPendingFixes, settlePendingFixes } from "./testSettle.js";
 import { directFixFor, setMustPass } from "./directFix.js";
 import { checkExistence, existencePlannerSection, renderExistence } from "./existence.js";
 import { type Intent, parseIntentReply, routeFacts } from "./routeIntent.js";
@@ -5994,7 +5994,10 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
     // Which tests the fix is for is also told to the verifier, which must not excuse them as "already failing". Set for every task, so
     // a stale set never leaks into the next one.
     const direct = !verifyOnly && isFixTask(instructions) ? directFixFor(instructions, repoRoot) : undefined;
-    setMustPass(direct ? direct.tests : []);
+    // The names of the failing tests (saved with the fix task) say which assertions are locked: only theirs. An ordinary task sets an empty list: no lock at all.
+    const failingByFile: Record<string, string[]> = {};
+    if (direct) for (const p of loadPendingFixes(repoRoot)) failingByFile[p.file] = p.tests ?? [];
+    setMustPass(direct ? direct.tests : [], repoRoot, { failing: failingByFile });
 
     // 1. Discovery Phase (Inspect Memory & Bounded Repo Map)
     if (direct) {
