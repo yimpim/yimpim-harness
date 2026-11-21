@@ -245,6 +245,19 @@ export function translateForRemote(
           })),
         },
       };
+    case "question.timedOut": {
+      // Nobody answered in time. Said on the phone in plain words, as a log line (no new message kind, so an older phone shows it too): what was taken, and that it was by default.
+      const taken = event.answer === "" ? "the default" : `"${event.answer.replace(/\s+/g, " ").slice(0, 200)}"`;
+      return {
+        kind: "log",
+        payload: {
+          level: "info",
+          message: event.kind === "approval" ? `Nobody answered in time, so it was refused (taken by default): ${taken}` : `Nobody answered in time, so ${taken} was taken by default`,
+          taskId,
+          workerId,
+        },
+      };
+    }
     default:
       return undefined;
   }

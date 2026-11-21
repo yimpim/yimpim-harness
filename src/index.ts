@@ -57,6 +57,7 @@ import { makeCommandReviewer } from "./commandReview.js";
 import { makePanel, pickJudges } from "./commandPanel.js";
 import { EditorSweep, healerFor } from "./editorSweep.js";
 import { makePackageNotes } from "./conventionPackages.js";
+import { addDesignFollowUps } from "./designFollowUps.js";
 import { panelReviewerFor } from "./securityPanel.js";
 import { isScratchPath } from "./scratch.js";
 import { runSecurityAudit } from "./securityAudit.js";
@@ -189,7 +190,7 @@ import {
   Plan, PlannedPhase, PlanResult, parsePlan, renderProgress, validatePlan,
   phaseInstructions, phaseVerificationGoal, MAX_PLAN_PHASES,
   questionsToAsk, lintAssumptions, mentionsSpec, ASSUMPTION_CONFIRM_OPTION, lintTargetFiles, missingTargetAssumptions,
-  looksEssential, decideWithoutAsking, describeDecision, QuestionDecision, QuestionMode,
+  looksEssential, decideWithoutAsking, describeDecision, defaultAnswerFor, QuestionDecision, QuestionMode,
 } from "./planner.js";
 import {
   lintPlanVerification, applyVerificationQuality, VerificationIssue,
@@ -6269,6 +6270,11 @@ You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DI
           log: (line) => console.log(line),
         });
         if (made) console.log("🎨 [DESIGN] " + made.summary);
+        // Inside a roadmap, what the design system leaves to do (icons, empty states, the app icon and logo) becomes units in the "Design" area.
+        if (made?.created) {
+          const added = addDesignFollowUps(repoRoot, made);
+          if (added > 0) console.log(`🎨 [DESIGN] ${added} follow-up unit(s) added to the roadmap (area "Design").`);
+        }
       } catch (err: any) {
         console.log("[DESIGN] Skipped the design system: " + String(err?.message ?? err).slice(0, 120));
       }
@@ -6694,7 +6700,8 @@ The user wants you to decide, not ask: ${d.choice}`);
           prompt: cq.question,
           choices: cq.options.length > 0 ? cq.options : undefined,
           allowCustom: true,
-          fallback: "",
+          // When nobody answers in time: the planner's own default, the one an unasked point is decided with.
+          fallback: defaultAnswerFor(cq),
           askedAt: new Date().toISOString(),
         };
         const rawAnswer =
