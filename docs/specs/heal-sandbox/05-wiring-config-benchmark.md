@@ -6,7 +6,7 @@
 heal:
   sandbox:
     enabled: true          # false = today's behaviour (JSON strong pass via escalate)
-    budgetUsd: 0.75        # per parked cause; the USER's number. 0 = no dollar stop (stagnation rules only)
+    budgetUsd: 1.75        # per parked cause; the USER's number. 0 = no dollar stop (stagnation rules only)
     stagnation: 3          # rules in spec 03 §4 (reading-only uses 2× this)
 ```
 

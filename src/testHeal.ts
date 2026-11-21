@@ -975,7 +975,43 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     const now = causesOf(current.output);
     for (const k of [...parked.keys()]) if (!now.some((c) => c.key === k)) parked.delete(k);
     for (const c of now) if (!parked.has(c.key)) parked.set(c.key, { kind: "unsure", reason: "it appeared or changed after the sandbox's changes", message: c.message, count: c.count });
+
+    // Any remaining failing tests not covered by a named cause in `now` (unclustered by digestFailure, so Tier 1 never focused on them) still get a sandbox pass.
+    const clusteredTests = new Set(now.flatMap((c) => testsOfCause(current.output, c.key)));
+    const leftover = failingNames(current.output).filter((t) => !clusteredTests.has(t));
+    if (!current.ok && leftover.length > 0) {
+      let r: SandboxResult;
+      try {
+        r = await opts.sandbox!({
+          repoRoot,
+          file,
+          testText: last,
+          failureOutput: current.output,
+          failureDigest: failureText(current.output, repoRoot, file),
+          cause: {
+            message: `Unclustered failing tests (${leftover.length})`,
+            count: leftover.length,
+            tests: leftover,
+            reason: "These tests still fail after all clustered causes were handled and were not grouped into a single error signature.",
+            kind: "unsure",
+          },
+          ledger: ledgerLines(),
+          firstModelNotes: describeBatches(),
+        });
+        if (r.candidate) {
+          const m = await mergeCandidate(r.candidate, r, false);
+          sandboxNotes.push(`sandbox: [${leftover.length}×] Unclustered failing tests → ${m.kept ? `kept (${m.why})` : `not kept: ${m.why}`} [${r.runs} test run${r.runs === 1 ? "" : "s"}, $${r.cost.toFixed(2)}]`);
+        } else {
+          sandboxNotes.push(`sandbox: [${leftover.length}×] Unclustered failing tests → stopped (${r.stop}): ${firstWords(r.conclusion, 200)} [${r.runs} test run${r.runs === 1 ? "" : "s"}, $${r.cost.toFixed(2)}]`);
+        }
+      } catch (e: any) {
+        if (e instanceof AbortedError) throw e;
+        // said in the report like every other sandbox outcome, so a batch that failed does not look the same as nothing being left
+        sandboxNotes.push(`sandbox: [${leftover.length}×] Unclustered failing tests → failed: ${firstWords(String(e?.message ?? e), 160)}`);
+      }
+    }
   };
+
 
   let outcome = await converse(opts.call, "first");
   if (outcome === "parked-out" && opts.sandbox && parked.size > 0) {
