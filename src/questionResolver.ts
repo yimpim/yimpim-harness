@@ -20,6 +20,7 @@ const SYSTEM =
 export function resolverPrompt(q: PendingQuestion, goal: string | undefined, readme: string): string {
   const parts = [`Project goal: ${goal ?? "(none recorded)"}`];
   if (readme) parts.push(`README start:\n${readme}`);
+  if (q.context) parts.push(`What the person has already answered (your answer must agree with it):\n${q.context.slice(0, 1500)}`);
   parts.push(`Question:\n${q.prompt.slice(0, 2500)}`);
   if (q.choices?.length) parts.push(`Choices: ${q.choices.map((c) => `"${c}"`).join(" | ")}${q.allowCustom ? " (or your own answer)" : ""}`);
   parts.push(`The default if you have no better idea: ${q.fallback === "" ? "(none)" : q.fallback.slice(0, 300)}`);

@@ -4943,6 +4943,7 @@ async function main(): Promise<void> {
               choices: q.options.length > 0 ? q.options : undefined,
               allowCustom: true,
               fallback: q.recommended ?? "",
+              ...(q.context ? { context: q.context } : {}),
               askedAt: new Date().toISOString(),
             })
         : undefined,

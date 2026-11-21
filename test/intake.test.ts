@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { ideaMessages } from "../src/roadmapPlan.js";
 import { runQuestionnaire, parseBatch, questionnaireMessages, wantsQuestionnaire, withDesignUnit, writeDesignBrief, DECIDE_FOR_ME, MAX_ROUNDS, MAX_FOLLOW_UP_QUESTIONS, type AskedQuestion } from "../src/intake.js";
 import { createRoadmap } from "../src/roadmapFlow.js";
 import { loadRoadmap } from "../src/roadmap.js";
@@ -29,15 +30,16 @@ const SECTIONS = {
 };
 
 /** A model that knows which of the three kinds of call it is being asked for. */
-const model = (opts: { questionnaire?: any; followUp?: any; plan?: any } = {}) => {
+const model = (opts: { questionnaire?: any; followUp?: any; plan?: any; reconcile?: any } = {}) => {
   const calls: { kind: string; content: string }[] = [];
   const complete = async (m: any[]) => {
     const sys: string = m[0].content;
     const user: string = m[1].content;
-    const kind = sys.startsWith("You write a questionnaire") ? (user.includes("FOLLOW-UP") ? "followUp" : "questionnaire") : "plan";
+    const kind = sys.startsWith("You write a questionnaire") ? (user.includes("FOLLOW-UP") ? "followUp" : "questionnaire") : sys.startsWith("Some questions were not answered") ? "reconcile" : "plan";
     calls.push({ kind, content: user });
     if (kind === "questionnaire") return JSON.stringify(opts.questionnaire ?? SECTIONS);
     if (kind === "followUp") return JSON.stringify(opts.followUp ?? { sections: [] });
+    if (kind === "reconcile") return JSON.stringify(opts.reconcile ?? { answers: [] });
     return JSON.stringify(
       opts.plan ?? {
         units: [
@@ -230,6 +232,78 @@ describe("the roadmap for a new product", () => {
     await createRoadmap(flow(m, asker((q) => q.options[0]).ask), { goal: "add recipes, sharing and a shopping list", verifyExisting: false });
     assert.ok(!m.calls.some((c) => c.kind === "questionnaire"));
     assert.equal(m.calls.filter((c) => c.kind === "plan").length, 1);
+  });
+});
+
+describe("a default must agree with what the person actually said", () => {
+  const TWO_SECTIONS = {
+    sections: [
+      { id: "purpose", title: "What it is for and who uses it", questions: [Q("Who will use it?", ["Just me", "My household or family"], "My household or family")] },
+      { id: "accounts", title: "Accounts and sharing", questions: [Q("How should family members connect?", ["Everyone signs in and joins a shared home", "A shared PIN", "Not applicable: just me"], "Everyone signs in and joins a shared home")] },
+    ],
+  };
+  const justMeThenDecide = (q: AskedQuestion) => (q.question === "Who will use it?" ? "Just me" : DECIDE_FOR_ME);
+
+  test("'Just me', then 'Decide for me' on sharing: the default is checked against the first answer and corrected to 'Not applicable', and the assumption says so", async () => {
+    const m = model({ questionnaire: TWO_SECTIONS, reconcile: { answers: [{ question: "How should family members connect?", answer: "Not applicable: just me" }] } });
+    const r = await runQuestionnaire({ complete: m.complete, ask: asker(justMeThenDecide).ask }, { goal: "a fridge app" });
+    assert.equal(m.calls.filter((c) => c.kind === "reconcile").length, 1);
+    assert.match(m.calls.find((c) => c.kind === "reconcile")!.content, /What the person answered:\n- Who will use it\? -> Just me/);
+    assert.match(m.calls.find((c) => c.kind === "reconcile")!.content, /Defaults taken for them:\n- How should family members connect\? -> Everyone signs in and joins a shared home \(options: Everyone signs in and joins a shared home \| A shared PIN \| Not applicable: just me\)/);
+    assert.equal(r.decided[0].answer, "Not applicable: just me");
+    assert.deepEqual(r.assumptions, ['Accounts and sharing: "How should family members connect?" -> Not applicable: just me (decided for you; correct it if it is wrong)']);
+  });
+
+  test("it reaches the plan: the roadmap's conventions and the planning call never carry the contradictory default", async () => {
+    const m = model({ questionnaire: TWO_SECTIONS, reconcile: { answers: [{ question: "How should family members connect?", answer: "Not applicable: just me" }] } });
+    const res = await createRoadmap({ repoRoot: root, complete: m.complete, ask: asker(justMeThenDecide).ask, questionMode: "essential" }, { goal: "a fridge app", verifyExisting: false });
+    assert.equal(res.ok, true, res.text);
+    const plan = m.calls.find((c) => c.kind === "plan")!.content;
+    assert.match(plan, /How should family members connect\? -> Not applicable: just me \(decided for you/);
+    assert.ok(!/Everyone signs in and joins a shared home/.test(plan));
+    assert.ok(!loadRoadmap(root)!.conventions.some((c) => /Everyone signs in and joins a shared home/.test(c)));
+  });
+
+  test("the planner is told that the person's own answer wins over a default", () => {
+    const text = ideaMessages("a fridge app", "", ["Who? -> Just me"], [])[0].content;
+    assert.match(text, /An answer marked "decided for you" was not chosen by the person: where it contradicts something they DID answer, their own answer wins\./);
+  });
+
+  test("a later question carries what the person already answered (for whoever answers it when nobody does); the first carries nothing", async () => {
+    const a = asker((q) => q.options[0]);
+    await runQuestionnaire({ complete: model({ questionnaire: TWO_SECTIONS }).complete, ask: a.ask }, { goal: "x" });
+    assert.equal(a.asked[0].context, undefined);
+    assert.equal(a.asked[1].context, "Who will use it? -> Just me");
+  });
+
+  test("the model that answers on a time-out is shown it, and the question card carries it", async () => {
+    const { resolverPrompt } = await import("../src/questionResolver.js");
+    const text = resolverPrompt({ id: "q", kind: "blocking", prompt: "How should family members connect?", fallback: "Everyone signs in", askedAt: "", choices: ["Everyone signs in", "Not applicable: just me"], context: "Who will use it? -> Just me" }, "a fridge app", "");
+    assert.match(text, /What the person has already answered \(your answer must agree with it\):\nWho will use it\? -> Just me\nQuestion:/);
+    assert.ok(src("src/index.ts").includes("...(q.context ? { context: q.context } : {}),"));
+  });
+
+  test("nothing to check when nothing was answered, or when nothing was defaulted: no extra call", async () => {
+    const allDecided = model({ questionnaire: TWO_SECTIONS });
+    await runQuestionnaire({ complete: allDecided.complete, ask: asker(() => DECIDE_FOR_ME).ask }, { goal: "x" });
+    assert.equal(allDecided.calls.filter((c) => c.kind === "reconcile").length, 0, "the person decided everything: there is nothing they said to agree with");
+    const allAnswered = model({ questionnaire: TWO_SECTIONS });
+    await runQuestionnaire({ complete: allAnswered.complete, ask: asker((q) => q.options[0]).ask }, { goal: "x" });
+    assert.equal(allAnswered.calls.filter((c) => c.kind === "reconcile").length, 0);
+  });
+
+  test("a change to something that is not one of the question's options, a failing call, or no change: the default stands", async () => {
+    for (const reconcile of [{ answers: [{ question: "How should family members connect?", answer: "Everyone shares one login on a sticky note" }] }, { answers: [] }, "not json"]) {
+      const m = model({ questionnaire: TWO_SECTIONS, reconcile });
+      const r = await runQuestionnaire({ complete: m.complete, ask: asker(justMeThenDecide).ask }, { goal: "x" });
+      assert.equal(r.decided[0].answer, "Everyone signs in and joins a shared home");
+    }
+    const failing = async (msgs: any[]) => {
+      if (String(msgs[0].content).startsWith("Some questions were not answered")) throw new Error("down");
+      return JSON.stringify(TWO_SECTIONS);
+    };
+    const r2 = await runQuestionnaire({ complete: failing, ask: asker(justMeThenDecide).ask }, { goal: "x" });
+    assert.equal(r2.decided[0].answer, "Everyone signs in and joins a shared home");
   });
 });
 
