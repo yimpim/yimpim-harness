@@ -28,6 +28,7 @@ import { digestFailure, signatureOf } from "./failureDigest.js";
 import { statsOf } from "./benchScore.js";
 import type { SandboxRun, SandboxResult } from "./healSandbox.js";
 import { AbortedError } from "./remote/control.js";
+import { inFileOrder } from "./testNames.js";
 import { validateDeviation, describeDeviation, deviationGutting, testsModified, emitDeviationUnits, refsIn, DEFAULT_DEVIATION_TEST_CAP, type DeviationRecord } from "./healDeviation.js";
 import { evidenceText } from "./failureEvidence.js";
 import { applyEditsLenient, parseEdits, presentLargeFile, readRange, searchRepo, runProbe, unseenRanges, LARGE_FILE_LINES } from "./healEdits.js";
@@ -183,6 +184,9 @@ export function gutted(before: string, after: string): string | undefined {
   if (after.trim().length < before.trim().length * 0.4) return "it is much shorter than the original. Keep the coverage";
   return undefined;
 }
+
+/** The most failing tests that belong to no named cause that one sandbox pass is given: a handful that share setup behaves like a small cause; seven did not. */
+export const UNCLUSTERED_BATCH = 3;
 
 /**
  * Why a test file the SANDBOX produced is not accepted, before anything is run, or undefined. Stricter than `gutted` (which judges a rewrite by a model
@@ -391,6 +395,11 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   /** Every batch of edits that was accepted, with the reason the worker gave: the first model's changes, handed on in full to the stronger one. */
   const batches: { reason: string; edits: { find: string; replace: string }[] }[] = [];
   const focusOf = (): Cause | undefined => causesOf(current.output).find((c) => !parked.has(c.key));
+  /** The failing tests that belong to no named cause (the digest clusters failures by their error line, and some have none it can group). */
+  const unclusteredNames = (): string[] => {
+    const named = new Set(causesOf(current.output).flatMap((c) => testsOfCause(current.output, c.key)));
+    return failingNames(current.output).filter((t) => !named.has(t));
+  };
   const ledgerLines = (): string[] => ledger.map((l) => `  - [${l.fixed}× fixed] ${l.message}  (by: ${l.by})`);
   const focusText = (): string => {
     const all = causesOf(current.output);
@@ -798,7 +807,9 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     // count proves nothing (55 -> 35 left 34 failures that were the test's own). It is shown what really still fails, and decides again: if
     // every remaining cause is the code's it answers code-bug (its edits so far are kept), otherwise it goes on fixing the test.
     // Every cause that is left has been parked: there is nothing more to ask this model, so it is time for the hand-off (or the final report).
-    if (parked.size > 0 && !focusOf()) return "parked-out";
+    // Failing tests that no error signature groups are not causes, so the model is never pointed at them: with a sandbox they are its to take, so that is
+    // the same moment (it used to be reached only when some named cause happened to be parked too).
+    if ((parked.size > 0 || (stage === "first" && opts.sandbox && unclusteredNames().length > 0)) && !focusOf()) return "parked-out";
     const stillFailing = digestFailure(current.output.replace(ANSI, ""), repoRoot, file).total;
     const focus = focusText();
     messages.push(
@@ -903,6 +914,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
       if (fixedCount > 0) ledger.push({ message: b.message, fixed: fixedCount, by: `sandbox: ${firstWords(r.conclusion, 100)}` });
     }
     for (const [k, p] of [...parked]) {
+      if (k.startsWith("unclustered:")) continue; // a batch held as the app's has no error signature to look for among the causes
       const now = post.find((x) => x.key === k);
       if (!now) parked.delete(k);
       else if (now.count < p.count) parked.set(k, { ...p, count: now.count });
@@ -976,10 +988,19 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
     for (const k of [...parked.keys()]) if (!now.some((c) => c.key === k)) parked.delete(k);
     for (const c of now) if (!parked.has(c.key)) parked.set(c.key, { kind: "unsure", reason: "it appeared or changed after the sandbox's changes", message: c.message, count: c.count });
 
-    // Any remaining failing tests not covered by a named cause in `now` (unclustered by digestFailure, so Tier 1 never focused on them) still get a sandbox pass.
-    const clusteredTests = new Set(now.flatMap((c) => testsOfCause(current.output, c.key)));
-    const leftover = failingNames(current.output).filter((t) => !clusteredTests.has(t));
-    if (!current.ok && leftover.length > 0) {
+    // Failing tests that no error signature groups (the digest clusters failures by their error line) belong to no cause, so no cause ever held them.
+    // They get sandbox passes of their own, IN SMALL BATCHES, in the order their tests appear in the file. Seven unrelated tests in one prompt made the
+    // agent read the whole spec and the original implementation before touching one, and cost more than all the named causes together ($1.23 of $2.07);
+    // a batch of one to three behaves like those causes. What still fails is worked out again before each batch (an earlier merge often settles later
+    // tests), a test is handed over once, and each batch has its own budget.
+    const handed = new Set<string>();
+    for (let batchNo = 1; !current.ok; batchNo++) {
+      const waiting = unclusteredNames().filter((t) => !handed.has(t));
+      if (waiting.length === 0) break;
+      const batch = inFileOrder(last, waiting).slice(0, UNCLUSTERED_BATCH);
+      for (const t of batch) handed.add(t);
+      const message = `Unclustered failing tests (${batch.length})`;
+      const head = `sandbox: [${batch.length}×] Unclustered failing tests (batch ${batchNo}${waiting.length > batch.length ? `, ${waiting.length - batch.length} more waiting` : ""})`;
       let r: SandboxResult;
       try {
         r = await opts.sandbox!({
@@ -989,32 +1010,43 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
           failureOutput: current.output,
           failureDigest: failureText(current.output, repoRoot, file),
           cause: {
-            message: `Unclustered failing tests (${leftover.length})`,
-            count: leftover.length,
-            tests: leftover,
-            reason: "These tests still fail after all clustered causes were handled and were not grouped into a single error signature.",
+            message,
+            count: batch.length,
+            tests: batch,
+            reason: "These tests still fail after the named causes were handled and no error signature groups them. They are not known to share a cause: take them one at a time, in the order listed.",
             kind: "unsure",
           },
           ledger: ledgerLines(),
           firstModelNotes: describeBatches(),
         });
-        if (r.candidate) {
-          const m = await mergeCandidate(r.candidate, r, false);
-          sandboxNotes.push(`sandbox: [${leftover.length}×] Unclustered failing tests → ${m.kept ? `kept (${m.why})` : `not kept: ${m.why}`} [${r.runs} test run${r.runs === 1 ? "" : "s"}, $${r.cost.toFixed(2)}]`);
-        } else {
-          sandboxNotes.push(`sandbox: [${leftover.length}×] Unclustered failing tests → stopped (${r.stop}): ${firstWords(r.conclusion, 200)} [${r.runs} test run${r.runs === 1 ? "" : "s"}, $${r.cost.toFixed(2)}]`);
-        }
       } catch (e: any) {
         if (e instanceof AbortedError) throw e;
         // said in the report like every other sandbox outcome, so a batch that failed does not look the same as nothing being left
-        sandboxNotes.push(`sandbox: [${leftover.length}×] Unclustered failing tests → failed: ${firstWords(String(e?.message ?? e), 160)}`);
+        sandboxNotes.push(`${head} → failed: ${firstWords(String(e?.message ?? e), 160)}`);
+        continue;
       }
+      let verdict: string;
+      if (r.stop === "code-bug") {
+        // The app is wrong here and the test is not bent. The batch is held as the app's, so the file ends as a code bug with the first model's and the
+        // sandbox's fixes kept, and a fix task is queued for it, like a named cause the sandbox called the app's.
+        const evidence = r.appFilesTouched.length > 0 ? ` (evidence: app files changed in the sandbox: ${r.appFilesTouched.slice(0, 5).join(", ")})` : "";
+        parked.set(`unclustered:${batchNo}`, { kind: "code", reason: `${r.conclusion}${evidence}`.slice(0, 700), message, count: batch.length });
+        verdict = `app bug: ${firstWords(r.conclusion, 200)}`;
+      } else if (r.candidate) {
+        const m = await mergeCandidate(r.candidate, r, false);
+        verdict = m.kept ? `kept (${m.why})` : `not kept: ${m.why}`;
+      } else {
+        verdict = `stopped (${r.stop}): ${firstWords(r.conclusion, 200)}`;
+      }
+      const line = `${head} → ${verdict} [${r.runs} test run${r.runs === 1 ? "" : "s"}, $${r.cost.toFixed(2)}]`;
+      sandboxNotes.push(line);
+      opts.log?.(`  ${file}: ${line}`);
     }
   };
 
 
   let outcome = await converse(opts.call, "first");
-  if (outcome === "parked-out" && opts.sandbox && parked.size > 0) {
+  if (outcome === "parked-out" && opts.sandbox && (parked.size > 0 || unclusteredNames().length > 0)) {
     opts.log?.(`  ↗ ${file}: ${parked.size} cause${parked.size === 1 ? "" : "s"} the first model could not settle go to the sandbox (a disposable copy of the project where a stronger model runs experiments), with what is already fixed.`);
     await sandboxParked();
     if (current.ok) {
