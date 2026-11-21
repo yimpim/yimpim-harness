@@ -528,15 +528,30 @@ export function fingerprintOf(output: string, root: string): string {
 
 const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}\n… (cut)` : s);
 
+/**
+ * The title of the test itself, from the name a runner prints. Jest joins the describe blocks and the test with " › " (U+203A), which is NOT the
+ * ASCII ">": splitting on " > " (as this once did) left the whole "Suite › Group › test" string, which appears on no line of the test file, so
+ * no failing test's code was ever found. A name with no " › " is the title as it stands (a title may itself contain ">", e.g. "expects x > 0").
+ */
+export function testTitleOf(full: string): string {
+  const parts = full.split(/\s+›\s+/);
+  return parts[parts.length - 1].trim();
+}
+
 /** Extracts the failing it/test blocks from the test file so the sandbox agent does not spend 10 rounds searching for them. */
-function extractFailingBlocks(testText: string, tests: string[], maxChars = 6000): string {
+export function extractFailingBlocks(testText: string, tests: string[], maxChars = 6000): string {
   const lines = testText.split(/\r?\n/);
   const out: string[] = [];
   let used = 0;
+  const isTestLine = (l: string) => /\b(?:it|test)(?:\.(?:only|skip|each))?\s*\(/.test(l);
   for (const full of tests.slice(0, 8)) {
-    const title = full.split(" > ").pop()?.trim();
-    if (!title) continue;
-    const idx = lines.findIndex((l) => /\b(?:it|test)(?:\.(?:only|skip))?\s*\(/.test(l) && l.includes(title.slice(0, 60)));
+    // The title after the last " › ". A formatter that joins with " > " instead (the benchmark's own listing does) is tried second, only when no " › " is in the name.
+    const candidates = [testTitleOf(full), ...(!full.includes("›") && full.includes(" > ") ? [full.split(" > ").pop()!.trim()] : [])].filter((t) => t.length > 0);
+    let idx = -1;
+    for (const title of candidates) {
+      idx = lines.findIndex((l) => isTestLine(l) && l.includes(title.slice(0, 60)));
+      if (idx >= 0) break;
+    }
     if (idx < 0) continue;
     const start = Math.max(0, idx - 2);
     let depth = 0;
@@ -557,7 +572,8 @@ function extractFailingBlocks(testText: string, tests: string[], maxChars = 6000
       }
     }
     const snippet = `// ${full} (lines ${start + 1}-${end + 1})\n` + lines.slice(start, end + 1).join("\n");
-    if (used + snippet.length > maxChars) break;
+    // A block too big for what is left is skipped, not the end of the list: a smaller one after it may still fit.
+    if (used + snippet.length > maxChars) continue;
     out.push(snippet);
     used += snippet.length;
   }
