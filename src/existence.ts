@@ -323,6 +323,11 @@ const roadmapNote = (units: BuiltUnit[]) =>
 
 export interface CheckOptions {
   call: Call;
+  /**
+   * A cheaper model for the FIRST look at each requirement (short excerpts; its "built" answers need a quote that really is in a source file, which is checked in code, so
+   * it cannot invent evidence). Anything it does not settle, and a sample of what it does, goes to `call`. Unset: `call` does everything, as before.
+   */
+  cheapCall?: Call;
   /** What earlier roadmaps recorded as done: searched first, and told to the judge as a lead. */
   built?: BuiltUnit[];
   /** Folders (relative) that hold material being ported from, never evidence: the roadmap's reference folder. */
@@ -352,7 +357,12 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
   for (const r of o.requirements.filter((x) => x.kind === "manual")) {
     out.set(r.id, { req: r, verdict: "manual", evidence: [], missing: "", note: "A person has to do and report this; the code cannot show it." });
   }
-  const withCode = o.requirements.filter((r) => r.kind !== "manual").map((req) => ({ req, cands: findCandidates(req, files, lower, boost, 4, false, strongFor(req)) }));
+  // A requirement that names a file inside the reference folder is about the source being ported FROM, never about this project's code: it cannot be found here.
+  const inReference = (r: Requirement) => skip.some((d) => r.text.toLowerCase().replace(/\\/g, "/").includes(d + "/"));
+  for (const r of o.requirements.filter((x) => x.kind !== "manual" && inReference(x))) {
+    out.set(r.id, { req: r, verdict: "manual", evidence: [], missing: "", note: "It names a file in the reference folder, which is the source being ported from, not code this project has; it cannot be checked against the code." });
+  }
+  const withCode = o.requirements.filter((r) => r.kind !== "manual" && !out.has(r.id)).map((req) => ({ req, cands: findCandidates(req, files, lower, boost, 4, false, strongFor(req)) }));
   // A requirement that matches no code at all is missing: no model needs to be asked, and an empty project costs nothing.
   const asked = withCode.filter(({ req, cands }) => {
     if (cands.length > 0) return true;
@@ -368,7 +378,7 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
       .join("\n\n");
     let raws: Raw[] = [];
     try {
-      raws = parseVerdicts(await o.call([{ role: "system", content: JUDGE_SYSTEM }, { role: "user", content: user }]));
+      raws = parseVerdicts(await (o.cheapCall ?? o.call)([{ role: "system", content: JUDGE_SYSTEM }, { role: "user", content: user }]));
     } catch {
       raws = [];
     }
@@ -384,6 +394,32 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
       out.set(req.id, c);
     }
   }));
+
+  // The cheaper model's "built" answers are checked in code (the quote must be in the file), but whether the quote really satisfies the requirement is judgement. A sample is
+  // asked again of the stronger model: every fifth one, and any whose only evidence is a very short quote. Where it disagrees, its answer replaces the first one.
+  if (o.cheapCall) {
+    const builtNow = asked.filter(({ req }) => out.get(req.id)?.verdict === "built");
+    const spot = builtNow.filter(({ req }, i) => i % 5 === 0 || Math.min(...out.get(req.id)!.evidence.map((x) => x.quote.length)) < 40);
+    const spotBatches: (typeof spot)[] = [];
+    for (let i = 0; i < spot.length; i += 4) spotBatches.push(spot.slice(i, i + 4));
+    await Promise.all(spotBatches.map(async (chunk) => {
+      const user = chunk
+        .map(({ req, cands }) => `### ${req.id}: ${req.text}${roadmapNote(leads.get(req.id)!)}\n${cands.map((c) => `--- ${c.file}\n${c.snippet}`).join("\n")}`)
+        .join("\n\n");
+      let raws: Raw[] = [];
+      try {
+        raws = parseVerdicts(await o.call([{ role: "system", content: JUDGE_SYSTEM }, { role: "user", content: user }]));
+      } catch {
+        raws = [];
+      }
+      for (const { req } of chunk) {
+        const raw = raws.find((r) => r.id === req.id);
+        if (!raw) continue; // no answer from the stronger model: the first one stands
+        const c = settle(raw, req, byRel);
+        if (c.verdict !== "built") out.set(req.id, { ...c, note: `${c.note} (a second model did not confirm the first model's "built")`.trim() });
+      }
+    }));
+  }
 
   // Anything not clearly built gets a second look at much more of the code (more files, longer excerpts) before it is called
   // work: a first look that saw four short excerpts is not enough to say a requirement is only partly there.
@@ -488,6 +524,8 @@ export async function checkRequirements(o: CheckOptions): Promise<Checked[]> {
 
 export interface ExistenceArgs {
   call: Call;
+  /** See CheckOptions.cheapCall. */
+  cheapCall?: Call;
   repoRoot: string;
   request: string;
   /** The text of a spec or brief the request names. */
@@ -523,7 +561,7 @@ export async function checkExistence(a: ExistenceArgs): Promise<ExistenceResult>
   }
   if (!parsed || !parsed.applies) return none;
   a.onRequirements?.(parsed.requirements.length);
-  const items = await checkRequirements({ call: a.call, repoRoot: a.repoRoot, requirements: parsed.requirements, shortlist: a.shortlist, built: a.built, exclude: a.exclude });
+  const items = await checkRequirements({ call: a.call, cheapCall: a.cheapCall, repoRoot: a.repoRoot, requirements: parsed.requirements, shortlist: a.shortlist, built: a.built, exclude: a.exclude });
   const checkable = items.filter((i) => i.verdict !== "manual");
   return { applies: true, items, allBuilt: checkable.length > 0 && checkable.every((i) => i.verdict === "built"), note: "" };
 }

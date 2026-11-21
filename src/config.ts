@@ -15,6 +15,8 @@ export const ConfigSchema = z.object({
   models: z
     .object({
       discovery: z.array(z.string()).min(1).default(DEFAULT_MODELS),
+      // Optional: the cheaper models for the first look of the "what already exists" check. Unset = the discovery models.
+      existence: z.array(z.string()).min(1).optional(),
       planner: z.array(z.string()).min(1).default(DEFAULT_MODELS),
       editor: z.array(z.string()).min(1).default(DEFAULT_MODELS),
       verifier: z.array(z.string()).min(1).default(DEFAULT_MODELS),
@@ -74,6 +76,9 @@ export const ConfigSchema = z.object({
       // and plan only what is partial or missing; if everything is there, build nothing.
       enabled: z.boolean().default(true),
       maxRequirements: z.number().int().min(1).max(30).default(12),
+      // The first look at each requirement is made by a cheaper model (models.existence, else models.discovery) and only what it does not settle, plus a sample of what it
+      // does, goes to the planner's model. Off = the planner's model does everything.
+      tiered: z.boolean().default(true),
     })
     .prefault({}),
   roadmap: z
