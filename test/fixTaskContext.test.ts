@@ -18,15 +18,18 @@ describe("the fix task carries the diagnosis and the failure digest", () => {
 
 describe("the wiring", () => {
   const src = read("../src/index.ts");
-  test("the diagnosis goes in without the bookkeeping note that said it was reused", () => {
-    const at = src.indexOf("const items = bugs.map((b) => ({");
-    const block = src.slice(at, at + 700);
-    assert.ok(block.includes("reason: b.note.replace("), "the stored diagnosis is cleaned before it is sent");
+  // The items are built by fixItemsFor in testHeal.ts (the CLI and the benchmark both use it), so these two look there.
+  const heal = read("../src/testHeal.ts");
+  test("the diagnosis goes in without the bookkeeping note that said it was reused (and without the report's sandbox lines)", () => {
+    assert.ok(src.includes("const items = fixItemsFor(report.results, repoRoot);"), "the CLI builds the items through the shared function");
+    const at = heal.indexOf("export function diagnosisOf(");
+    const block = heal.slice(at, at + 500);
     assert.ok(block.includes("nothing it depends on changed since it was last diagnosed"), "it names the note it strips");
+    assert.ok(block.includes("sandbox: \\["), "and the sandbox's own lines");
   });
   test("the failure is the digest, not the last 40 lines of raw output", () => {
-    assert.ok(src.includes("failure: failureText(b.failure ?? \"\", repoRoot, b.file),"));
-    assert.ok(!src.includes(".slice(-40).join(\"\n\").slice(-4000)"), "the raw tail is gone");
+    assert.ok(heal.includes("failure: failureText(b.failure ?? \"\", repoRoot, b.file),"));
+    assert.ok(!src.includes(".slice(-40).join(\"\n\").slice(-4000)") && !heal.includes(".slice(-40).join(\"\n\").slice(-4000)"), "the raw tail is gone");
   });
   test("Discovery is told which files the request names, ahead of the repo-map shortlist", () => {
     assert.ok(src.includes("${namedLeads}${discoveryShortlist}"));

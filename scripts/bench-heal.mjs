@@ -242,7 +242,9 @@ async function runModel() {
   const { HEAL_REPLY_STRUCTURED } = await imp("healSchema.js");
   const { sandboxFor, sandboxBase, sandboxPrefix } = await imp("healSandbox.js");
   const { events } = await imp("events.js");
-  const { healTests, renderHealReport } = await imp("testHeal.js");
+  const { healTests, renderHealReport, fixItemsFor } = await imp("testHeal.js");
+  const { fixTaskFor } = await imp("testSettle.js");
+  const { directFixFor } = await imp("directFix.js");
 
   const harnessRev = (() => {
     try {
@@ -366,6 +368,20 @@ async function runModel() {
     const statuses = {};
     for (const r of report?.results ?? []) statuses[r.status] = (statuses[r.status] ?? 0) + 1;
     const diff = spawnSync("git", ["diff", "--numstat", "--", TEST_FILE], { cwd: REPO, encoding: "utf8" }).stdout.trim();
+    // What the CLI would send to the normal pipeline for the code bugs this run ended with, built by the very functions it uses. Printed and saved so what
+    // the Editor would be told (and whether it goes straight to the Editor) can be read without paying for the whole journey. Nothing is sent.
+    let fixTask = "";
+    let fixRoute = "";
+    if (report) {
+      const items = fixItemsFor(report.results, REPO);
+      if (items.length > 0) {
+        fixTask = fixTaskFor(items);
+        const d = directFixFor(fixTask, REPO);
+        fixRoute = d
+          ? `straight to the Editor: code files ${JSON.stringify(d.files)}; tests that must pass as written ${JSON.stringify(d.tests)}`
+          : "no code file is named in the diagnosis, so the normal Discovery and Planner would run first";
+      }
+    }
     const result = {
       run: n,
       at: new Date().toISOString(),
@@ -407,6 +423,8 @@ async function runModel() {
       cost: usage.totals.costKnown ? usage.totals.cost : null,
       testDiff: diff,
       report: report ? renderHealReport(report) : "",
+      fixTask,
+      fixRoute,
     };
     results.push(result);
     // Keep what the run actually produced (the working copy is reset afterwards): the final test file, next to the result.
@@ -421,6 +439,12 @@ async function runModel() {
     }
     for (const s of trace.sandbox) {
       console.log(`  sandbox: [${s.count}×] ${s.cause.slice(0, 60)} → ${s.stop}${s.candidate ? " (it returned a test file)" : ""}, ${s.runs} test runs, ${s.rounds} rounds, $${s.cost.toFixed(2)}${s.appFilesTouched.length ? `, app files touched: ${s.appFilesTouched.join(", ")}` : ""}`);
+    }
+    if (fixTask) {
+      console.log(`  code bug(s) left: the CLI would send this fix task (${fixRoute}):\n${fixTask.split("\n").map((l) => "    | " + l).join("\n")}`);
+      try {
+        fs.writeFileSync(path.join(BENCH, "results", `fix-task-${stamp()}-${n}.txt`), `${fixRoute}\n\n${fixTask}\n`);
+      } catch {}
     }
     if (trace.sandbox.length) console.log(`  sandbox total $${result.sandboxCost.toFixed(2)}; copies left behind: ${result.worktreesLeft}; real node_modules intact: ${result.nodeModulesIntact}`);
     console.log(`  batches with skipped edits: ${trace.batches.length}${trace.batches.length ? " (" + trace.batches.map((b) => `${b.applied} new / ${b.already} already / ${b.skipped} skipped`).join(", ") + ")" : ""}; already-applied edits resent: ${trace.alreadyResent}; \"nothing new\" turns: ${trace.nothingNew}`);

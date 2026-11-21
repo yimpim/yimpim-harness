@@ -41,7 +41,7 @@ import { ensureDesignSystem } from "./uiDesign.js";
 import { stageDesignImage } from "./designDelivery.js";
 import { parseLenient } from "./jsonRepair.js";
 import { splitJobs, unplannedJobs } from "./jobsList.js";
-import { healTests, renderHealReport, failingTestFiles, failureText } from "./testHeal.js";
+import { healTests, renderHealReport, failingTestFiles, failureText, fixItemsFor } from "./testHeal.js";
 import { HEAL_REPLY_STRUCTURED } from "./healSchema.js";
 import { sandboxFor } from "./healSandbox.js";
 import { renderLog, runSuiteLogged } from "./testLog.js";
@@ -5163,11 +5163,8 @@ async function main(): Promise<void> {
         // used to land in the middle of its last sentence), and the failure as a digest: the distinct causes with how often each
         // happens, the first line of the project's own code each points at and the code around it, and the names of the tests that fail.
         // Not the tail of the raw output, which is whichever test happened to fail last and is usually not the cause that was diagnosed.
-        const items = bugs.map((b) => ({
-          file: b.file,
-          reason: b.note.replace(/ \(nothing it depends on changed since it was last diagnosed\)$/, ""),
-          failure: failureText(b.failure ?? "", repoRoot, b.file),
-        }));
+        // (built by fixItemsFor: the same function the benchmark uses to show what would be sent, and it drops the report's cost lines)
+        const items = fixItemsFor(report.results, repoRoot);
         savePendingFixes(repoRoot, items);
         pendingTestFixTask = fixTaskFor(items);
         console.log(`🧪 [TESTS] Sending ${bugs.length} code defect(s) to the normal pipeline to fix. A test file is removed afterwards only if nothing in it passes; one that still fails in part is kept.`);
