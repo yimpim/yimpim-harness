@@ -44,7 +44,7 @@ import { parseLenient } from "./jsonRepair.js";
 import { splitJobs, unplannedJobs } from "./jobsList.js";
 import { healTests, renderHealReport, failingTestFiles, failureText, fixItemsFor } from "./testHeal.js";
 import { HEAL_REPLY_STRUCTURED } from "./healSchema.js";
-import { sandboxFor } from "./healSandbox.js";
+import { sandboxFor, securityReviewCall } from "./healSandbox.js";
 import { renderLog, runSuiteLogged } from "./testLog.js";
 import { fixTaskFor, isFixTask, savePendingFixes, loadPendingFixes, settlePendingFixes } from "./testSettle.js";
 import { directFixFor, setMustPass } from "./directFix.js";
@@ -55,6 +55,8 @@ import { type Intent, parseIntentReply, routeFacts } from "./routeIntent.js";
 import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { makeCommandReviewer } from "./commandReview.js";
 import { makePanel, pickJudges } from "./commandPanel.js";
+import { EditorSweep, healerFor } from "./editorSweep.js";
+import { panelReviewerFor } from "./securityPanel.js";
 import { isScratchPath } from "./scratch.js";
 import { runSecurityAudit } from "./securityAudit.js";
 import { existingDirOnly, existingFilesOnly, projectLayout, renderLayout } from "./projectLayout.js";
@@ -4843,6 +4845,19 @@ async function main(): Promise<void> {
         )
       );
     }
+  }
+  // The Editor keeps its tests current: before it may conclude, the tests its change can reach are run, what the change made stale is sent back to it to fix, and what
+  // it still cannot fix goes to the heal before QA. The code it changed is screened by the same panel as every other test run.
+  if (config.heal?.editorSweep !== false) {
+    agentTools.setAffectedTests(
+      new EditorSweep({
+        repoRoot,
+        written: () => agentTools.filesWrittenThisPhase(),
+        review: panelReviewerFor(client, config) ?? makeCommandReviewer(securityReviewCall(client, config, "Security: reviewing code before the Editor's test run")),
+        heal: healerFor(client, config, repoRoot, (l) => console.log(`[TESTS] ${l}`)),
+        log: (l) => console.log(`[TESTS] ${l}`),
+      })
+    );
   }
   // Backs the run_build_check tool: lets EDITOR/REPAIR confirm a patch
   // actually compiles before handing back to QA, reusing the SAME
