@@ -339,6 +339,31 @@ export const TOOLS_SCHEMA = [
               "Repo-relative files handed to any file chooser the app opens (max 5). Without it QA supplies a tiny sample png and txt.",
           },
           notes: { type: "string", description: "One line: what state this setup represents (e.g. 'paired session with demo desktop')." },
+          deepLinks: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { name: { type: "string" }, url: { type: "string" } },
+              required: ["name", "url"],
+            },
+            description:
+              "Screens QA can open directly on a device: a URL with the app's own scheme or a universal link (myapp://pairing?demo=1), or a route starting with '/'. Android and iOS QA open them with open_link. At most 10.",
+          },
+          env: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { name: { type: "string" }, value: { type: "string" } },
+              required: ["name", "value"],
+            },
+            description:
+              "Variables the app is started with for QA. Only names starting EXPO_PUBLIC_, VITE_, NEXT_PUBLIC_, REACT_APP_, QA_ or MOCK_ are accepted (so nothing secret can be set); values are short strings.",
+          },
+          mockNotes: {
+            type: "string",
+            description:
+              "What you mocked or toggled for QA and where it is switched on (e.g. 'a fake pairing service, on when EXPO_PUBLIC_QA_MOCK=1'). It is listed in the QA evidence so a person can see it. A mock must be off unless that flag is set.",
+          },
         },
         required: [],
       },
@@ -1767,13 +1792,16 @@ export class AgentTools {
     // Report what THIS call contributed, not the merged file: otherwise an
     // entirely invalid patch would claim success by echoing earlier values.
     const saved = sanitizeQaSetup(patch);
-    const hasAnything = Boolean(saved.launchPath || saved.localStorage || saved.cameraImage || saved.uploadFiles || saved.notes);
+    const hasAnything = Boolean(saved.launchPath || saved.localStorage || saved.cameraImage || saved.uploadFiles || saved.notes || saved.deepLinks || saved.env || saved.mockNotes);
     if (hasAnything) saveQaSetup(this.repoRoot, saved);
     const parts: string[] = [];
     if (saved.launchPath) parts.push(`launchPath ${saved.launchPath}`);
     if (saved.localStorage) parts.push(`${Object.keys(saved.localStorage).length} storage value(s)`);
     if (saved.cameraImage) parts.push(`cameraImage ${saved.cameraImage}`);
     if (saved.uploadFiles) parts.push(`${saved.uploadFiles.length} upload file(s)`);
+    if (saved.deepLinks) parts.push(`${saved.deepLinks.length} deep link(s)`);
+    if (saved.env) parts.push(`${Object.keys(saved.env).length} variable(s) QA starts the app with`);
+    if (saved.mockNotes) parts.push("what is mocked");
     return parts.length > 0
       ? `QA setup saved: ${parts.join(", ")}. Anything invalid (a path outside the repo, a non-relative launchPath, a secret-looking file) was dropped.`
       : "Nothing valid to record — launchPath must start with '/', '?' or '#', file paths must be repo-relative and non-secret.";

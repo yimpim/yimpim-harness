@@ -783,6 +783,15 @@ MANDATORY RULES:
     a file picker, register a repo-relative cameraImage / uploadFiles so QA can exercise it in the browser.
     If the only way in is real credentials or a live backend, do not fake it: say so in howToVerify and
     flag_manual_step instead.
+12d. QA ACCESS: If your change adds or changes something QA cannot reach from a fresh start (a screen behind sign-in or pairing, data only a real backend returns, a native-only path, a
+    feature behind a flag), the SAME ticket adds the way in, using the cheapest honest one, and you say which in howToVerify:
+      - web state: register_qa_setup launchPath / localStorage (a signed-in session, onboarding done);
+      - mock data or a mock endpoint: a dev-only fixture or fake service switched on by an env flag or __DEV__, never enabled in production; say where it is switched on, and register the
+        flag with register_qa_setup env (names must start EXPO_PUBLIC_, VITE_, NEXT_PUBLIC_, REACT_APP_, QA_ or MOCK_) and describe it in mockNotes;
+      - a dev toggle: a flag read from env, config or localStorage that enables the feature for QA;
+      - a deep link: a route or URL (myapp://screen?state=demo, or /route?state=demo) that opens the screen directly; register it with register_qa_setup deepLinks and name it in howToVerify.
+    A mock or toggle must be OFF unless the dev flag or QA env is set. If no way in is needed, say so. If the only way in is real credentials or a live backend, do not fake it: say so and
+    flag_manual_step.
 12c. MORE THAN ONE STATE: If the requirement describes the result in more than one app state (light and dark
     theme, signed in and out, narrow and wide), QA's screenshot is only ever in ONE of them. In howToVerify
     name every state and exactly how to reach each (the toggle and where it is, the storage key and value, the
