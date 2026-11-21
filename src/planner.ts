@@ -203,6 +203,15 @@ export function decideWithoutAsking(q: ClarifyingQuestion, essential: boolean): 
   return { question: q.question, choice: "decide it yourself from the request and the code, and say what you chose", essential, needsReplan: true };
 }
 
+/**
+ * What a clarifying question answers when nobody does: the same default an unasked point is decided with (decideWithoutAsking). An assumption is kept as planned; a question with
+ * options takes the first; a free-text question has none.
+ */
+export function defaultAnswerFor(q: ClarifyingQuestion): string {
+  if (q.question.startsWith("The plan assumes:")) return ASSUMPTION_CONFIRM_OPTION;
+  return q.options[0] ?? "";
+}
+
 /** One line for the plan's record of what was decided without asking. */
 export function describeDecision(d: QuestionDecision): string {
   const q = d.question.split("\n")[0].replace(/^The plan assumes:\s*/, "").trim();
