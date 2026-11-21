@@ -238,7 +238,7 @@ export const SETTINGS: SettingDef[] = [
     type: "number",
     group: "Limits",
     common: true,
-    description: "Max distinct files one phase may modify. Caps the blast radius of a confused repair pass.",
+    description: "Max distinct files one phase may modify; a write past it is refused. 0 = no limit (the default).",
   },
   {
     key: "limits.maxFileBytes",

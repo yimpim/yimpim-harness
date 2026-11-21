@@ -168,7 +168,9 @@ export const ConfigSchema = z.object({
       // old default on a single whole-file read.
       maxFileBytes: z.number().default(60_000),
       maxSearchResults: z.number().default(100),
-      maxFilesPerPhase: z.number().default(20),
+      // The most distinct files one phase may modify; a write past it is refused. 0 (the default) = no limit: a phase that touches many files is a sign the plan was broad,
+      // which is worth knowing, but refusing an edit half-way leaves the work half-done, and none of the safety rules depends on a count.
+      maxFilesPerPhase: z.number().min(0).default(0),
       apiMaxAttempts: z.number().default(4),
       apiBaseDelayMs: z.number().default(1000),
       checkpointEveryToolCall: z.boolean().default(true),

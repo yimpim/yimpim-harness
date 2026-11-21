@@ -329,12 +329,16 @@ describe("in the harness: a command that used to ask a person is cleared by the 
   });
 
   test("an elevated command (it downloads and runs a package) is judged by the panel too, and is told so; the single reviewer still leaves it to the person", async () => {
+    // The first request for a program that is not installed is declined with what the project has, before anyone is asked (projectTools.test.ts); it is the
+    // second request for it that goes on to the judges and a person.
     const seen: string[] = [];
     const asked: string[] = [];
     const tools = new AgentTools(root, config, async (q) => (asked.push(q), "no"));
     const panel = makePanel(three(NOT, NOT, NOT, seen));
     tools.setCommandReviewer((r) => panel.reviewCommand(r), { coversElevated: true });
     await tools.runProjectCommand({ command: "npx left-padz --help", purpose: "pad" });
+    assert.equal(seen.length, 0, "declined first, with nobody asked");
+    await tools.runProjectCommand({ command: "npx left-padz --version", purpose: "pad" });
     assert.equal(seen.length, 3, "the panel was asked");
     assert.match(seen[0], /Note from the harness: needs extra care: it downloads a package and runs it in one step/);
     assert.equal(asked.length, 1, "and since all said not safe, the person is asked");
@@ -344,6 +348,7 @@ describe("in the harness: a command that used to ask a person is cleared by the 
     let singleCalled = 0;
     tools2.setCommandReviewer(async () => (singleCalled++, { allow: true, why: "fine" }));
     await tools2.runProjectCommand({ command: "npx left-padz --help", purpose: "pad" });
+    await tools2.runProjectCommand({ command: "npx left-padz --version", purpose: "pad" });
     assert.equal(singleCalled, 0, "a single reviewer is never trusted with an elevated command");
     assert.equal(single.length, 1);
   });
