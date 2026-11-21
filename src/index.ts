@@ -126,7 +126,9 @@ import {
   failureSignature, isVisualOnlyFailure, evaluateRepairProgress, failuresUnrelatedToChange, buildWidenedScopeSection, computeRepairPlannerMaxRounds,
   extractPitfallSummary,
 } from "./repairPolicy.js";
-import { AgentTools, plannerReadBudget, READ_ONLY_TOOLS_SCHEMA, PLANNER_TOOLS_SCHEMA, DISCOVERY_TOOLS_SCHEMA, ManualStep } from "./agentTools.js";
+import { AgentTools, plannerReadBudget, READ_ONLY_TOOLS_SCHEMA, PLANNER_TOOLS_SCHEMA, DISCOVERY_TOOLS_SCHEMA, TOOLS_SCHEMA, REPAIR_RUN_TEST_TOOL, ManualStep } from "./agentTools.js";
+import { testTierContext } from "./repairTestContext.js";
+import { repairRunTestFor, REPAIR_RUN_TEST_NOTE } from "./repairRunTest.js";
 import { extractTaskFindings, extractDiscoveryTargetFiles, recoverDiscoveryOutput } from "./discoveryParsing.js";
 import { DISCOVERY_FILE_BUDGET, DISCOVERY_ROUND_BUDGET } from "./agentLoop.js";
 import { mergeLiveRules, mergeArchitectureRules, mergeTechStack } from "./memoryRules.js";
@@ -3611,6 +3613,12 @@ Test hook just added: ${hookHowTo}` : hookHowTo;
       // built to prevent: identical failure, identical non-response, retried
       // until the attempt budget or circuit breaker ends the phase anyway.
       const madeNoChanges = result.blockingFailures?.some((f) => f.gate === "change set") ?? false;
+      // A failing TEST: its code and the code the failure points at go in front of the Planner and the Editor (the heal found that finding them is where
+      // an agent's first rounds go), and REPAIR may run the failing test itself after a change. Any other failure (a build error, a screenshot) has none of this.
+      const testTier = madeNoChanges ? undefined : testTierContext(failureSnippet, repoRoot);
+      const testTierSection = testTier ? `
+
+${testTier.text}` : "";
       // Advice specific to a stack this project does not have is exactly the
       // kind of noise that made the environment report confusing — the same
       // fix applies here: only mention gradle when there is an Android stack.
@@ -3712,7 +3720,7 @@ Phase goal:
 ${phase.instructions}
 
 Hard Bug Report / Failure Output:
-${failureSnippet}
+${failureSnippet}${testTierSection}
 ${historySection}
 
 Files you may inspect: ${triageCandidateFiles.length > 0 ? triageCandidateFiles.join(", ") : "(none identified — reason from the error text and Live Rules alone)"}
@@ -3789,7 +3797,7 @@ Instructions:
         : `The project failed autonomous verification after executing phase "${phaseName}".
 
 Hard Bug Report / Failure Output:
-${failureSnippet}
+${failureSnippet}${testTierSection}
 
 Live Rules:
 ${memory.liveRules.join("\n")}
@@ -3814,7 +3822,7 @@ ${repairPlan
    close to this, explain concretely why THIS attempt is different and will actually resolve it.
 4. Do not repeat a change that verification already rejected — read the
    failure detail carefully and address the SPECIFIC defect it reports.`
-}${gradleCaveat}${widenedScopeSection}${missingDependencySection}${repairPlanSection}`;
+}${gradleCaveat}${widenedScopeSection}${missingDependencySection}${repairPlanSection}${testTier ? REPAIR_RUN_TEST_NOTE : ""}`;
 
       // REPAIR otherwise only ever sees QA's TEXT description of a visual
       // defect ("text overlaps the page edge") — never the actual screenshot
@@ -3861,6 +3869,8 @@ ${repairPlan
       // (a failure report that doesn't point at any real code defect), threw
       // ESCALATION_NEEDED straight out of the whole run and crashed the
       // process instead of just failing this phase cleanly.
+      // run_test is bound for this one call and unbound after it, so nothing else can reach it (an unbound run_test answers "only available in a heal sandbox").
+      if (testTier) agentTools.bindSandboxRunTest(repairRunTestFor({ client, config, repoRoot }));
       try {
         const repairResult = await runToolAgent({
           prompt: repairPayload,
@@ -3873,6 +3883,7 @@ ${repairPlan
           models: repairModelsForCall,
           agentName: "REPAIR",
           visionMode: usingEditorVision,
+          ...(testTier ? { tools: [...TOOLS_SCHEMA, REPAIR_RUN_TEST_TOOL] } : {}),
         });
         // A fix can change the very mechanic QA needs to exercise (e.g. the
         // repair changes a control from a single tap to a hold-and-release) —
@@ -3914,6 +3925,8 @@ ${repairPlan
           break;
         }
         throw err;
+      } finally {
+        agentTools.bindSandboxRunTest(undefined);
       }
     }
   }
