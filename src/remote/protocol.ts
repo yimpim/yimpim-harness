@@ -177,6 +177,8 @@ export interface PendingQuestion {
    * renders `choices` as buttons with no "other" affordance, same as today.
    */
   allowCustom?: boolean;
+  /** What the person has already answered in this same set of questions: not shown to them, given to whoever answers by default so a default never contradicts it. */
+  context?: string;
   /** Applied if nobody answers. */
   fallback: string;
   askedAt: string;

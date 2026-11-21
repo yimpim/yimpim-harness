@@ -28,6 +28,8 @@ export interface Question {
   recommended?: string;
   /** One line, in plain words, on why the answer matters. */
   why?: string;
+  /** What the person already answered in this set (see PendingQuestion.context). */
+  context?: string;
 }
 
 export interface Synthesis {
@@ -112,7 +114,7 @@ export function ideaMessages(goal: string, docs: string, answers: string[], exis
 Cover everything a real, usable first version needs: accounts and access, the core things the product is about, the flows people do, money or admin if the idea involves them, notifications, settings, quality and release work. Write fewer, larger units for obvious work and more detailed ones for risky work. Up to ${MAX_UNITS_PER_CALL} units.
 Also return "conventions": up to 8 decisions every unit follows (structure, naming, libraries, data approach).
 "questions": at most 5 questions that change the plan and that only the USER can answer (who it is for, which platforms, must-have versus later, constraints, real services to use). Give 2-4 options each. Never ask something you can reasonably decide, and never ask about code. The FIRST option is your recommendation, used when nobody answers.
-${answers.length > 0 ? `The user has answered; follow the answers exactly and return NO questions.` : ``}
+${answers.length > 0 ? `The user has answered; follow the answers exactly and return NO questions. An answer marked "decided for you" was not chosen by the person: where it contradicts something they DID answer, their own answer wins.` : ``}
 "assumptions": anything the plan rests on that is not settled by the request or the answers.
 
 ${JSON_NOTE}
