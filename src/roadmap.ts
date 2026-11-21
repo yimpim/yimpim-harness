@@ -28,6 +28,8 @@ export interface UnitDone {
 }
 
 export interface RoadmapUnit {
+  /** See UnitDraft.buildsUi. */
+  buildsUi?: boolean;
   id: string;
   title: string;
   /** Grouping (an epic, a feature area, a layer). */
@@ -74,6 +76,8 @@ export interface UnitDraft {
   deps?: string[];
   refs?: string[];
   acceptance?: string[];
+  /** The planner's own statement: this unit builds or changes screens, components or styling a person sees. */
+  buildsUi?: boolean;
   order?: number;
 }
 
@@ -295,6 +299,7 @@ export function addUnits(rm: Roadmap, drafts: UnitDraft[], addedBy: RoadmapUnit[
   for (const { draft, unit, isNew } of resolved) {
     if (draft.summary !== undefined || isNew) unit.summary = clip(draft.summary ?? unit.summary, 600);
     if (draft.refs) unit.refs = [...new Set(draft.refs.map(norm).filter(Boolean))].slice(0, 200);
+    if (typeof draft.buildsUi === "boolean") unit.buildsUi = draft.buildsUi;
     if (draft.acceptance) unit.acceptance = draft.acceptance.map((a) => clip(a, 160)).filter(Boolean).slice(0, 6);
     if (draft.deps) {
       const deps: string[] = [];

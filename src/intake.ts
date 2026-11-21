@@ -6,14 +6,18 @@
  * asks follow-ups only where an answer opened something. Anything can be answered "Decide for me", and what nobody answers takes the recommended option; both are recorded
  * as assumptions. Nothing here asks for more than changes the plan.
  */
-import { sourceFileCount } from "./questionScope.js";
+import { isNewProject, NEW_PROJECT_MAX_SOURCE_FILES } from "./questionScope.js";
 import type { Msg, ModelCall } from "./roadmapPlan.js";
 import type { UnitDraft } from "./roadmap.js";
 import fs from "fs";
 import path from "path";
 
-/** A project with this many source files or fewer is a new build. */
-export const GREENFIELD_MAX_SOURCE_FILES = 10;
+/** A project with this many source files or fewer is a new build (a fresh starter template counts too: see questionScope.ts). */
+export const GREENFIELD_MAX_SOURCE_FILES = NEW_PROJECT_MAX_SOURCE_FILES;
+/** The most questions the first round may hold, and the most in one section; a follow-up round is smaller. */
+export const MAX_QUESTIONS = 15;
+export const MAX_PER_SECTION = 3;
+export const MAX_FOLLOW_UP_QUESTIONS = 6;
 export const DECIDE_FOR_ME = "Decide for me";
 /** The first round and one round of follow-ups. */
 export const MAX_ROUNDS = 2;
@@ -77,7 +81,11 @@ export const SECTIONS: { id: string; title: string; about: string }[] = [
 
 const SYSTEM = [
   "You write a questionnaire for a person who wants software built and is NOT technical. They will answer in plain words. Use no jargon: no 'API', 'database', 'backend', 'auth' ('sign-in' is fine).",
-  "Ask everything that would change what gets built, and nothing that would not. Do not ask what the request or the brief already answers.",
+  "Ask what would change what gets built, and nothing that would not. Do not ask what the request or the brief already answers.",
+  `Ask at most ${MAX_QUESTIONS} questions in all and at most ${MAX_PER_SECTION} in any section; fewer is better. If you are tempted to ask more, keep the ones that change the build the most.`,
+  "Make every question make sense whatever the earlier answers were. If a question only matters for some answers (sharing only matters if more than one person uses it), give it a last option such as 'Not applicable: just me'.",
+  "The 'look' section asks up to 3 separate questions: the feel, light or dark or both, and whether they have colours, a logo or apps they like (with an option such as 'No, you choose').",
+  "The 'edges' section asks at least one situation about losing information, and, when anyone else's information could be involved, one about privacy.",
   "",
   `The sections, in this order (skip any that does not apply to this kind of product):`,
   ...SECTIONS.map((s, i) => `${i + 1}. id "${s.id}": ${s.title} (${s.about})`),
@@ -121,7 +129,7 @@ export function followUpMessages(goal: string, docs: string | undefined, qa: { q
 const clip = (v: unknown, n: number): string => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 
 /** Tolerant: whatever is usable is kept (a question with fewer than two options, or no words, is dropped; a recommendation that is not an option becomes the first). */
-export function parseBatch(raw: string): IntakeBatch {
+export function parseBatch(raw: string, maxQuestions = MAX_QUESTIONS, maxPerSection = MAX_PER_SECTION): IntakeBatch {
   const out: IntakeBatch = { sections: [] };
   let j: any;
   const a = raw.indexOf("{");
@@ -138,7 +146,9 @@ export function parseBatch(raw: string): IntakeBatch {
     const id = clip(s?.id, 30).toLowerCase() || "other";
     const title = clip(s?.title, 80) || SECTIONS.find((x) => x.id === id)?.title || id;
     const questions: IntakeQuestion[] = [];
+    const used = out.sections.reduce((n, x) => n + x.questions.length, 0);
     for (const q of Array.isArray(s?.questions) ? s.questions : []) {
+      if (questions.length >= maxPerSection || used + questions.length >= maxQuestions) break; // a model that asks too much is cut off, earliest sections first
       const question = clip(q?.question, 300);
       const options = (Array.isArray(q?.options) ? q.options : []).map((o: unknown) => clip(o, 80)).filter((o: string) => o && o.toLowerCase() !== DECIDE_FOR_ME.toLowerCase());
       const unique = [...new Set<string>(options)].slice(0, 5);
@@ -223,7 +233,7 @@ export async function runQuestionnaire(deps: IntakeDeps, args: { goal: string; d
     const so_far = [...result.answered, ...result.decided];
     if (so_far.length === 0) break;
     try {
-      batch = parseBatch(await deps.complete(followUpMessages(args.goal, args.docs, so_far)));
+      batch = parseBatch(await deps.complete(followUpMessages(args.goal, args.docs, so_far)), MAX_FOLLOW_UP_QUESTIONS);
     } catch {
       break;
     }
@@ -236,7 +246,7 @@ export async function runQuestionnaire(deps: IntakeDeps, args: { goal: string; d
 
 /** Whether a roadmap for this request gets the full questionnaire: a new product (an idea, no reference to port from) in a new or nearly empty project. */
 export function wantsQuestionnaire(repoRoot: string, args: { referenceDir?: string }): boolean {
-  return !args.referenceDir && sourceFileCount(repoRoot) <= GREENFIELD_MAX_SOURCE_FILES;
+  return !args.referenceDir && isNewProject(repoRoot);
 }
 
 // ------------------------------------------------------------------------------------------------------------------------ the look of the app
@@ -250,7 +260,9 @@ export const DESIGN_UNIT_TITLE = "Design system";
  */
 export function withDesignUnit(drafts: UnitDraft[]): UnitDraft[] {
   if (drafts.some((d) => d.title.trim().toLowerCase() === DESIGN_UNIT_TITLE.toLowerCase())) return drafts;
-  const builds = (d: UnitDraft) => SCREEN_WORDS.test(`${d.title} ${d.area ?? ""} ${d.summary ?? ""}`) || (d.area ?? "").toLowerCase() === "ui";
+  // The planner says so itself (buildsUi). Only a unit that did not say (an older roadmap, or a reply that left it out) is judged by its words.
+  const builds = (d: UnitDraft) =>
+    typeof d.buildsUi === "boolean" ? d.buildsUi : SCREEN_WORDS.test(`${d.title} ${d.area ?? ""} ${d.summary ?? ""}`) || (d.area ?? "").toLowerCase() === "ui";
   if (!drafts.some(builds)) return drafts;
   const design: UnitDraft = {
     title: DESIGN_UNIT_TITLE,
