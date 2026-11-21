@@ -764,6 +764,11 @@ export function createSandboxRun(deps: {
 
 // ------------------------------------------------------------------------------------------------------------------------ the sandbox pass for a heal
 
+/** The security model chain as a review call: code an agent wrote that could run a program, delete files or send data out is judged by a model other than the one that wrote it. */
+export function securityReviewCall(client: OpenRouterClient, config: AgentConfig, reason: string): ReviewCall {
+  return (messages) => runLabeledCompletion({ client, models: securityModels(config.models), messages: messages as any, agentName: "SECURITY", jsonMode: true, reason });
+}
+
 /**
  * The sandbox pass for a heal, or undefined when there is none to give: it is switched off (heal.sandbox.enabled: false) or the repair chain has
  * no model after the first to hand a cause to. The caller then keeps the JSON stronger-model pass it already had. One place decides this so the
@@ -776,15 +781,7 @@ export function sandboxFor(deps: { client: OpenRouterClient; config: AgentConfig
   const cfg = deps.config.heal?.sandbox;
   if (cfg && cfg.enabled === false) return undefined;
   if (deps.repairModels.length < 2) return undefined;
-  const securityCall: ReviewCall = (messages) =>
-    runLabeledCompletion({
-      client: deps.client,
-      models: securityModels(deps.config.models),
-      messages: messages as any,
-      agentName: "SECURITY",
-      jsonMode: true,
-      reason: "Security: reviewing code before a sandbox test run",
-    });
+  const securityCall = securityReviewCall(deps.client, deps.config, "Security: reviewing code before a sandbox test run");
   return createSandboxRun({
     client: deps.client,
     config: deps.config,

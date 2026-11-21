@@ -227,6 +227,14 @@ export function createRunTestSession(deps: {
   gate: RunGate;
   /** When the project uses neither Jest nor Vitest: the heal's own runner (whole file, no name filter). */
   fallbackRun?: RunTests;
+  /**
+   * For a session in the REAL project (REPAIR runs tests where it edits): the files as they are when the session starts count as already run, because the
+   * QA gate has just run the project's tests as they stand. What the gate then screens is what the agent changes after that, which is what it exists for.
+   * A sandbox does not need this: everything in it is judged against its base.
+   */
+  preapproveCurrent?: boolean;
+  /** What the security reviewer is told the run is for. */
+  purpose?: string;
   exec?: ExecFn;
   now?: () => number;
 }): RunTestSession {
@@ -235,6 +243,16 @@ export function createRunTestSession(deps: {
   const now = deps.now ?? Date.now;
   /** File → hash of the version already cleared to run. */
   const approved = new Map<string, string>();
+  if (deps.preapproveCurrent) {
+    for (const rel of changedFiles(root)) {
+      try {
+        const full = path.join(root, rel);
+        if (fs.statSync(full).isFile() && fs.statSync(full).size <= 2 * 1024 * 1024) approved.set(rel, sha(fs.readFileSync(full, "utf8")));
+      } catch {
+        // a file that cannot be read now is screened when it is run
+      }
+    }
+  }
 
   const refuse = (why: string): RunTestResult => ({ text: `run_test refused: ${why}`, refused: true, output: "" });
 
@@ -291,7 +309,7 @@ export function createRunTestSession(deps: {
           outcome = await deps.gate.review({
             argv: [runner?.bin ?? "test-runner", ...argv],
             label: `run_test ${file}${namePattern ? ` -t "${namePattern.slice(0, 60)}"` : ""}`,
-            purpose: `heal sandbox experiment: run the test file after the agent changed ${flagged.map((f) => f.rel).join(", ")}`,
+            purpose: `${deps.purpose ?? "heal sandbox experiment: run the test file"} after the agent changed ${flagged.map((f) => f.rel).join(", ")}`,
             cwd: root,
             repoRoot: root,
             created: flagged.map((f) => f.rel),

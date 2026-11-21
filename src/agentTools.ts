@@ -716,6 +716,22 @@ export const RUN_TEST_TOOL = {
 };
 
 /**
+ * run_test for REPAIR, which edits the real project: the same tool, described for where it runs. Offered only for a failing test, and only to REPAIR (see
+ * repairRunTest.ts); everything else that is given the default tool list is still never offered a way to run tests.
+ */
+export const REPAIR_RUN_TEST_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "run_test",
+    description:
+      "Run a test file in the project as it is right now, with your edits, optionally only the tests whose name matches namePattern (a regular expression, as jest -t / vitest -t). " +
+      "Returns the runner's output. Use it after a change to see whether the failing test now passes BEFORE you finish: it is much cheaper than the full verification, " +
+      "which still runs afterwards and decides. It runs tests only; it cannot run anything else.",
+    parameters: RUN_TEST_TOOL.function.parameters,
+  },
+};
+
+/**
  * Record a place where the spec says one thing and the working app does another, in a heal sandbox. Not in TOOLS_SCHEMA, for the same reason as RUN_TEST_TOOL.
  * What it records is checked against the project when it is called (the files and lines must exist), and again when the test change is merged.
  */
