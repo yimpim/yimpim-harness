@@ -203,13 +203,15 @@ export function diagnosisOf(note: string): string {
 }
 
 /** One item for the fix task per file the heal ended as a code bug: the diagnosis, and the failure as a digest. The CLI and the benchmark both build it here. */
-export function fixItemsFor(results: HealResult[], repoRoot: string): { file: string; reason: string; failure: string; }[] {
+export function fixItemsFor(results: HealResult[], repoRoot: string): { file: string; reason: string; failure: string; tests: string[] }[] {
   return results
     .filter((r) => r.status === "code-bug")
     .map((b) => ({
       file: b.file,
       reason: diagnosisOf(b.note),
       failure: failureText(b.failure ?? "", repoRoot, b.file),
+      // the names of the failing tests, kept with the task: what THEY assert is what the fix may not change
+      tests: failingNames(b.failure ?? ""),
     }));
 }
 
