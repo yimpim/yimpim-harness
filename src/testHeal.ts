@@ -185,6 +185,34 @@ export function gutted(before: string, after: string): string | undefined {
   return undefined;
 }
 
+/**
+ * How much of the sandbox's diagnosis of an app bug is kept: all of what it writes (its conclusion is itself bounded at 1,500 characters). It used to be cut
+ * to 700, which lost most of the verified mechanism (a real one was 1,500) before it reached the Editor that has to act on it.
+ */
+export const DIAGNOSIS_CHARS = 1700;
+
+/**
+ * The diagnosis of a code bug as a fix task should carry it: the worker's explanation, WITHOUT the bookkeeping the report keeps (that it was reused, and
+ * the sandbox's lines with their test runs, rounds and dollars). The Editor needs what is wrong and where, not what finding it cost.
+ */
+export function diagnosisOf(note: string): string {
+  return note
+    .replace(/ \(nothing it depends on changed since it was last diagnosed\)$/, "")
+    .replace(/\s+sandbox: \[[\s\S]*$/, "")
+    .trim();
+}
+
+/** One item for the fix task per file the heal ended as a code bug: the diagnosis, and the failure as a digest. The CLI and the benchmark both build it here. */
+export function fixItemsFor(results: HealResult[], repoRoot: string): { file: string; reason: string; failure: string; }[] {
+  return results
+    .filter((r) => r.status === "code-bug")
+    .map((b) => ({
+      file: b.file,
+      reason: diagnosisOf(b.note),
+      failure: failureText(b.failure ?? "", repoRoot, b.file),
+    }));
+}
+
 /** The most failing tests that belong to no named cause that one sandbox pass is given: a handful that share setup behaves like a small cause; seven did not. */
 export const UNCLUSTERED_BATCH = 3;
 
@@ -969,7 +997,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         verdict = `not run: ${firstWords(r.conclusion, 200)}`;
       } else if (r.stop === "code-bug") {
         const evidence = r.appFilesTouched.length > 0 ? ` (evidence: app files changed in the sandbox: ${r.appFilesTouched.slice(0, 5).join(", ")})` : "";
-        parked.set(key, { ...p, kind: "code", reason: `${r.conclusion}${evidence}`.slice(0, 700) });
+        parked.set(key, { ...p, kind: "code", reason: `${r.conclusion}${evidence}`.slice(0, DIAGNOSIS_CHARS) });
         verdict = `app bug: ${firstWords(r.conclusion, 200)}`;
       } else if (r.candidate) {
         const m = await mergeCandidate(r.candidate, r, p.kind === "code");
@@ -1030,7 +1058,7 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
         // The app is wrong here and the test is not bent. The batch is held as the app's, so the file ends as a code bug with the first model's and the
         // sandbox's fixes kept, and a fix task is queued for it, like a named cause the sandbox called the app's.
         const evidence = r.appFilesTouched.length > 0 ? ` (evidence: app files changed in the sandbox: ${r.appFilesTouched.slice(0, 5).join(", ")})` : "";
-        parked.set(`unclustered:${batchNo}`, { kind: "code", reason: `${r.conclusion}${evidence}`.slice(0, 700), message, count: batch.length });
+        parked.set(`unclustered:${batchNo}`, { kind: "code", reason: `${r.conclusion}${evidence}`.slice(0, DIAGNOSIS_CHARS), message, count: batch.length });
         verdict = `app bug: ${firstWords(r.conclusion, 200)}`;
       } else if (r.candidate) {
         const m = await mergeCandidate(r.candidate, r, false);
@@ -1096,7 +1124,8 @@ async function healOneInner(opts: HealOptions, file: string, trace: { output: st
   const sandboxText = sandboxNotes.length > 0 ? ` ${sandboxNotes.join(" | ")}`.slice(0, 1000) : "";
   const summary = ([...parked.values()].map((p) => `[${p.count}×] ${p.message} — ${p.reason}`).join("; ").slice(0, 1200) + sandboxText).slice(0, 2200);
   if (codeParks.length > 0) {
-    const note = `${`${codeParks.map((p) => `${p.message} — ${p.reason}`).join(" ")} Still failing: ${testsFailing(current.output) ?? "?"}.`.slice(0, 1250)}${sandboxText}`.slice(0, 2300);
+    // The diagnosis goes in whole (it is what the Editor will be sent), then the report's own lines about what the sandbox did.
+    const note = `${`${codeParks.map((p) => `${p.message} — ${p.reason}`).join(" ")} Still failing: ${testsFailing(current.output) ?? "?"}.`.slice(0, DIAGNOSIS_CHARS + 300)}${sandboxText}`.slice(0, DIAGNOSIS_CHARS + 300 + 1000);
     const before = testsFailing(first.output);
     const now = testsFailing(current.output);
     if (last !== original && now !== undefined && (before === undefined || now < before)) {
