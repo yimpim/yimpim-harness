@@ -28,6 +28,7 @@ export interface TokenUsage {
 }
 
 export type YimpimEvent =
+  | { type: "question.timedOut"; id: string; answer: string; kind: string }
   | { type: "run.start"; runId: string; repoRoot: string; command: string; task?: string }
   | { type: "run.end"; ok: boolean; phasesCompleted: number; phasesTotal: number; durationMs: number; usage: UsageReport }
   | { type: "plan.ready"; runId: string; goal: string; degraded: boolean; phases: { id: string; name: string; goal: string; executor?: string }[] }

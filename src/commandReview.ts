@@ -29,6 +29,8 @@ export interface ReviewRequest {
   created: string[];
   /** What the command policy knows about it (why it needs extra care, that it was approved before but its files changed), for the reviewer to weigh. */
   notes?: string[];
+  /** Repo-relative files the reviewer must be shown in full besides the ones the command names: the code the agent changed that a test run would load. */
+  show?: string[];
 }
 
 /** Something other than a command that a person would be asked to approve: a dependency install plan, a package to add. */

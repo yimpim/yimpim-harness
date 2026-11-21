@@ -1,13 +1,12 @@
 import fsSync from "node:fs";
 import path from "node:path";
-import { promptOnce } from "./terminalPrompt.js";
 import { OpenRouterClient, FunctionTool, ChatMessage } from "./openrouter.js";
 import { RepoTools } from "./repoTools.js";
 import { AgentConfig } from "./config.js";
 import { AgentTools, TOOLS_SCHEMA, PendingQuestion } from "./agentTools.js";
 import { EDITOR_SYSTEM, DISCOVERY_SYSTEM, ADVISOR_SYSTEM, PLANNER_SYSTEM, PLANNER_VERIFY_SYSTEM } from "./prompts.js";
 import { events } from "./events.js";
-import { runControl, AbortedError } from "./remote/control.js";
+import { runControl, AbortedError, askAnywhere } from "./remote/control.js";
 import { sanitizeAssertionDeltas, encodeAssertionDeltas } from "./assertionAudit.js";
 import { encodeTestsNotNeeded } from "./focusTests.js";
 import { anyMustPass } from "./directFix.js";
@@ -762,7 +761,7 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
             "You cannot ask the user anything: they do not know what the harness saw. Diagnose from the failure text and the code you can read. " +
             "If something you need is missing from the failure text, say exactly what is missing and which command would show it, then give your best-supported diagnosis.";
         } else if (name === "ask_user") {
-          toolOutput = await agentTools.askUser(args.question);
+          toolOutput = await agentTools.askUser(args.question, typeof args.default === "string" ? args.default : undefined);
         } else if (name === "defer_question") {
           toolOutput = await agentTools.deferQuestion(args);
         } else if (name === "flag_manual_step") {
@@ -1181,10 +1180,9 @@ export async function resolveDeferredQuestions(
   for (const item of questions) {
     console.log(`\n${item.topic} — \`${item.targetFile}\` (fallback: "${item.fallbackChosen}")`);
 
-    // promptOnce (not a raw rl.question loop): folds a pasted multi-line
-    // answer into one response instead of splitting it on every embedded
-    // newline and leaking the tail into the next question or prompt.
-    const reply = await promptOnce(
+    // Through the same funnel as every other question, so it has the answer deadline and the phone: nobody answering takes the fallback (an empty answer).
+    const reply = await askAnywhere(
+      { id: `deferred_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, kind: "deferred", prompt: `Question: ${item.question}`, fallback: "", askedAt: new Date().toISOString() },
       `Question: ${item.question}\n(Press Enter to accept fallback, or type your preferred change): `
     );
     if (reply.trim().length > 0) {

@@ -313,6 +313,7 @@ export function createRunTestSession(deps: {
             cwd: root,
             repoRoot: root,
             created: flagged.map((f) => f.rel),
+            show: flagged.map((f) => f.rel),
           });
         } catch (e: any) {
           return refuse(`the security review could not be completed (${String(e?.message ?? e).slice(0, 120)}), so it was not run.`);

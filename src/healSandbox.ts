@@ -25,7 +25,8 @@ import { runSuiteLogged } from "./testLog.js";
 import { createRepoTools } from "./repoTools.js";
 import { events } from "./events.js";
 import { AbortedError } from "./remote/control.js";
-import { makeCommandReviewer, type ReviewCall } from "./commandReview.js";
+import { makeCommandReviewer, type ReviewCall, type ReviewRequest, type ReviewOutcome } from "./commandReview.js";
+import { panelReviewerFor } from "./securityPanel.js";
 import { createRunTestSession, changedFiles } from "./sandboxRunTest.js";
 
 export interface Sandbox {
@@ -677,11 +678,13 @@ export function createSandboxRun(deps: {
   run: RunTests;
   /** The security model, for code the gate flags. */
   securityCall: ReviewCall;
+  /** A reviewer to use instead of the single security model: the panel of judges (securityPanel.ts). */
+  reviewer?: (req: ReviewRequest) => Promise<ReviewOutcome>;
   /** The most tests one deviation verdict may change: told to the agent, and enforced by the merge (which reads it from the returned function). */
   deviationTestCap?: number;
   log?: (line: string) => void;
 }): SandboxRun {
-  const reviewer = makeCommandReviewer(deps.securityCall);
+  const reviewer = deps.reviewer ?? makeCommandReviewer(deps.securityCall);
   const fn: SandboxRun = async (a) => {
     const log = deps.log ?? (() => {});
     const empty = (stop: SandboxResult["stop"], conclusion: string): SandboxResult => ({ appFilesTouched: [], conclusion, stop, rounds: 0, cost: 0, runs: 0 });
@@ -811,6 +814,7 @@ export function sandboxFor(deps: { client: OpenRouterClient; config: AgentConfig
     deviationTestCap: cfg?.deviationTestCap ?? DEFAULT_DEVIATION_TEST_CAP,
     run: deps.run ?? runSuiteLogged,
     securityCall,
+    reviewer: panelReviewerFor(deps.client, deps.config),
     log: deps.log,
   });
 }

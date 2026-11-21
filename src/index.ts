@@ -48,6 +48,7 @@ import { sandboxFor } from "./healSandbox.js";
 import { renderLog, runSuiteLogged } from "./testLog.js";
 import { fixTaskFor, isFixTask, savePendingFixes, loadPendingFixes, settlePendingFixes } from "./testSettle.js";
 import { directFixFor, setMustPass } from "./directFix.js";
+import { taskQuestionMode, isNewProject } from "./questionScope.js";
 import { checkExistence, existencePlannerSection, renderExistence, JUDGE_SYSTEM, JUDGE_WHOLE_SYSTEM, JUDGE_COMBINE_SYSTEM } from "./existence.js";
 import { roadmapCompleteAnswer, cacheKey, readCache, writeCache, newTally, countCall, renderTally } from "./existenceSupport.js";
 import { type Intent, parseIntentReply, routeFacts } from "./routeIntent.js";
@@ -165,7 +166,8 @@ import {
   reconcileInterruptedTask,
 } from "./remote/historyLog.js";
 import { buildRemovalCommand } from "./cleanupCommand.js";
-import { runControl, AbortedError, askAnywhere, askChoice, setQuestionExplainer } from "./remote/control.js";
+import { runControl, AbortedError, askAnywhere, askChoice, setQuestionExplainer, setAnswerDeadline, setAssumptionRoot, setTimeoutResolver } from "./remote/control.js";
+import { makeTimeoutResolver } from "./questionResolver.js";
 import { plainWordsFor } from "./plainWords.js";
 import { commitOnly } from "./gitCommit.js";
 import { terminalView, isVerbose, setVerbose, setStatusAvailable, wrapForTerminal } from "./consoleView.js";
@@ -3391,7 +3393,9 @@ Test hook just added: ${hookHowTo}` : hookHowTo;
               : result.visualAdvisories
           );
         } else {
-          const adjustPrompt = await promptOnce(
+          // Through the funnel (the answer deadline, the phone): nobody answering accepts the visual state.
+          const adjustPrompt = await askAnywhere(
+            { id: `visual_${Date.now()}`, kind: "blocking", prompt: "Accept the visual state and commit, or type what to adjust (Enter = accept)", fallback: "", askedAt: new Date().toISOString() },
             "\nPress [Enter] to accept visual state & commit, or enter prompt to adjust: "
           );
 
@@ -4802,11 +4806,12 @@ async function main(): Promise<void> {
   // Routes ask_user (discovery/editor asking mid-task) through the same
   // terminal+phone race as every other question in this app, rather than a
   // second, phone-blind prompt path that only the terminal would ever see.
-  const agentTools = new AgentTools(repoRoot, config, (question, fallback) =>
+  const agentTools = new AgentTools(repoRoot, config, (question, fallback, kind) =>
     askAnywhere(
       {
         id: `ask_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-        kind: "blocking",
+        // An approval (a command, an install, a package, a deletion) is marked as one: when nobody answers it is refused, whatever its fallback says.
+        kind: kind === "approval" ? "approval" : "blocking",
         prompt: question,
         fallback,
         askedAt: new Date().toISOString(),
@@ -4905,7 +4910,8 @@ async function main(): Promise<void> {
   // What the roadmap needs from here: the planner model, and a way to ask you.
   const roadmapDeps = (): FlowDeps => ({
     repoRoot,
-    questionMode: config.planning.questions,
+    // A completely new build gets the full questionnaire; otherwise the person's own setting.
+    questionMode: taskQuestionMode(config.planning.questions, { newProject: isNewProject(repoRoot), inRoadmapUnit: false }),
     complete: (messages) =>
       runLabeledCompletion({ client, models: config.models.planner, messages: messages as any, agentName: "ROADMAP_PLANNER", jsonMode: true, reason: "Planning the roadmap" }),
     ask:
@@ -5350,6 +5356,10 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
   // only what they do not settle (a real product decision) reaches the user.
   // Every question put to a person keeps its technical wording and gets a plain-words explanation under it, so someone who
   // has never programmed can still answer. Asked as written if the model is slow or fails.
+  setAnswerDeadline(Math.round((config.interaction.answerTimeoutMinutes ?? 0) * 60_000));
+  setAssumptionRoot(repoRoot);
+  // When nobody answers in time, a model reads the question and answers it (the question's own default stays the safety net). Never for an approval.
+  if (config.interaction.modelAnswersOnTimeout !== false) setTimeoutResolver(makeTimeoutResolver({ client, config, repoRoot }));
   setQuestionExplainer((q) =>
     plainWordsFor(q, (messages) =>
       runLabeledCompletion({ client, models: config.models.planner, messages: messages as any, agentName: "PLANNER", jsonMode: true, reason: "Explaining a question in plain words" })
@@ -6557,7 +6567,8 @@ ${discoveryOutput ?? ""}`,
     // this into a back-and-forth.
     // That is the "all" mode. By default (planning.questions: autonomous) nothing waits for a person: each open point is
     // decided from the request and the code, recorded in the plan, and only what is hard to undo is flagged for review.
-    const questionMode: QuestionMode = config.planning.questions;
+    // Questions belong at the start of a completely new build (and in a roadmap's own questionnaire). Any other task is worked on what the worker knows: see questionScope.ts.
+    const questionMode: QuestionMode = taskQuestionMode(config.planning.questions, { newProject: isNewProject(repoRoot), inRoadmapUnit: Boolean(activeUnitId) });
     const MAX_CLARIFY_ROUNDS = questionMode === "all" ? 2 : 1;
     const alreadyConfirmed = new Set<string>();
     const autoDecisions: QuestionDecision[] = [];

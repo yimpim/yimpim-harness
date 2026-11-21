@@ -13,6 +13,9 @@
 import { PendingQuestion } from "./protocol.js";
 import { startPrompt } from "../terminalPrompt.js";
 import { withPlainWords, type PlainExplanation } from "../plainWords.js";
+import { events } from "../events.js";
+import fs from "fs";
+import path from "path";
 
 export class AbortedError extends Error {
   constructor(public reason: string) {
@@ -248,13 +251,87 @@ export function setQuestionExplainer(fn: ((q: PendingQuestion) => Promise<PlainE
   explainQuestion = fn;
 }
 
+// ------------------------------------------------------------------------------------------------------------------------ the deadline
+// No question waits forever. When nobody answers in time, the question's own default is taken and the run goes on; the choice is written to
+// .agent/assumptions.md for a person to review. An approval that protects the machine (a command, an install, a deletion, a push) is DENIED instead.
+
+let answerDeadlineMs = 0;
+let assumptionRoot: string | undefined;
+export type TimeoutResolver = (q: PendingQuestion) => Promise<{ answer: string; reason: string } | undefined>;
+let timeoutResolver: TimeoutResolver | null = null;
+
+/**
+ * Who answers when nobody does: a model that reads the question (set once at startup). Never used for an approval, the loop's own prompt, or a deferred decision (those carry
+ * their own default), nor for a free-text question whose default is empty (a model must not invent a URL or a name). Whatever it says is checked: a question with choices takes
+ * only one of them. An answer that fails the check, an error, or no answer within 90 seconds falls back to the question's own default.
+ */
+export function setTimeoutResolver(fn: TimeoutResolver | null): void {
+  timeoutResolver = fn;
+}
+
+function modelMayDecide(q: PendingQuestion): boolean {
+  if (q.kind === "approval" || q.kind === "deferred" || q.idle) return false;
+  return Boolean(q.choices?.length) || (q.fallback ?? "").trim() !== "";
+}
+
+/** The resolver's answer if it is usable for this question, else undefined. */
+export function usableModelAnswer(q: PendingQuestion, answer: string): string | undefined {
+  const a = (answer ?? "").trim();
+  if (!a) return undefined;
+  if (q.choices?.length) {
+    const hit = q.choices.find((c) => c.trim().toLowerCase() === a.toLowerCase());
+    if (hit) return hit;
+    return q.allowCustom && a.length <= 300 ? a : undefined;
+  }
+  return a.length <= 600 ? a : undefined;
+}
+
+/** How long a question waits for an answer, in milliseconds. 0 = no deadline (the old behaviour). Set once at startup from the settings. */
+export function setAnswerDeadline(ms: number): void {
+  answerDeadlineMs = Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
+}
+/** The project whose .agent/assumptions.md records the answers taken by default. */
+export function setAssumptionRoot(root: string | undefined): void {
+  assumptionRoot = root;
+}
+
+const DENIALS = new Set(["", "no", "n", "deny", "skip", "abort", "cancel", "local"]);
+
+/** What a question answers when nobody does. An approval is always a refusal (whatever its fallback says); anything else takes its fallback. */
+export function timeoutAnswer(q: Pick<PendingQuestion, "kind" | "fallback">): { answer: string; callerBug: boolean } {
+  if (q.kind !== "approval") return { answer: q.fallback, callerBug: false };
+  const fb = (q.fallback ?? "").trim().toLowerCase();
+  if (DENIALS.has(fb)) return { answer: q.fallback, callerBug: false };
+  return { answer: "no", callerBug: true };
+}
+
+/** One readable block appended to .agent/assumptions.md: what was asked, what was taken, and why. */
+export function recordAssumption(repoRoot: string, a: { questionId: string; prompt: string; answer: string; kind: string; askedAt: string; decidedAt: string; waitedMinutes: number; decidedByModel?: string }): void {
+  try {
+    const file = path.join(repoRoot, ".agent", "assumptions.md");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const header = fs.existsSync(file)
+      ? ""
+      : "# Assumptions\n\nWhen nobody answered a question in time, YIMPIM took the question's default and carried on. Each one is listed here so you can review it. " +
+        "Approvals of commands, installs and deletions are refused when nobody answers, never allowed. Change anything you disagree with and tell YIMPIM.\n\n";
+    const first = a.prompt.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)[0] ?? "";
+    fs.appendFileSync(
+      file,
+      `${header}## ${a.decidedAt} — ${a.kind}\n- Asked: ${first.slice(0, 300)}\n- Took: ${a.answer === "" ? "(no answer)" : `"${a.answer.slice(0, 300)}"`}\n- Why: no answer within ${a.waitedMinutes} min (asked ${a.askedAt}, id ${a.questionId})${a.decidedByModel !== undefined ? `; decided by a model: ${a.decidedByModel || "(no reason given)"}` : ""}\n\n`
+    );
+  } catch {
+    // the record is a help, never a reason to fail
+  }
+}
+
 /**
  * Ask on the terminal and remotely at the same time; first answer wins.
  * Falls back cleanly when stdin is not a TTY, so piped/CI runs never hang.
  */
 export async function askAnywhere(
   question: PendingQuestion,
-  promptText: string
+  promptText: string,
+  opts: { deadlineMs?: number } = {}
 ): Promise<string> {
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   // Someone has to be there to read it: a terminal, or a phone that is connected.
@@ -282,7 +359,36 @@ ${promptText}`;
       // asked as written
     }
   }
-  const raw = await askRaw(question, promptText, interactive);
+  const deadlineMs = opts.deadlineMs ?? answerDeadlineMs;
+  const raw = await askRaw(question, promptText, interactive, question.idle ? 0 : deadlineMs);
+  if (raw.by === "timeout") {
+    const t = timeoutAnswer(question);
+    const mins = Math.round(deadlineMs / 60_000);
+    let answered = raw.answer;
+    let byModel: string | undefined;
+    if (timeoutResolver && modelMayDecide(question)) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const decided = await Promise.race([timeoutResolver(question), new Promise<undefined>((r) => void (timer = setTimeout(() => r(undefined), 90_000)))]);
+        const usable = decided ? usableModelAnswer(question, decided.answer) : undefined;
+        if (usable !== undefined) {
+          answered = usable;
+          byModel = decided!.reason;
+        }
+      } catch {
+        // the question's own default stands
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    if (t.callerBug) console.log(`   ↳ (the fallback "${question.fallback}" was not a refusal for an approval, so "no" was taken: ${question.id})`);
+    if (assumptionRoot) recordAssumption(assumptionRoot, { questionId: question.id, prompt: question.prompt, answer: answered, kind: question.kind, askedAt: question.askedAt, decidedAt: new Date().toISOString(), waitedMinutes: mins, ...(byModel !== undefined ? { decidedByModel: byModel } : {}) });
+    console.log(
+      `   ↳ ⏱ No answer in ${mins} min: ${byModel !== undefined ? "a model decided" : "took"} ${answered === "" ? "the default" : `"${answered.replace(/\s+/g, " ").slice(0, 80)}"`}${assumptionRoot ? " (written to .agent/assumptions.md)" : ""}: ${(question.prompt.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)[0] ?? "").slice(0, 110)}`
+    );
+    events.emit({ type: "question.timedOut", id: question.id, answer: answered, kind: question.kind });
+    return answered;
+  }
   const answer = back.get(raw.answer.trim().toLowerCase()) ?? raw.answer;
   // A question left on screen with nothing under it reads as still waiting, hours later, in the scrollback. Say what was answered and where
   // it came from. A stop is not an answer, so nothing is claimed then.
@@ -300,14 +406,29 @@ export function answeredLine(prompt: string, answer: string, by: "terminal" | "p
   return `   ↳ ${mark}Answered "${said.slice(0, 100)}${said.length > 100 ? "…" : ""}" ${by === "phone" ? "from the phone" : "here"}: ${what}`;
 }
 
-async function askRaw(question: PendingQuestion, promptText: string, interactive: boolean): Promise<{ answer: string; by: "terminal" | "phone" }> {
+const TIMED_OUT = Symbol("timed out");
+
+async function askRaw(question: PendingQuestion, promptText: string, interactive: boolean, deadlineMs = 0): Promise<{ answer: string; by: "terminal" | "phone" | "timeout" }> {
   const remote = runControl.ask(question);
+  // The deadline, when there is one: a timer that is always cleared, so a real answer leaves nothing pending.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline: Promise<typeof TIMED_OUT> =
+    deadlineMs > 0 ? new Promise((resolve) => void (timer = setTimeout(() => resolve(TIMED_OUT), deadlineMs))) : new Promise<typeof TIMED_OUT>(() => {});
+  const timedOut = (): { answer: string; by: "timeout" } => {
+    const answer = timeoutAnswer(question).answer;
+    runControl.answer(question.id, answer); // the phone's card goes away
+    return { answer, by: "timeout" };
+  };
   if (!interactive) {
-    // No terminal to ask: wait only on the remote surface, and if nothing is
-    // connected the caller's timeout/fallback applies.
-    const answer = await remote;
-    runControl.answer(question.id, answer);
-    return { answer, by: "phone" };
+    // No terminal to ask: wait only on the remote surface, and if nothing is connected the deadline applies.
+    try {
+      const got = await Promise.race([remote, deadline]);
+      if (got === TIMED_OUT) return timedOut();
+      runControl.answer(question.id, got);
+      return { answer: got, by: "phone" };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   // startPrompt (not a raw rl.question): folds a pasted multi-line answer
@@ -326,9 +447,11 @@ async function askRaw(question: PendingQuestion, promptText: string, interactive
     .catch(() => question.fallback);
 
   try {
-    const answer = await Promise.race([local, remote.then((a) => ((by ??= "phone"), a))]);
-    return { answer, by: by ?? "terminal" };
+    const got = await Promise.race([local, remote.then((a) => ((by ??= "phone"), a)), deadline]);
+    if (got === TIMED_OUT) return timedOut();
+    return { answer: got, by: by ?? "terminal" };
   } finally {
+    if (timer) clearTimeout(timer);
     prompt.cancel();
   }
 }

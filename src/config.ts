@@ -238,6 +238,13 @@ export const ConfigSchema = z.object({
        */
       confirmContinue: z.boolean().default(false),
       /**
+       * How long YIMPIM waits for an answer before it takes the question's own default and carries on (written to .agent/assumptions.md for review). Approvals of
+       * commands, installs and deletions are refused, never allowed, when nobody answers. 0 = wait forever.
+       */
+      answerTimeoutMinutes: z.number().min(0).default(30),
+      /** When nobody answers in time, a model (the planner's) reads the question and answers it, instead of taking the question's blind default. Approvals are never answered this way. */
+      modelAnswersOnTimeout: z.boolean().default(true),
+      /**
        * When true, sign-off points that would otherwise pause for a human at
        * the keyboard (a QA visual advisory on an otherwise-passing phase, a
        * deferred styling/copy decision) instead auto-accept the agent's own

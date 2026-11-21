@@ -234,6 +234,20 @@ export const SETTINGS: SettingDef[] = [
     description: "Retries specifically for a visual-only defect. Raising past maxRepairAttemptsPerPhase has no extra effect.",
   },
   {
+    key: "interaction.answerTimeoutMinutes",
+    type: "number",
+    group: "Interaction",
+    common: true,
+    description:
+      "How long YIMPIM waits for your answer before it takes the safe default and carries on (the choice is written down for you to review). Approvals of commands, installs and deletions are refused, never allowed, when nobody answers. 0 = wait forever.",
+  },
+  {
+    key: "interaction.modelAnswersOnTimeout",
+    type: "boolean",
+    group: "Interaction",
+    description: "When nobody answers a question in time, a model reads it and answers (and says why in .agent/assumptions.md) instead of taking a blind default. Approvals are never answered this way.",
+  },
+  {
     key: "limits.maxFilesPerPhase",
     type: "number",
     group: "Limits",

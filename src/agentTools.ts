@@ -156,6 +156,11 @@ export const TOOLS_SCHEMA = [
         type: "object",
         properties: {
           question: { type: "string", description: "The direct question to prompt the user with." },
+          default: {
+            type: "string",
+            description:
+              "The answer you will use if nobody answers in time (the user's answer deadline, 30 minutes by default). Always give one: the run carries on with it and it is written down for the user to review.",
+          },
         },
         required: ["question"],
       },
@@ -1051,7 +1056,7 @@ export class AgentTools {
    * phone, the same as every other question in this app — without this
    * class needing to know anything about remote control itself.
    */
-  private askFn: (question: string, fallback: string) => Promise<string>;
+  private askFn: (question: string, fallback: string, kind?: "approval") => Promise<string>;
 
   /**
    * Lets index.ts wire in a callback that runs this project's own build/
@@ -1144,7 +1149,7 @@ export class AgentTools {
   constructor(
     repoRoot: string,
     config: AgentConfig,
-    askFn?: (question: string, fallback: string) => Promise<string>
+    askFn?: (question: string, fallback: string, kind?: "approval") => Promise<string>
   ) {
     this.repoRoot = path.resolve(repoRoot);
     this.config = config;
@@ -1625,7 +1630,7 @@ export class AgentTools {
     this.questionResolver = fn;
   }
 
-  public async askUser(question: string): Promise<string> {
+  public async askUser(question: string, preferred?: string): Promise<string> {
     if (this.questionResolver) {
       try {
         const found = await this.questionResolver(question);
@@ -1641,10 +1646,11 @@ export class AgentTools {
     console.log("==========================================");
     console.log(`Agent asks: ${question}\n`);
 
-    const fallback =
-      "No human is available to answer (non-interactive session). " +
-      "Choose the most conventional option for this codebase, state the assumption " +
-      "you made, and continue.";
+    // What is answered when nobody does (no terminal, or no answer within the deadline): the default the agent gave, else the most conventional option.
+    const given = typeof preferred === "string" ? preferred.trim().slice(0, 300) : "";
+    const fallback = given
+      ? `Nobody answered, so use your own default: ${given}. State the assumption you made, and continue.`
+      : "No human is available to answer (non-interactive session). " + "Choose the most conventional option for this codebase, state the assumption " + "you made, and continue.";
 
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
       console.log(`[auto-answered: stdin is not interactive]`);
@@ -2158,7 +2164,7 @@ export class AgentTools {
         console.log(`[auto-declined: stdin is not interactive]`);
         return false;
       }
-      const answer = await this.askFn(question, "no");
+      const answer = await this.askFn(question, "no", "approval");
       const normalized = answer.trim().toLowerCase();
       const approved = normalized === "yes" || normalized === "y";
       if (approved) this.approvedInstallPlans.add(planSummary);
@@ -2352,7 +2358,7 @@ export class AgentTools {
         console.log(`${question}\n`);
         let allowed = false;
         if (process.stdin.isTTY && process.stdout.isTTY) {
-          const answer = (await this.askFn(question, "no")).trim().toLowerCase();
+          const answer = (await this.askFn(question, "no", "approval")).trim().toLowerCase();
           allowed = answer === "yes" || answer === "y";
         } else {
           console.log(`[auto-declined: stdin is not interactive]`);
@@ -2482,7 +2488,7 @@ export class AgentTools {
         console.log(`[auto-declined: stdin is not interactive]`);
         return `Not run — nobody was available to approve: ${label}. Report it as a manual step.`;
       }
-      const answer = (await this.askFn(question, "no")).trim().toLowerCase();
+      const answer = (await this.askFn(question, "no", "approval")).trim().toLowerCase();
       if (answer !== "yes" && answer !== "y") {
         const declined =
           `Not run — the user declined: ${label}. Do not ask again; continue without it or report it as a ` +
