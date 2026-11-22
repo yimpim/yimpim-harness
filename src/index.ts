@@ -58,6 +58,7 @@ import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { makeCommandReviewer } from "./commandReview.js";
 import { makePanel, pickJudges } from "./commandPanel.js";
 import { EditorSweep, healerFor } from "./editorSweep.js";
+import { confidenceSummary, type PhaseConfidence } from "./phaseConfidence.js";
 import { makePackageNotes } from "./conventionPackages.js";
 import { addDesignFollowUps } from "./designFollowUps.js";
 import { panelReviewerFor } from "./securityPanel.js";
@@ -100,6 +101,8 @@ let taskProgress: PhaseProgress[] = [];
 let activeUnitId: string | undefined;
 // How many verification runs the last phase took (1 = it passed first time, N = N-1 repair attempts). Set by runPhaseWithHealing; read for phase.end.
 let lastPhaseRuns = 1;
+// The QA confidence of the last phase that passed (verified, partial or static-only); undefined for a phase with no verdict. Set by runPhaseWithHealing; read for phase.end.
+let lastPhaseConfidence: string | undefined;
 // The folder a "program" request named as the app or code to rebuild from, if any.
 let programReferenceHint: string | null = null;
 // What the classifier decided about the roadmap, when the message was about it.
@@ -3220,6 +3223,7 @@ ${instructions}`;
   }
 
   lastPhaseRuns = 1;
+  lastPhaseConfidence = undefined;
   while (attempt <= maxRepairs) {
     lastPhaseRuns = attempt + 1;
     console.log(`\n[VERIFIER] 🛡️ Running verification for ${phaseName} (Attempt ${attempt + 1}/${maxRepairs + 1})...`);
@@ -3369,6 +3373,7 @@ Test hook just added: ${hookHowTo}` : hookHowTo;
       if (phase.id) savePhaseRepairContext(repoRoot, phase.id, undefined);
 
       const confidence = result.confidence ?? "static-only";
+      lastPhaseConfidence = confidence;
       const confidenceNote =
         confidence === "verified"
           ? "the app was launched and observed running"
@@ -6956,6 +6961,8 @@ The user wants you to decide, not ask: ${d.choice}`);
 
   const plan = activePlan;
   const statuses: Record<string, "pending" | "running" | "passed" | "failed"> = {};
+  // What each phase that passed in this run was verified by, for the end-of-task summary.
+  const phaseConfidences: PhaseConfidence[] = [];
   const done = new Set(completedPhaseIds);
   for (const id of done) statuses[id] = "passed";
 
@@ -7195,6 +7202,8 @@ The user wants you to decide, not ask: ${d.choice}`);
       // route is read mechanically from it. QA phases skip the Editor pass
       // (the same path a whole-task "verify" intent takes), SETUP phases
       // install/restore and diagnose without an Editor or a QA verdict.
+      lastPhaseRuns = 1;
+      lastPhaseConfidence = undefined;
       const passed =
         planned.executor === "SETUP"
           ? await runSetupPhaseInPipeline(phase, planned, repoRoot, repo, client, config, agentTools, remote)
@@ -7246,8 +7255,10 @@ The user wants you to decide, not ask: ${d.choice}`);
         phaseId: planned.id,
         name: planned.name,
         passed: true,
+        confidence: lastPhaseConfidence,
         attempts: lastPhaseRuns,
       });
+      phaseConfidences.push({ label, name: planned.name, confidence: lastPhaseConfidence });
 
       // Persist after every phase so a crash or Ctrl-C resumes in the right place.
       saveResumeState(repoRoot, {
@@ -7298,6 +7309,7 @@ The user wants you to decide, not ask: ${d.choice}`);
   console.log(`\n==================================================`);
   finish(true);
   console.log(`✅ [ALL PHASES SUCCEEDED] Pipeline verified cleanly.`);
+  for (const line of confidenceSummary(phaseConfidences)) console.log(line);
   {
     const t = events.usageDelta(currentTaskUsageStart).totals;
     const rows = workerLedger.taskRows();
