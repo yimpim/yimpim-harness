@@ -152,7 +152,7 @@ function verificationChecks(profile: ProjectProfile, caps: Capabilities): Check[
         required: false,
         detail: "could not be resolved from the gradle module",
         impact: "the app cannot be launched, so no screenshots are captured",
-        fix: "set it explicitly: yimpim config set verification.androidApplicationId com.example.app",
+        fix: "declare it in the module's build.gradle (defaultConfig { applicationId \"com.example.app\" })",
       });
     }
   }

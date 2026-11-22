@@ -495,9 +495,12 @@ export async function probeCapabilities(
    *  is available — from config.verification.androidDeviceSerial /
    *  iosSimulatorUdid. Omitted entirely by callers (e.g. `yimpim doctor`)
    *  that just want a general capability snapshot, not a specific target. */
-  deviceOverrides?: { androidDeviceSerial?: string; iosSimulatorUdid?: string }
+  deviceOverrides?: { androidDeviceSerial?: string; iosSimulatorUdid?: string; skipProbes?: string[] }
 ): Promise<Capabilities> {
   const want = relevantKeys(profile);
+  // verification.skipProbes: a skipped probe is never run and reads as unavailable, so QA degrades to static review for it.
+  const skipped = skippedKeys(deviceOverrides?.skipProbes).filter((k) => want.has(k));
+  for (const k of skipped) want.delete(k);
   const headless = readMachineRecord(os.homedir())?.headlessWebQaOnly === true;
 
   const adb = want.has("adb") ? probeAdb() : NOT_APPLICABLE("no Android stack detected");
@@ -535,7 +538,20 @@ export async function probeCapabilities(
     browser,
     display,
     screenCapture: want.has("screenCapture") ? probeScreenCapture(display) : NOT_APPLICABLE("no visual UI stack detected"),
+    ...Object.fromEntries(skipped.map((k) => [k, UNAVAILABLE("skipped by verification.skipProbes")])),
   };
+}
+
+/** The probe names verification.skipProbes understands, and the capabilities each one switches off. A name that is not here is ignored. */
+export const PROBE_GROUPS: Record<string, (keyof Capabilities)[]> = {
+  android: ["adb", "androidDevice"],
+  ios: ["xcodebuild", "iosSimulator"],
+  web: ["playwright", "browser"],
+  desktop: ["display", "screenCapture"],
+};
+
+export function skippedKeys(names: string[] | undefined): (keyof Capabilities)[] {
+  return [...new Set((names ?? []).flatMap((n) => PROBE_GROUPS[String(n).trim().toLowerCase()] ?? []))];
 }
 
 /**

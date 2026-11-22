@@ -450,7 +450,9 @@ export class OpenRouterClient {
     // total duration, only a call where literally nothing has arrived yet.
     // idleStreamTimeoutMs is the companion guard for AFTER streaming starts:
     // see readStreamedCompletion's own doc comment.
-    const maxRetriesPerModel = 3;
+    const maxRetriesPerModel = this.config?.limits?.apiMaxAttempts ?? 3;
+    // limits.apiBaseDelayMs scales every backoff below: 1000 keeps the built-in waits, 500 halves them. A wait the server asks for (Retry-After) is never scaled.
+    const backoff = (this.config?.limits?.apiBaseDelayMs ?? 1000) / 1000;
     const timeoutDurationMs = 300_000;
     const idleStreamTimeoutMs = options?.idleStreamTimeoutMs ?? 90_000;
     const maxTotalDurationMs = options?.maxTotalDurationMs;
@@ -621,14 +623,14 @@ export class OpenRouterClient {
                 const retryAfter = response.headers.get("retry-after");
                 const waitMs = retryAfter
                   ? parseInt(retryAfter, 10) * 1000
-                  : Math.pow(2, attempt) * 2000 + Math.random() * 1000;
+                  : (Math.pow(2, attempt) * 2000 + Math.random() * 1000) * backoff;
                 console.log(`\n[STATUS 429 Rate Limit] Pausing ${(waitMs / 1000).toFixed(1)}s...`);
                 await this.delay(waitMs);
                 continue;
               }
 
               if (response.status >= 500) {
-                const waitMs = Math.pow(2, attempt) * 1500;
+                const waitMs = Math.pow(2, attempt) * 1500 * backoff;
                 console.log(`\n[STATUS ${response.status} Provider Error] Pausing ${(waitMs / 1000).toFixed(1)}s...`);
                 await this.delay(waitMs);
                 continue;
@@ -789,13 +791,13 @@ export class OpenRouterClient {
             if (skipRemainingRetries) {
               console.log(`[DIAGNOSTIC] Not retrying the same model — moving to the next one in the chain, if any.`);
             } else if (attempt < maxRetriesPerModel) {
-              console.log(`[DIAGNOSTIC] Retrying in 3s...`);
-              await this.delay(3000);
+              console.log(`[DIAGNOSTIC] Retrying in ${+(3 * backoff).toFixed(1)}s...`);
+              await this.delay(3000 * backoff);
               continue;
             }
           } else if (err.code === "ENOTFOUND" || err.code === "ECONNRESET") {
-            console.log(`\n[DIAGNOSTIC] Network disconnect (${err.code}). Retrying in 4s...`);
-            await this.delay(4000);
+            console.log(`\n[DIAGNOSTIC] Network disconnect (${err.code}). Retrying in ${+(4 * backoff).toFixed(1)}s...`);
+            await this.delay(4000 * backoff);
             continue;
           } else {
             console.log(`\n[DIAGNOSTIC] Request error: ${err.message}`);

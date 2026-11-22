@@ -880,6 +880,7 @@ export class AutonomousVerifier {
     const caps = await probeCapabilities(this.repoRoot, profile, {
       androidDeviceSerial: this.config.verification?.androidDeviceSerial,
       iosSimulatorUdid: this.config.verification?.iosSimulatorUdid,
+      skipProbes: this.config.verification?.skipProbes,
     });
     this.cachedCaps = { at: now, caps };
     return caps;

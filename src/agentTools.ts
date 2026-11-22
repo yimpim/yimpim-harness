@@ -1909,7 +1909,7 @@ export class AgentTools {
     // default: a real app has far more screens than components worth caching,
     // and evicting one silently breaks every route through it.
     const keys = Object.keys(map);
-    const maxEntries = (this.config as any).memory?.maxNavEntries || 200;
+    const maxEntries = this.config.memory?.maxNavEntries ?? 200;
     if (keys.length > maxEntries) {
       keys.sort((a, b) => (map[a].lastUpdated || 0) - (map[b].lastUpdated || 0));
       delete map[keys[0]];

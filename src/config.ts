@@ -133,17 +133,10 @@ export const ConfigSchema = z.object({
             "Inspect the existing project structure, configuration and code style before making changes. " +
             "Write clean, idiomatic, production-ready code with robust error handling and minimal diffs."
         ),
-      verifierPersona: z
-        .string()
-        .default(
-          "You are an autonomous Principal QA Verification Engineer. You verify software against stated " +
-            "requirements and report defects with evidence. You never write or propose code."
-        ),
     })
     .prefault({}),
   limits: z
     .object({
-      maxDiscoveryQuestions: z.number().default(4),
       maxToolRounds: z.number().int().min(1).default(40),
       // A real, well-diagnosed defect routinely needs more than 3 tries,
       // especially once a phase bundles several unrelated bugs — a phase
@@ -176,15 +169,15 @@ export const ConfigSchema = z.object({
       // The most distinct files one phase may modify; a write past it is refused. 0 (the default) = no limit: a phase that touches many files is a sign the plan was broad,
       // which is worth knowing, but refusing an edit half-way leaves the work half-done, and none of the safety rules depends on a count.
       maxFilesPerPhase: z.number().min(0).default(0),
-      apiMaxAttempts: z.number().default(4),
-      apiBaseDelayMs: z.number().default(1000),
-      checkpointEveryToolCall: z.boolean().default(true),
+      // Tries per model for one call (the first plus retries) before the next model in the chain is used.
+      apiMaxAttempts: z.number().int().min(1).max(10).default(3),
+      // Scales every backoff wait (rate limit, provider error, timeout, disconnect): 1000 keeps the built-in waits, 500 halves them. A Retry-After from the server is never scaled.
+      apiBaseDelayMs: z.number().int().min(0).default(1000),
     })
     .prefault({}),
   git: z
     .object({
       autoCommit: z.boolean().default(true),
-      createPhaseCheckpoint: z.boolean().default(true),
       commitPrefix: z.string().default("yimpim"),
       /**
        * Resolved at runtime from .agent/push.json, NOT from this YAML file —
@@ -223,10 +216,9 @@ export const ConfigSchema = z.object({
     .prefault({}),
   recovery: z
     .object({
+      // Where per-project state lives is FIXED at .agent (about a hundred places read it by name); this key only moves .agent/push.json (gitRemote.ts) and is kept so a config that sets it still loads.
       stateDirectory: z.string().default(".agent"),
       keepBackups: z.boolean().default(true),
-      maxBackups: z.number().default(10),
-      autoResume: z.boolean().default(false),
       dirtyTreePolicy: z.enum(["inspect", "refuse", "fail"]).default("inspect"),
     })
     .prefault({}),
@@ -268,9 +260,6 @@ export const ConfigSchema = z.object({
    */
   verification: z
     .object({
-      androidApplicationId: z.string().optional(),
-      androidModule: z.string().optional(),
-      devServerUrl: z.string().optional(),
       /** Pins which device/simulator gets verified when more than one is
        *  attached (e.g. a physical device plus an emulator) — otherwise
        *  whichever the OS happens to list first is used, silently, which may
@@ -278,9 +267,7 @@ export const ConfigSchema = z.object({
        *  devices booted` shows the exact id to use. */
       androidDeviceSerial: z.string().optional(),
       iosSimulatorUdid: z.string().optional(),
-      /** Extra commands to run as build/test gates, as full argv arrays. */
-      extraCommands: z.array(z.array(z.string())).default([]),
-      /** Skip probes by name, e.g. ["android", "desktop"]. */
+      /** Skip probes by name: android, ios, web, desktop (capabilities.ts PROBE_GROUPS). */
       skipProbes: z.array(z.string()).default([]),
     })
     .prefault({}),
@@ -292,6 +279,8 @@ export const ConfigSchema = z.object({
       // How many of them are pasted into every agent's prompt, most recently updated first.
       // Every model call pays for these, so this stays small however large the project is.
       maxPromptEntries: z.number().int().min(10).max(200).default(50),
+      // How many screens the navigation map remembers (.agent/nav_map.json), oldest evicted first.
+      maxNavEntries: z.number().int().min(10).max(5000).default(200),
       summaryWordLimit: z.number().default(15),
       stateFile: z.string().default(".agent/repo_map.json"),
     })

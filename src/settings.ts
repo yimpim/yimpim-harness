@@ -284,24 +284,6 @@ export const SETTINGS: SettingDef[] = [
 
   // ---- Verification --------------------------------------------------------
   {
-    key: "verification.androidApplicationId",
-    type: "string",
-    group: "Verification",
-    description: "Override the auto-detected Android applicationId.",
-  },
-  {
-    key: "verification.androidModule",
-    type: "string",
-    group: "Verification",
-    description: "Override the auto-detected Android gradle module directory.",
-  },
-  {
-    key: "verification.devServerUrl",
-    type: "string",
-    group: "Verification",
-    description: "Override the dev server URL instead of detecting it from output.",
-  },
-  {
     key: "verification.androidDeviceSerial",
     type: "string",
     group: "Verification",
@@ -317,7 +299,7 @@ export const SETTINGS: SettingDef[] = [
     key: "verification.skipProbes",
     type: "string[]",
     group: "Verification",
-    description: "Visual probes to skip, e.g. [android, desktop]. Skipped probes degrade to static review.",
+    description: "Visual probes to skip: android, ios, web, desktop. A skipped probe is never run and QA degrades to static review for it.",
   },
 
   // ---- Remote control ------------------------------------------------------
