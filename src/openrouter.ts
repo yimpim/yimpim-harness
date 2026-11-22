@@ -77,6 +77,8 @@ export interface ModelHealth {
  *  consecutive failure up to the cap. */
 /** When the account is out of credits: how long between checks. Four minutes, indefinitely: one request per check, never a burst. */
 export const CREDITS_RECHECK_MS = 4 * 60_000;
+/** Tries on a model that has a fallback model behind it in the chain (a model with nothing after it gets limits.apiMaxAttempts). */
+export const FALLBACK_TRIES = 2;
 export const MODEL_COOLDOWN_BASE_MS = 3 * 60_000;
 export const MODEL_COOLDOWN_MAX_MS = 20 * 60_000;
 
@@ -453,7 +455,9 @@ export class OpenRouterClient {
     // total duration, only a call where literally nothing has arrived yet.
     // idleStreamTimeoutMs is the companion guard for AFTER streaming starts:
     // see readStreamedCompletion's own doc comment.
-    const maxRetriesPerModel = this.config?.limits?.apiMaxAttempts ?? 3;
+    // limits.apiMaxAttempts is the tries for a model with nothing after it. A model with a fallback behind it gets at most 2: a dead endpoint should hand over to the next model after two
+    // tries, not four. The wait for the first byte (timeoutDurationMs) is NOT shortened: a large prefill or a reasoning pass legitimately takes minutes, and aborting it wastes the input tokens.
+    const configuredTries = this.config?.limits?.apiMaxAttempts ?? 3;
     // limits.apiBaseDelayMs scales every backoff below: 1000 keeps the built-in waits, 500 halves them. A wait the server asks for (Retry-After) is never scaled.
     const backoff = (this.config?.limits?.apiBaseDelayMs ?? 1000) / 1000;
     const timeoutDurationMs = 300_000;
@@ -467,6 +471,7 @@ export class OpenRouterClient {
     const agent = options?.agent ?? "unknown";
 
     for (const model of modelList) {
+      const maxRetriesPerModel = model === modelList[modelList.length - 1] ? configuredTries : Math.min(configuredTries, FALLBACK_TRIES);
       // Set when this model cannot read images at all: a fact about the model, not a failure, so it is neither retried nor
       // counted against its health for the text-only calls that follow.
       let cannotReadImages = false;

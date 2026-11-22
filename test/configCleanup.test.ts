@@ -111,3 +111,40 @@ describe("verification.skipProbes controls which probes run", () => {
     assert.match(src("src/verifierTools.ts"), /skipProbes: this\.config\.verification\?\.skipProbes/);
   });
 });
+
+describe("a model with a fallback behind it gets two tries, the last model gets the configured number", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    (globalThis as any).fetch = originalFetch;
+  });
+  async function chain(models: string[], config?: ReturnType<typeof cfg>) {
+    const seen: string[] = [];
+    (globalThis as any).fetch = async (_u: string, init: any) => (seen.push(JSON.parse(String(init.body)).model), new Response("boom", { status: 503 }));
+    const client = new OpenRouterClient("k", config);
+    (client as any).delay = async () => {};
+    const log = console.log;
+    console.log = () => {};
+    try {
+      await client.complete(models, [{ role: "user", content: "hi" }], { agent: "EDITOR" }).catch(() => {});
+    } finally {
+      console.log = log;
+    }
+    return seen;
+  }
+  test("default 3: two tries on the first model, then three on the last", async () => {
+    assert.deepEqual(await chain(["a/one", "b/two"]), ["a/one", "a/one", "b/two", "b/two", "b/two"]);
+  });
+  test("apiMaxAttempts 2 (this repo's setting): two tries on each", async () => {
+    assert.deepEqual(await chain(["a/one", "b/two"], cfg({ limits: { apiMaxAttempts: 2 } })), ["a/one", "a/one", "b/two", "b/two"]);
+  });
+  test("apiMaxAttempts 1 is never raised by the cap", async () => {
+    assert.deepEqual(await chain(["a/one", "b/two"], cfg({ limits: { apiMaxAttempts: 1 } })), ["a/one", "b/two"]);
+  });
+  test("a single model has no fallback, so it keeps the full configured number", async () => {
+    assert.equal((await chain(["a/one"], cfg({ limits: { apiMaxAttempts: 4 } }))).length, 4);
+  });
+  test("the first-byte wait is untouched at 300 s, and this repo's config says 2", () => {
+    assert.match(src("src/openrouter.ts"), /const timeoutDurationMs = 300_000;/);
+    assert.match(fs.readFileSync("agent.config.yaml", "utf8"), /apiMaxAttempts: 2\b/);
+  });
+});

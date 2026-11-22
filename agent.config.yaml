@@ -30,7 +30,7 @@ limits:
   maxFilesPerPhase: 15
   maxFileBytes: 120000
   maxSearchResults: 100
-  apiMaxAttempts: 4
+  apiMaxAttempts: 2
   apiBaseDelayMs: 1000
 
 git:

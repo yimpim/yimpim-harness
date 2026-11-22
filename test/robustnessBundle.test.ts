@@ -79,7 +79,7 @@ describe("OpenRouterClient remembers a failed model across calls", () => {
       const firstCallTried = [...tried];
       tried.length = 0;
       await quietly(() => client.complete(["bad/primary", "good/backup"], [{ role: "user", content: "hi again" }]));
-      assert.deepEqual(firstCallTried, ["bad/primary", "bad/primary", "bad/primary", "good/backup"]);
+      assert.deepEqual(firstCallTried, ["bad/primary", "bad/primary", "good/backup"], "two tries on a model that has a fallback behind it, then the backup");
       assert.deepEqual(tried, ["good/backup"], "the failing primary is not waited on again");
     } finally {
       (globalThis as any).fetch = original;
