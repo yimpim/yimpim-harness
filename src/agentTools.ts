@@ -38,6 +38,7 @@ import { diffStore } from "./diffStore.js";
 import { isJunkScreenName } from "./navGraph.js";
 import { sanitizeQaSetup, saveQaSetup } from "./qaSetup.js";
 import { isMustPass, lockedProblem, refusalFor } from "./directFix.js";
+import { truncationOutline } from "./fileOutline.js";
 import { compileBlockedPatterns, DEFAULT_BLOCKED_FILE_PATTERNS, isSensitiveName } from "./sensitivePaths.js";
 import { DEFAULT_MAX_ENTRIES, fingerprintOf, mergeComponentEntry } from "./repoMap.js";
 
@@ -2003,7 +2004,8 @@ export class AgentTools {
         return (
           slice.slice(0, cap) +
           `\n\n... [truncated: lines ${start}-${end} of ${filePath} (${total} lines total) are ${slice.length} bytes, ` +
-          `showing the first ${cap}. Request a narrower line range to see the rest.]`
+          `showing the first ${cap}. Request a narrower line range to see the rest.]` +
+          truncationOutline(content)
         );
       }
       if (stage) this.readLedger.record(stage, key, start, end);
@@ -2022,7 +2024,8 @@ export class AgentTools {
       return (
         content.slice(0, cap) +
         `\n\n... [truncated: ${filePath} is ${content.length} bytes, showing first ${cap}. ` +
-        `Use startLine/endLine to read a specific range of this file, or get_file_outline/search_code to locate one.]`
+        `Use startLine/endLine to read a specific range of this file, or get_file_outline/search_code to locate one.]` +
+        truncationOutline(content)
       );
     }
     // Recorded as shown only when every line really is in what is returned (not cut, no line shortened).
@@ -2802,8 +2805,9 @@ export class AgentTools {
   }
 
   public async getFileOutline(filePath: string): Promise<string> {
-    const content = await this.readFile(filePath);
-    const lines = content.split("\n");
+    // The file's own text, not read_file's answer: that is cut at maxFileBytes for a big file, and is a one-line notice for a file already shown.
+    this.filesInspected.add(filePath.replace(/\\/g, "/"));
+    const lines = (await fs.readFile(this.resolveSafeReadPath(filePath), "utf-8")).split("\n");
     const matched: string[] = [];
 
     const outlineRegex = /(fun\s+\w+|class\s+\w+|interface\s+\w+|val\s+\w+|var\s+\w+|export\s+function|export\s+const|function\s+\w+)/;
