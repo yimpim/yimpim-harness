@@ -92,7 +92,8 @@ describe("the scope warning", () => {
     const w = await warnings(async () => {
       await t.writeFile("__tests__/other.test.ts", "test('x', () => {});\n");
     });
-    assert.equal(w.length, 1);
+    assert.equal(w.length, 0);
+    assert.equal((await warnings(async () => void (await t.writeFile("specs/other.ts", "x\n")))).length, 1);
   });
 
   test("with a limit set, the warning shows how much of it is used", async () => {
