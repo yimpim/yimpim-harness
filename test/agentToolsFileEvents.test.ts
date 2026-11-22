@@ -2,7 +2,7 @@
  * Regression tests for the `file.write` internal event that writeFile/
  * patchFile now emit alongside their existing console.log diff-stat hint —
  * this is what lets a paired phone/native client show real per-file diff
- * stats instead of regex-scraping the console text (see docs/REMOTE_SPEC.md's
+ * stats instead of regex-scraping the console text (the
  * `file.changed` wire event).
  */
 import { test, describe, after } from "node:test";

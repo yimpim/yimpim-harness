@@ -38,7 +38,7 @@ export interface TranslatedRemoteEvent {
  * reconciled on `runId` alone (the only identifier available before this)
  * merged every task in one process into a single card, which is exactly the
  * "Phase 5/3" symptom (one task's phase list bleeding into the next task's
- * plan) this fixes. See REMOTE_SPEC.md's "Reconciliation" notes — the key
+ * plan) this fixes. The reconciliation key
  * changes from `runId` to `taskId`.
  *
  * `workerId` is injected the same way: minted by the caller when it sees

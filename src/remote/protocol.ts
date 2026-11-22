@@ -424,7 +424,7 @@ export type RemoteEvent =
    * `lifetime` is never evicted; `last` is the most recent ENDED task.
    * `cost` is USD; `costIsFloor: true` means some calls reported no price, so
    * show it as a floor ("$1.23+"), and `cost` is absent when none did.
-   * See docs/REMOTE_SPEC.md's `usage.totals` for the full contract.
+   * UsageTotalsWire (usageLedger.ts) is the full shape.
    */
   | ({ kind: "usage.totals" } & UsageTotalsWire)
   /** One role's candidate models, in response to `list_models` — cheapest-first, matching the desktop's own `/model` ordering. */

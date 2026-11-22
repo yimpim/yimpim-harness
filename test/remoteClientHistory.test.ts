@@ -431,7 +431,7 @@ describe("RemoteSession.replayHistory", () => {
 // alive session (which is exactly what durable persistence would eventually
 // cause, since replay sends it exactly like any other historical event)
 // would wrongly tell that new session to discard its own credentials and
-// stop polling -- REMOTE_SPEC.md's own documented session.end contract.
+// stop polling -- the documented session.end contract.
 // (An earlier version of this exclusion only covered the "re-pairing"
 // reason specifically, on the theory that OTHER reasons like "desktop
 // exited" were worth keeping as a human-visible history entry -- that

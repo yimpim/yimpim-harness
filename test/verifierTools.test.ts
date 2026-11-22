@@ -874,7 +874,7 @@ BUILD FAILED in 1s`;
   // trying to diagnose each one before the circuit breaker ended the pass.
   test("clusters the same message repeated 3+ times in the same file into one summary", () => {
     const lines = [259, 262, 276, 279, 282].map(
-      (n) => `e: file:///repo/YimpimModels.kt:${n}:5 This type has a constructor, so it must be initialized here.`
+      (n) => `e: file:///repo/AppModels.kt:${n}:5 This type has a constructor, so it must be initialized here.`
     );
     const raw = lines.join("\n");
 
@@ -902,8 +902,8 @@ BUILD FAILED in 1s`;
 
   test("leaves fewer than 3 repeats alone, uncollapsed", () => {
     const lines = [
-      `e: file:///repo/YimpimModels.kt:10:5 This type has a constructor, so it must be initialized here.`,
-      `e: file:///repo/YimpimModels.kt:20:5 This type has a constructor, so it must be initialized here.`,
+      `e: file:///repo/AppModels.kt:10:5 This type has a constructor, so it must be initialized here.`,
+      `e: file:///repo/AppModels.kt:20:5 This type has a constructor, so it must be initialized here.`,
     ];
     const detail = extractBuildFailureDetail(lines.join("\n"));
     assert.doesNotMatch(detail, /REPEATED/);
@@ -1074,7 +1074,7 @@ describe("extractReferencedFilePaths", () => {
 
 describe("looksLikeMissingDependency", () => {
   test("flags a Kotlin 'unresolved reference' error", () => {
-    assert.ok(looksLikeMissingDependency("e: file:///repo/YimpimModels.kt:12:5: error: unresolved reference: Serializable"));
+    assert.ok(looksLikeMissingDependency("e: file:///repo/AppModels.kt:12:5: error: unresolved reference: Serializable"));
   });
 
   test("flags a Java/Kotlin 'cannot find symbol' error", () => {

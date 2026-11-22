@@ -12,7 +12,7 @@
  * choke point EVERY outbound event goes through, translated agent events AND
  * `status` pushes alike — rather than a narrower per-caller hook that would
  * silently miss `status`, which is what the Android app's own task-history
- * feature turns out to be entirely keyed on (see REMOTE_SPEC.md's "History
+ * feature turns out to be entirely keyed on (see the protocol spec's "History
  * across sessions"). RemoteSession.replayHistory() then seeds a freshly-paired
  * session's outbox from this log — the phone needs no special handling for
  * it, replayed entries are indistinguishable from live ones on the wire.

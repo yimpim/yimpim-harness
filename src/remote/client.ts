@@ -317,7 +317,7 @@ export class RemoteSession {
     // anything about the actual task — critically, replaying it into a
     // freshly (re-)paired session would tell that brand-new, very-much-alive
     // session to discard its own credentials and stop polling (see
-    // REMOTE_SPEC.md's session.end contract: "stop polling and discard
+    // the session.end contract: "stop polling and discard
     // cached session credentials"), which is actively harmful, not just
     // noise, if it's ever replayed rather than only ever delivered live.
     let eventId: number | undefined;
