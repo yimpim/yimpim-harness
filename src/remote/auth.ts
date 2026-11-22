@@ -339,6 +339,9 @@ export async function executeLinkFlow(opts: LinkFlowOptions = {}): Promise<strin
   if (!code) throw new Error("Link service returned no pairing code.");
   const claimUrl =
     typeof body?.claimUrl === "string" && body.claimUrl.trim() ? body.claimUrl.trim() : `${base}/link#${code}`;
+  // Only this desktop holds the poll secret, and the broker hands the claimed lease only to its holder: the code shown on
+  // screen identifies the link, it is not enough to collect it. An older broker sends none, and polling works as before.
+  const pollSecret = typeof body?.pollSecret === "string" && body.pollSecret.trim() ? body.pollSecret.trim() : "";
 
   // ---- 2. print the code and the claim URL (QR is a bonus, never required) -
   console.log();
@@ -359,6 +362,7 @@ export async function executeLinkFlow(opts: LinkFlowOptions = {}): Promise<strin
     let pollRes: Response;
     try {
       pollRes = await fetch(`${base}/api/device/poll/${encodeURIComponent(code)}`, {
+        ...(pollSecret ? { headers: { authorization: `Bearer ${pollSecret}` } } : {}),
         signal: AbortSignal.timeout(requestTimeoutMs),
       });
     } catch {

@@ -255,6 +255,51 @@ describe("executeLinkFlow", () => {
     }
   });
 
+  test("the poll secret the broker hands out is sent on every poll, and only on polls", async () => {
+    const lease = jwtWithExp(Math.floor(Date.now() / 1000) + 3600, { tier: "pro" });
+    const seen: { url: string; auth?: string }[] = [];
+    const originalFetch = globalThis.fetch;
+    const originalLog = console.log;
+    console.log = () => {};
+    (globalThis as any).fetch = async (url: string, init?: any) => {
+      seen.push({ url, auth: init?.headers?.authorization });
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify({ code: "SECRET1", claimUrl: "https://broker.test/link#SECRET1", pollSecret: "ps_desktop-only" }), { status: 200 });
+      }
+      return new Response(JSON.stringify(seen.length < 3 ? { status: "pending" } : { token: lease }), { status: 200 });
+    };
+    try {
+      assert.equal(await executeLinkFlow({ brokerBase: "https://broker.test", pollIntervalMs: 5, timeoutMs: 5000 }), lease);
+      const polls = seen.filter((s) => s.url.includes("/poll/"));
+      assert.ok(polls.length >= 2);
+      assert.ok(polls.every((p) => p.auth === "Bearer ps_desktop-only"), JSON.stringify(polls));
+      assert.equal(seen[0].auth, undefined, "the request-link call carries no secret");
+    } finally {
+      console.log = originalLog;
+      (globalThis as any).fetch = originalFetch;
+    }
+  });
+
+  test("an older broker that sends no poll secret is polled exactly as before, with no Authorization header", async () => {
+    const lease = jwtWithExp(Math.floor(Date.now() / 1000) + 3600, { tier: "pro" });
+    const auths: (string | undefined)[] = [];
+    const originalFetch = globalThis.fetch;
+    const originalLog = console.log;
+    console.log = () => {};
+    (globalThis as any).fetch = async (url: string, init?: any) => {
+      if (init?.method === "POST") return new Response(JSON.stringify({ code: "OLDBRK", claimUrl: "https://broker.test/link#OLDBRK" }), { status: 200 });
+      auths.push(init?.headers?.authorization);
+      return new Response(JSON.stringify({ token: lease }), { status: 200 });
+    };
+    try {
+      assert.equal(await executeLinkFlow({ brokerBase: "https://broker.test", pollIntervalMs: 5, timeoutMs: 5000 }), lease);
+      assert.deepEqual(auths, [undefined]);
+    } finally {
+      console.log = originalLog;
+      (globalThis as any).fetch = originalFetch;
+    }
+  });
+
   test("gives up with null once the polling budget is exhausted", async () => {
     const originalFetch = globalThis.fetch;
     const originalLog = console.log;
