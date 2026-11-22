@@ -254,7 +254,12 @@ export function translateForRemote(
         kind: "log",
         payload: {
           level: "info",
-          message: event.kind === "approval" ? `Nobody answered in time, so it was refused (taken by default): ${taken}` : `Nobody answered in time, so ${taken} was taken by default`,
+          message:
+            event.kind === "approval"
+              ? `Nobody answered in time, so it was refused (taken by default): ${taken}`
+              : event.byModel
+                ? `Nobody answered in time, so a model read the question and chose ${taken}`
+                : `Nobody answered in time, so ${taken} was taken by default`,
           taskId,
           workerId,
         },

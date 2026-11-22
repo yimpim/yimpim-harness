@@ -66,14 +66,9 @@ class RunControl {
     // file to worry about here the way there is between tool rounds.
     this.controller.abort(new AbortedError(reason));
 
-    // Unblock anything waiting on a question so the run can unwind promptly.
-    for (const w of this.waiters.values()) {
-      if (!w.settled) {
-        w.settled = true;
-        w.resolve(w.question.fallback);
-      }
-    }
-    this.waiters.clear();
+    // Unblock anything waiting on a question so the run can unwind promptly, and tell the resolved listeners, so the question also leaves the
+    // phone's status: without that, a stopped task kept its question card on the phone with nothing left to answer it.
+    this.settleAllWithFallback();
     this.queuedAnswer = undefined;
   }
 
@@ -386,7 +381,7 @@ ${promptText}`;
     console.log(
       `   ↳ ⏱ No answer in ${mins} min: ${byModel !== undefined ? "a model decided" : "took"} ${answered === "" ? "the default" : `"${answered.replace(/\s+/g, " ").slice(0, 80)}"`}${assumptionRoot ? " (written to .agent/assumptions.md)" : ""}: ${(question.prompt.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)[0] ?? "").slice(0, 110)}`
     );
-    events.emit({ type: "question.timedOut", id: question.id, answer: answered, kind: question.kind });
+    events.emit({ type: "question.timedOut", id: question.id, answer: answered, kind: question.kind, ...(byModel !== undefined ? { byModel: true } : {}) });
     return answered;
   }
   const answer = back.get(raw.answer.trim().toLowerCase()) ?? raw.answer;
