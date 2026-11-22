@@ -7,7 +7,7 @@ import fs from "fs";
 import path from "path";
 
 /** A repo-relative path a model may be shown: inside the project, and not git, agent or dependency folders. */
-export const SAFE = (rel: string) => !rel.startsWith("..") && !path.isAbsolute(rel) && !/(^|\/)(\.git|\.agent|node_modules)(\/|$)/.test(rel);
+export const SAFE = (rel: string) => !rel.startsWith("..") && !path.isAbsolute(rel) && !/(^|\/)(\.git|\.agent|\.yimpim|node_modules)(\/|$)/.test(rel);
 
 /** Lines from..to, each as `12| code` (the number is not part of the code). */
 export const numbered = (lines: string[], from: number, to: number): string => {
@@ -57,7 +57,9 @@ export interface CodeRef {
   to?: number;
 }
 
-const EXT = "tsx?|jsx?|mjs|cjs|kt|kts|java|swift|py|go|rs|rb|php|cs|cpp|cc|c|h|hpp|m|mm|dart|vue|svelte|gradle|xml|sql|sh|ps1|html|css|scss|ya?ml|toml|md";
+// Any extension: a word that looks like "name.ext" is only a CANDIDATE here. What makes it a citation is the project's own file list (resolveRefs / resolveOnDisk keep it only when that
+// file exists), so no language is named and a prose "e.g." or "Node.js" is dropped there.
+const EXT = "[A-Za-z][A-Za-z0-9]{0,9}";
 const NAME = `[\\w@./\\\\-]*[\\w@-]\\.(?:${EXT})(?![\\w])`;
 const DASH = "\\s*[-\\u2013\\u2014]\\s*";
 /**
@@ -81,7 +83,7 @@ export function parseCodeRefs(text: string): CodeRef[] {
   const out: CodeRef[] = [];
   for (const m of text.matchAll(CITE)) {
     const file = posix(m[1]);
-    if (!file || path.isAbsolute(file) || file.split("/").some((s) => s === ".." || s === "node_modules" || s === ".git" || s === ".agent") || /^\d+(\.\d+)+$/.test(file)) continue;
+    if (!file || path.isAbsolute(file) || file.split("/").some((s) => s === ".." || s === "node_modules" || s === ".git" || s === ".agent" || s === ".yimpim") || /^\d+(\.\d+)+$/.test(file)) continue;
     const a = Number(m[2] ?? m[4] ?? m[6]);
     const bRaw = m[3] ?? m[5] ?? m[7];
     if (!Number.isFinite(a) || a < 1) {
