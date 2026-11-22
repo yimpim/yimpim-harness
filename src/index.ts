@@ -4624,6 +4624,7 @@ async function main(): Promise<void> {
       completion: usage.completion,
       total: usage.total,
       cost: usage.cost,
+      cached: usage.cached,
       ...(taskRunning ? { taskId: currentTaskId, repo: path.basename(repoRoot) } : {}),
       ...(phase ? { phase } : {}),
     });

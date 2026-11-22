@@ -40,6 +40,9 @@ export interface LedgerBucket {
   cost: number;
   /** Calls that reported a price; cost is exact only when this equals calls. */
   pricedCalls: number;
+  /** Prompt tokens the provider served from its prompt cache, and the prompt tokens of the calls that reported it: the hit rate is cached / cachedOf. */
+  cached: number;
+  cachedOf: number;
 }
 
 export type LedgerTaskState = "running" | "done" | "failed" | "aborted" | "interrupted";
@@ -90,6 +93,8 @@ export interface UsageCall {
   completion: number;
   total: number;
   cost?: number;
+  /** Prompt tokens served from the provider's cache; undefined when the route did not report it. */
+  cached?: number;
   /** Set only while a task is actually running. */
   taskId?: string;
   repo?: string;
@@ -102,7 +107,7 @@ const MAX_PHASES_PER_TASK = 60;
 const MAX_MODEL_KEYS = 200;
 const FLUSH_DEBOUNCE_MS = 2000;
 
-const emptyBucket = (): LedgerBucket => ({ calls: 0, prompt: 0, completion: 0, total: 0, cost: 0, pricedCalls: 0 });
+const emptyBucket = (): LedgerBucket => ({ calls: 0, prompt: 0, completion: 0, total: 0, cost: 0, pricedCalls: 0, cached: 0, cachedOf: 0 });
 
 function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
@@ -115,6 +120,8 @@ function addInto(dst: LedgerBucket, src: LedgerBucket): void {
   dst.total += src.total;
   dst.cost += src.cost;
   dst.pricedCalls += src.pricedCalls;
+  dst.cached += src.cached;
+  dst.cachedOf += src.cachedOf;
 }
 
 function bucketIn(map: Record<string, LedgerBucket>, key: string): LedgerBucket {
@@ -137,6 +144,8 @@ function coerceBucket(raw: any): LedgerBucket {
     total: num(raw?.total),
     cost: num(raw?.cost),
     pricedCalls: num(raw?.pricedCalls),
+    cached: num(raw?.cached),
+    cachedOf: num(raw?.cachedOf),
   };
 }
 
@@ -255,6 +264,8 @@ export class UsageLedger {
         total: num(c.total),
         cost: priced ? (c.cost as number) : 0,
         pricedCalls: priced ? 1 : 0,
+        cached: num(c.cached),
+        cachedOf: typeof c.cached === "number" ? num(c.prompt) : 0,
       };
       const role = c.role || "unknown";
       const model = c.model || "unknown";
@@ -593,6 +604,8 @@ function overheadOf(task: LedgerTask): LedgerBucket {
     o.total = Math.max(0, o.total - p.usage.total);
     o.cost = Math.max(0, o.cost - p.usage.cost);
     o.pricedCalls = Math.max(0, o.pricedCalls - p.usage.pricedCalls);
+    o.cached = Math.max(0, o.cached - p.usage.cached);
+    o.cachedOf = Math.max(0, o.cachedOf - p.usage.cachedOf);
   }
   return o;
 }
@@ -604,8 +617,13 @@ function costText(b: LedgerBucket): string {
   return `  ${formatCost(b.cost)}${b.pricedCalls < b.calls ? "+" : ""}`;
 }
 
+/** "  cache 42%": the share of prompt tokens served from the provider's cache, over the calls that reported it. Nothing when none did. */
+export function cacheText(b: LedgerBucket): string {
+  return b.cachedOf > 0 ? `  cache ${Math.round((100 * b.cached) / b.cachedOf)}%` : "";
+}
+
 function row(label: string, b: LedgerBucket, width = 12): string {
-  return `  ${label.padEnd(width)} ${String(b.calls).padStart(5)} calls  ${formatTokens(b.total).padStart(8)} tokens${costText(b)}`;
+  return `  ${label.padEnd(width)} ${String(b.calls).padStart(5)} calls  ${formatTokens(b.total).padStart(8)} tokens${costText(b)}${cacheText(b)}`;
 }
 
 /** What `/usage` prints. `recentTasks` bounds the task section. */

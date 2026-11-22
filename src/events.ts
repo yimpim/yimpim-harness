@@ -25,6 +25,8 @@ export interface TokenUsage {
    *  per-provider pricing, not a hardcoded table) — undefined when a
    *  provider/route didn't report it, distinct from a genuinely free $0 call. */
   cost?: number;
+  /** Of the prompt tokens, how many the provider served from its prompt cache (OpenRouter's prompt_tokens_details.cached_tokens). Undefined when the route did not report it. */
+  cached?: number;
 }
 
 export type YimpimEvent =

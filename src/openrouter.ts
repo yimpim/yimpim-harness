@@ -413,6 +413,7 @@ export class OpenRouterClient {
         // tell "genuinely free" apart from "cost unknown" instead of silently
         // treating both the same way.
         cost: typeof usagePayload.cost === "number" ? usagePayload.cost : undefined,
+        cached: typeof usagePayload.prompt_tokens_details?.cached_tokens === "number" ? usagePayload.prompt_tokens_details.cached_tokens : undefined,
       };
     } else if (content.length > 0 || reasoning.length > 0 || toolCalls.length > 0) {
       // A provider that reported no usage at all still produced tokens; an
@@ -536,6 +537,9 @@ export class OpenRouterClient {
             // not a hardcoded per-model price table this codebase would otherwise
             // have to maintain and which would silently go stale as pricing changes.
             usage: { include: true },
+            // No silent middle-out compression: it drops the middle of a long conversation (tool outputs and error logs the next round needs) without saying so.
+            // The harness compacts its own context deliberately; a call that is too long should fail loudly, not lose its middle.
+            transforms: [],
           };
 
           if (options?.jsonSchema) {
