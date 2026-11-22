@@ -792,7 +792,7 @@ describe("RemoteSession register body", () => {
     assert.equal(body.proToken, "lease.jwt.value");
   });
 
-  test("sends no proToken at all when none is configured (Tailscale / self-hosted relays)", async () => {
+  test("sends no proToken at all when none is configured", async () => {
     const body = await registerBody(undefined);
     assert.ok(!("proToken" in body));
   });

@@ -1,28 +1,24 @@
 /**
- * Regression tests for the dual-tier relay routing in src/remote/autoRelay.ts.
- *
- * The ORDERING is the whole contract of this module and the easiest thing to
- * break: a valid Pro lease must win over everything, an expired lease gets
- * exactly one refresh attempt, and the `/link` offer must only ever be made
- * when there is neither a lease nor a usable Tailscale. Every case stubs
- * globalThis.fetch so no test ever talks to a real broker, and
- * `tailscaleAvailable: false` keeps the machine's own Tailscale install from
- * changing which tier the test exercises.
+ * Remote control runs through the hosted YIMPIM broker and only through it: a valid Pro lease goes to the cloud tunnel, an
+ * expired one gets exactly one refresh, a machine with no lease is offered the `/link` flow once, and otherwise the answer is
+ * "link this machine to YIMPIM Pro". There is no self-hosted relay, no Tailscale path and no configurable relay URL to fall
+ * back to. Every case stubs globalThis.fetch, so no test talks to a real broker.
  */
 import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { Server } from "node:http";
-import { provisionRelay, provisionCloudTunnel, RelayUnavailable } from "../src/remote/autoRelay.js";
+import { provisionRelay, provisionCloudTunnel, RelayUnavailable, LINK_GUIDANCE } from "../src/remote/autoRelay.js";
 import { saveProToken, readSavedToken } from "../src/remote/auth.js";
+import { ConfigSchema } from "../src/config.js";
+import { SETTINGS } from "../src/settings.js";
 
 const tempDirs: string[] = [];
 const originalAuthFile = process.env.YIMPIM_AUTH_FILE;
 const originalFetch = globalThis.fetch;
 
-/** Install a fetch stub for one test. Restored globally in `after`. */
 function stubFetch(impl: (url: string, init?: any) => Promise<Response> | Response): void {
   (globalThis as any).fetch = async (url: any, init?: any) => impl(String(url), init);
 }
@@ -31,13 +27,8 @@ function jwtWithExp(expSecs: number, extra: Record<string, unknown> = {}): strin
   const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
   return `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ sub: "u_1", exp: expSecs, ...extra })}.fake-signature`;
 }
-
-/** A startLocalRelay that must never be reached on any of the cloud paths. */
-const noLocalRelay = async (): Promise<{ server: Server; port: number }> => {
-  throw new Error("startLocalRelay must not be called when a cloud tier answers");
-};
-
-const noTailscale = { tailscaleAvailable: false } as const;
+const inAnHour = () => Math.floor(Date.now() / 1000) + 3600;
+const aMinuteAgo = () => Math.floor(Date.now() / 1000) - 60;
 
 beforeEach(async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "yimpim-relay-test-"));
@@ -53,7 +44,7 @@ after(async () => {
 });
 
 describe("provisionCloudTunnel", () => {
-  test("returns the broker's endpoint and never starts a local relay", async () => {
+  test("returns the broker's endpoint", async () => {
     stubFetch(async () => new Response(JSON.stringify({ url: "https://abc.tunnel.yimpim.com" }), { status: 200 }));
     const relay = await provisionCloudTunnel("lease-jwt", { brokerBase: "https://broker.test" });
     assert.equal(relay.url, "https://abc.tunnel.yimpim.com");
@@ -73,30 +64,17 @@ describe("provisionCloudTunnel", () => {
     assert.deepEqual(JSON.parse(seen?.init.body), { token: "lease-jwt" });
   });
 
-  test("fails closed on a 401 so the caller can fall through to another tier", async () => {
-    stubFetch(async () => new Response(JSON.stringify({ error: "revoked" }), { status: 401 }));
-    await assert.rejects(
-      () => provisionCloudTunnel("stale", { brokerBase: "https://broker.test" }),
-      (err: any) => err instanceof RelayUnavailable
-    );
-  });
-
-  test("fails closed when the broker answers 200 with no usable endpoint", async () => {
-    stubFetch(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
-    await assert.rejects(
-      () => provisionCloudTunnel("lease-jwt", { brokerBase: "https://broker.test" }),
-      (err: any) => err instanceof RelayUnavailable
-    );
-  });
-
-  test("fails closed when the broker is unreachable", async () => {
-    stubFetch(async () => {
-      throw new Error("ENOTFOUND broker.test");
-    });
-    await assert.rejects(
-      () => provisionCloudTunnel("lease-jwt", { brokerBase: "https://broker.test" }),
-      (err: any) => err instanceof RelayUnavailable
-    );
+  test("fails closed on a 401, on a 200 with no endpoint, and when the broker is unreachable", async () => {
+    for (const impl of [
+      async () => new Response(JSON.stringify({ error: "revoked" }), { status: 401 }),
+      async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      async () => {
+        throw new Error("ENOTFOUND broker.test");
+      },
+    ]) {
+      stubFetch(impl);
+      await assert.rejects(() => provisionCloudTunnel("lease-jwt", { brokerBase: "https://broker.test" }), (err: any) => err instanceof RelayUnavailable);
+    }
   });
 
   test("accepts a tunnelUrl alias from the broker", async () => {
@@ -106,135 +84,104 @@ describe("provisionCloudTunnel", () => {
   });
 });
 
-describe("provisionRelay — tier ordering", () => {
-  test("a valid lease routes straight to the cloud tunnel, ahead of a configured URL", async () => {
-    saveProToken(jwtWithExp(Math.floor(Date.now() / 1000) + 3600, { tier: "pro" }));
-
+describe("provisionRelay — the hosted broker only", () => {
+  test("a valid lease goes straight to the cloud tunnel", async () => {
+    saveProToken(jwtWithExp(inAnHour(), { tier: "pro" }));
     const urls: string[] = [];
-    stubFetch(async (url) => {
-      urls.push(url);
-      return new Response(JSON.stringify({ url: "https://cloud.example" }), { status: 200 });
-    });
-
+    stubFetch(async (url) => (urls.push(url), new Response(JSON.stringify({ url: "https://cloud.example" }), { status: 200 })));
     const logs: string[] = [];
-    const relay = await provisionRelay({
-      configuredUrl: "https://my-own-relay.example",
-      startLocalRelay: noLocalRelay,
-      log: (m) => logs.push(m),
-      brokerBase: "https://broker.test",
-      ...noTailscale,
-    });
-
+    const relay = await provisionRelay({ log: (m) => logs.push(m), brokerBase: "https://broker.test" });
     assert.equal(relay.source, "cloud");
     assert.equal(relay.url, "https://cloud.example");
-    assert.deepEqual(urls, ["https://broker.test/api/tunnel/provision"], "no /healthz probe of the configured URL");
-    assert.ok(logs.some((l) => /cloud tunnel/i.test(l)), `logged the cloud path: ${logs.join(" | ")}`);
+    assert.deepEqual(urls, ["https://broker.test/api/tunnel/provision"]);
+    assert.ok(logs.some((l) => /cloud tunnel/i.test(l)), logs.join(" | "));
+  });
+
+  test("a valid lease the broker cannot serve fails with the broker's reason: there is nothing else to fall back to", async () => {
+    saveProToken(jwtWithExp(inAnHour(), { tier: "pro" }));
+    stubFetch(async () => {
+      throw new Error("ENOTFOUND broker.test");
+    });
+    await assert.rejects(() => provisionRelay({ log: () => {}, brokerBase: "https://broker.test" }), (err: any) => err instanceof RelayUnavailable && /reach the YIMPIM broker/.test(err.message));
   });
 
   test("an expired lease gets exactly one refresh attempt, then the cloud tunnel", async () => {
-    saveProToken(jwtWithExp(Math.floor(Date.now() / 1000) - 60));
-    const fresh = jwtWithExp(Math.floor(Date.now() / 1000) + 3600, { tier: "pro" });
-
+    saveProToken(jwtWithExp(aMinuteAgo()));
+    const fresh = jwtWithExp(inAnHour(), { tier: "pro" });
     const calls: string[] = [];
     stubFetch(async (url) => {
       calls.push(url);
       if (url.endsWith("/api/device/refresh")) return new Response(JSON.stringify({ token: fresh }), { status: 200 });
       return new Response(JSON.stringify({ url: "https://cloud.example" }), { status: 200 });
     });
-
-    const relay = await provisionRelay({
-      configuredUrl: "",
-      startLocalRelay: noLocalRelay,
-      log: () => {},
-      brokerBase: "https://broker.test",
-      ...noTailscale,
-    });
-
+    const relay = await provisionRelay({ log: () => {}, brokerBase: "https://broker.test" });
     assert.equal(relay.source, "cloud");
-    assert.deepEqual(calls, [
-      "https://broker.test/api/device/refresh",
-      "https://broker.test/api/tunnel/provision",
-    ]);
+    assert.deepEqual(calls, ["https://broker.test/api/device/refresh", "https://broker.test/api/tunnel/provision"]);
     assert.equal(readSavedToken()?.token, fresh, "the renewed lease is persisted");
   });
 
-  test("a refresh the broker rejects clears the stale lease and does not dead-end silently", async () => {
-    saveProToken(jwtWithExp(Math.floor(Date.now() / 1000) - 60));
+  test("a refresh the broker rejects clears the stale lease and ends with the link guidance", async () => {
+    saveProToken(jwtWithExp(aMinuteAgo()));
     stubFetch(async () => new Response(JSON.stringify({ error: "revoked" }), { status: 401 }));
-
-    await assert.rejects(
-      () =>
-        provisionRelay({
-          configuredUrl: "",
-          startLocalRelay: noLocalRelay,
-          log: () => {},
-          brokerBase: "https://broker.test",
-          ...noTailscale,
-        }),
-      (err: any) => err instanceof RelayUnavailable && err.guidance.length > 0
-    );
+    await assert.rejects(() => provisionRelay({ log: () => {}, brokerBase: "https://broker.test" }), (err: any) => err instanceof RelayUnavailable && err.guidance === LINK_GUIDANCE);
     assert.equal(readSavedToken(), null, "a 401 on refresh must clear the saved lease");
   });
 
-  test("no lease, no Tailscale, declined offer -> actionable guidance, no link prompt beyond the one ask", async () => {
+  test("no lease, declined offer: asked exactly once, then the link guidance, with no network call", async () => {
     stubFetch(async () => {
       throw new Error("no network call is expected on this path");
     });
-
     let asked = 0;
     await assert.rejects(
-      () =>
-        provisionRelay({
-          configuredUrl: "",
-          startLocalRelay: noLocalRelay,
-          log: () => {},
-          brokerBase: "https://broker.test",
-          confirmLinkFlow: async () => {
-            asked++;
-            return false;
-          },
-          ...noTailscale,
-        }),
-      (err: any) => err instanceof RelayUnavailable && err.guidance.length > 0
+      () => provisionRelay({ log: () => {}, brokerBase: "https://broker.test", confirmLinkFlow: async () => (asked++, false) }),
+      (err: any) => err instanceof RelayUnavailable && /not linked to YIMPIM Pro/.test(err.message) && err.guidance.some((g: string) => g.includes("/link"))
     );
-    assert.equal(asked, 1, "the user is offered the link flow exactly once");
+    assert.equal(asked, 1);
   });
 
-  test("no lease, no Tailscale, user consents -> link flow, lease saved, cloud tunnel", async () => {
-    const lease = jwtWithExp(Math.floor(Date.now() / 1000) + 3600, { tier: "pro" });
+  test("no lease, user consents: link flow, lease saved, cloud tunnel", async () => {
+    const lease = jwtWithExp(inAnHour(), { tier: "pro" });
     const calls: string[] = [];
     stubFetch(async (url) => {
       calls.push(url);
-      if (url.endsWith("/api/device/request-link")) {
-        return new Response(JSON.stringify({ code: "ABCD1234", claimUrl: "https://broker.test/link#ABCD1234" }), {
-          status: 200,
-        });
-      }
+      if (url.endsWith("/api/device/request-link")) return new Response(JSON.stringify({ code: "ABCD1234", claimUrl: "https://broker.test/link#ABCD1234" }), { status: 200 });
       if (url.includes("/api/device/poll/")) return new Response(JSON.stringify({ token: lease }), { status: 200 });
-      if (url.endsWith("/api/tunnel/provision")) {
-        return new Response(JSON.stringify({ url: "https://cloud.example" }), { status: 200 });
-      }
+      if (url.endsWith("/api/tunnel/provision")) return new Response(JSON.stringify({ url: "https://cloud.example" }), { status: 200 });
       throw new Error(`unexpected fetch: ${url}`);
     });
-
     const originalLog = console.log;
     console.log = () => {};
     try {
-      const relay = await provisionRelay({
-        configuredUrl: "",
-        startLocalRelay: noLocalRelay,
-        log: () => {},
-        brokerBase: "https://broker.test",
-        confirmLinkFlow: async () => true,
-        linkFlowOptions: { pollIntervalMs: 1, timeoutMs: 500 },
-        ...noTailscale,
-      });
+      const relay = await provisionRelay({ log: () => {}, brokerBase: "https://broker.test", confirmLinkFlow: async () => true, linkFlowOptions: { pollIntervalMs: 1, timeoutMs: 500 } });
       assert.equal(relay.source, "cloud");
       assert.ok(calls.includes("https://broker.test/api/device/request-link"));
-      assert.ok(calls.includes("https://broker.test/api/tunnel/provision"));
-      assert.equal(readSavedToken()?.token, lease, "the lease claimed on the phone is persisted");
+      assert.equal(readSavedToken()?.token, lease);
     } finally {
       console.log = originalLog;
     }
+  });
+});
+
+describe("no self-hosted path is left in the harness", () => {
+  const src = (f: string) => fsSync.readFileSync(f, "utf8");
+  test("the relay server and its device page are gone, and nothing imports them", () => {
+    assert.equal(fsSync.existsSync("src/remote/relay.ts"), false);
+    assert.equal(fsSync.existsSync("src/remote/ui.ts"), false);
+    for (const f of fsSync.readdirSync("src", { recursive: true }) as string[]) {
+      if (!f.endsWith(".ts")) continue;
+      assert.doesNotMatch(src(path.join("src", f)), /remote\/relay\.js|remote\/ui\.js|\.\/relay\.js|\.\/ui\.js|createRelay|DEVICE_PAGE/, f);
+    }
+  });
+  test("no Tailscale tier, no configured relay URL, no `relay` command", () => {
+    assert.doesNotMatch(src("src/remote/autoRelay.ts"), /tailscale|configuredUrl|startLocalRelay/i);
+    assert.equal("brokerUrl" in (ConfigSchema.parse({}).remote as any), false);
+    assert.equal(SETTINGS.some((s: { key: string }) => s.key === "remote.brokerUrl"), false);
+    assert.doesNotMatch(src("src/cli.ts"), /"relay"|yimpim relay/);
+    assert.doesNotMatch(src("README.md"), /yimpim relay|tailscale serve|remote\.brokerUrl/i);
+  });
+  test("an old config that still sets remote.brokerUrl loads, the key dropped", () => {
+    const c = ConfigSchema.parse({ remote: { brokerUrl: "https://my-relay.example", redactLogs: true } }) as any;
+    assert.equal(c.remote.redactLogs, true);
+    assert.equal("brokerUrl" in c.remote, false);
   });
 });

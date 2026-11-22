@@ -9,8 +9,7 @@
  * backtick-delimited identifier is arguably more unambiguous than a bare
  * word) while being trivial to turn into real visual formatting for a
  * human. This module is the one place that turns that convention into ANSI
- * escapes for the desktop terminal; remote/ui.ts has the parallel (but
- * separately maintained, since it runs in a browser, not Node) HTML version.
+ * escapes for the desktop terminal; the phone has its own (separately maintained) version.
  */
 
 const ANSI_BOLD = "\x1b[1m";

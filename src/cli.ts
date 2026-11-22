@@ -24,7 +24,7 @@ import { globalConfigPath, hasGlobalConfig } from "./globalConfig.js";
 import { apiKeyStatus } from "./secrets.js";
 
 export interface ParsedArgs {
-  command: "run" | "doctor" | "config" | "init" | "help" | "version" | "setup" | "setup-env" | "relay" | "link";
+  command: "run" | "doctor" | "config" | "init" | "help" | "version" | "setup" | "setup-env" | "link";
   sub?: string;
   positionals: string[];
   repoRoot: string;
@@ -41,7 +41,7 @@ export interface ParsedArgs {
   attach: string[];
 }
 
-const COMMANDS = ["run", "doctor", "config", "init", "help", "version", "setup", "setup-env", "relay", "link"];
+const COMMANDS = ["run", "doctor", "config", "init", "help", "version", "setup", "setup-env", "link"];
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const args = [...argv];
@@ -123,7 +123,6 @@ OTHER COMMANDS
   yimpim setup-env          Install the toolchains a new machine needs (Node, Python, Java, Android, Flutter, Playwright); --dry-run shows it first
   yimpim config list        Every setting and its current value
   yimpim config set <k> <v> Change a setting
-  yimpim relay              Run the phone-control relay (only if self-hosting)
   yimpim link               Link this machine to YIMPIM Pro (cloud-tunnel lease)
   yimpim help | version
 

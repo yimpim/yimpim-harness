@@ -503,13 +503,11 @@ export async function runSetup(force = false): Promise<number> {
       models[persona.key] = backup ? [primary, backup] : [primary];
     }
 
-    // Phone remote control needs no setup here: typing /remote-control in any
-    // session provisions it automatically (via Tailscale, if installed) and
-    // shows a QR code on the spot. Nothing to ask for up front.
+    // Phone remote control needs no setup here: it runs through YIMPIM Pro (/link once, then /remote-control).
     line();
-    line("  5. Phone remote control");
-    line("     Nothing to set up now — type /remote-control in any session and");
-    line("     YIMPIM handles it automatically (using Tailscale, if you have it).");
+    line("  5. Phone remote control (YIMPIM Pro)");
+    line("     Nothing to set up now — run /link once to link this machine, then");
+    line("     /remote-control in any session shows a QR code for the YIMPIM app.");
 
     // ---- 6. Save ---------------------------------------------------------
     const data: Record<string, any> = {

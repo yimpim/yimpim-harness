@@ -2,7 +2,7 @@ YIMPIM
 Copyright 2026 YIMPIM
 
 This product is the free, open harness: the command-line coding agent, its planning, verification and
-security tooling, the remote-control client, and a small self-hosted relay. It is licensed under the
+security tooling, and the client that connects to the hosted YIMPIM service. It is licensed under the
 Apache License, Version 2.0 (see LICENSE).
 
 The following are NOT part of this product and are not licensed by it:

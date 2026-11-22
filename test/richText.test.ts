@@ -1,10 +1,7 @@
 /**
  * Regression tests for the desktop-side markdown-lite renderer. Both sides
  * are meant to agree on the same convention (backtick code spans, **bold**);
- * this locks in the Node half of that contract. The phone's parallel HTML
- * version lives inline inside remote/ui.ts's embedded JS — covered in
- * test/deviceUi.test.ts, which pulls it out of the page and exercises it
- * directly rather than needing browser tooling.
+ * this locks in the Node half of that contract. The phone's version is tested with the phone.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

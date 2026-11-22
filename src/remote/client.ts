@@ -96,7 +96,7 @@ const NOT_PERSISTED_KINDS = new Set([
 const POLL_BACKOFF_MS = [1000, 2000, 5000, 10_000, 20_000];
 /** ~1 minute of backoff: well past any restart, so a warning means it is real. */
 const UNAUTHORIZED_POLLS_BEFORE_WARNING = 6;
-// Same raw chunk size the phone itself uses for uploads (see ui.ts's CHUNK),
+// Same raw chunk size the phone itself uses for uploads,
 // so both directions behave the same way under the broker's body-size limit.
 const SCREENSHOT_CHUNK_BYTES = 48 * 1024;
 // Leaves headroom under the broker's 1MB per-request body cap for JSON

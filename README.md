@@ -130,36 +130,21 @@ surfaces it in `config list`, `init`, validation and help at once.
 
 ## Remote control (phone)
 
-Type `/remote-control` in any session. That's the entire setup:
+Remote control is part of YIMPIM Pro. Link this machine once with `/link` (or `yimpim link`), then type
+`/remote-control` in any session:
 
 ```
 yimpim > /remote-control
 
-[REMOTE] Tailscale connected as my-pc.tail1234.ts.net
-[REMOTE] Starting the relay on this machine (loopback only)…
-[REMOTE] Publishing it to your tailnet over HTTPS…
-[REMOTE] Relay ready: https://my-pc.tail1234.ts.net — reachable only from your own devices
+[REMOTE] Pro lease found — connecting to the YIMPIM cloud tunnel…
+[REMOTE] Relay ready: https://… — hosted by YIMPIM Pro, nothing to install or keep running
 
 📱 REMOTE CONTROL — scan to pair ONE device
    [QR code]
 ```
 
-No URL to obtain, no config to set, no ports to open. YIMPIM provisions the whole
-path itself, in priority order:
-
-1. A relay you already configured (`remote.brokerUrl`), if it actually answers.
-2. **Tailscale** — the relay runs on `127.0.0.1` only; `tailscale serve`
-   publishes it to your tailnet with a real, browser-trusted HTTPS certificate.
-   Nothing becomes public. This is the default path for everyone with Tailscale
-   installed, and needs zero configuration.
-3. If neither is available, `/remote-control` explains exactly what to install
-   (a link to tailscale.com) instead of failing silently.
-
-The published endpoint is torn down (`tailscale serve … off`) the moment the
-session ends — nothing outlives the run that created it. If you'd rather
-self-host a relay reachable another way (a VPS, a corporate network), set
-`remote.brokerUrl` once and step 1 uses it instead; `yimpim relay <port>` runs
-the standalone relay for that case.
+No URL to obtain, no config to set, no ports to open. An expired lease is renewed once on its own; a machine that is not
+linked yet is offered the link flow on the spot.
 
 ### Why this does not expose your machine
 
@@ -252,7 +237,6 @@ Everything else is optional:
 yimpim doctor                 # what works here, and what a run will cost
 yimpim config list --common   # settings most people change
 yimpim config set <key> <val> # change one
-yimpim relay 8787             # host the phone-control relay yourself
 ```
 
 Required: Node.js 22+, Git, an OpenRouter API key.
@@ -330,9 +314,7 @@ The same notice is printed with every security result and saved at the top and b
 
 The harness in this repository is free and open source (Apache License 2.0, see `LICENSE` and `NOTICE`).
 
-- **Free:** the command-line agent, planning, verification and security tooling, the remote-control client, and a small
-  self-hosted relay (`yimpim relay`, or Tailscale through `/remote-control`) with a web phone page. Nothing here needs an
-  account.
-- **Hosted (paid):** the hosted relay and zero-config cloud tunnel, push notifications, and the Android and iOS apps.
+- **Free:** the command-line agent, planning, verification and security tooling. Nothing here needs an account.
+- **YIMPIM Pro (paid):** phone remote control through the hosted relay, push notifications, and the Android and iOS apps.
   `/link` connects this machine to your subscription. The hosted service is a separate product with its own terms of
   service; its server code is not part of this repository.

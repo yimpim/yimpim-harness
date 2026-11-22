@@ -233,7 +233,7 @@ describe("doctor is read-only, and part of the report", () => {
 
   test("it is a command-line command with help text, and `yimpim doctor` was already one (nothing here added a second doctor)", () => {
     const cli = src("src/cli.ts");
-    assert.ok(cli.includes('const COMMANDS = ["run", "doctor", "config", "init", "help", "version", "setup", "setup-env", "relay", "link"];'));
+    assert.ok(cli.includes('const COMMANDS = ["run", "doctor", "config", "init", "help", "version", "setup", "setup-env", "link"];'));
     assert.match(cli, /yimpim setup-env +Install the toolchains a new machine needs/);
     assert.equal((cli.match(/"doctor"/g) ?? []).length, 2, "the type and the table, once each");
   });

@@ -252,7 +252,6 @@ export const ConfigSchema = z.object({
     .prefault({}),
   remote: z
     .object({
-      brokerUrl: z.string().default(""),
       redactLogs: z.boolean().default(false),
     })
     .prefault({}),

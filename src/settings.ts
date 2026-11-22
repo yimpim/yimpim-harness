@@ -304,13 +304,6 @@ export const SETTINGS: SettingDef[] = [
 
   // ---- Remote control ------------------------------------------------------
   {
-    key: "remote.brokerUrl",
-    type: "string",
-    group: "Remote",
-    common: true,
-    description: "Relay URL for phone control. Run your own; it only ever sees ciphertext.",
-  },
-  {
     key: "remote.redactLogs",
     type: "boolean",
     group: "Remote",

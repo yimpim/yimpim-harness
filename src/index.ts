@@ -1816,7 +1816,7 @@ async function revertAgentChanges(
  */
 async function printPairingQr(
   pairingUrl: string,
-  source: "cloud" | "configured" | "tailscale" = "configured",
+  source: "cloud" = "cloud",
   /** connectRemote's provisionRelay progress log — see its own comment for why this must survive the clear() below. */
   provisioningLog: string[] = [],
   /** Mid-run: leave the screen alone so the run's output above stays in the scrollback. */
@@ -1853,14 +1853,8 @@ async function printPairingQr(
     for (const line of provisioningLog) console.log(`  ${line}`);
     console.log();
   }
-  // "Relay ready: <detail>" above already said how this is served (Tailscale
-  // vs. cloud) and whether anything is public — this adds only the one claim
-  // that's genuinely new: what the relay itself can and can't see.
-  if (source === "tailscale") {
-    console.log(`The relay only ever sees encrypted data. It stops when this session ends.`);
-  } else if (source === "cloud") {
-    console.log(`The relay only ever sees encrypted data.`);
-  }
+  // "Relay ready: <detail>" above already said how this is served; this adds what the broker itself can and can't see.
+  if (source === "cloud") console.log(`The relay only ever sees encrypted data.`);
   console.log(`This code is single-use and expires in ~2 minutes.`);
   console.log(`Permitted from the phone: watch, answer questions, STOP the run.`);
   console.log(`${"=".repeat(58)}\n`);
@@ -1886,16 +1880,8 @@ let activeResolvedListener: ((id: string) => void) | undefined;
  * Returns undefined (with an explanation) rather than throwing, so a failed
  * pairing never stops the local run.
  *
- * `previous`, when given, is a session from an EARLIER call in this same
- * process — re-pairing without tearing it down first used to leave its local
- * HTTP server running and its `tailscale serve` mapping in place, relying
- * entirely on the NEW `tailscale serve` call to cleanly replace the OLD
- * routing with no way to verify that actually happened. Two live relay
- * processes, both registered against the SAME shared session store
- * (broker.ts's `sessions` map is module-scoped, so every local relay in this
- * process shares it) is exactly how a stale, orphaned session sits around
- * confusing "which one is actually reachable" — stopping it first guarantees
- * there is ever only one relay, and one session, live at a time.
+ * `previous`, when given, is a session from an EARLIER call in this same process. It is stopped (unregistered from the
+ * broker) first, so there is only ever one session live at a time and a stale one never confuses which is reachable.
  */
 async function connectRemote(
   config: AgentConfig,
@@ -1911,9 +1897,7 @@ async function connectRemote(
   // scrolled half out of view). That wipe used to take provisionRelay's own
   // progress log with it, including exactly the line that explains WHY the
   // cloud tunnel wasn't used when a Pro lease exists but something about it
-  // failed (an expired lease, a broker error, ...) — the only visible symptom
-  // was "I have a lease but I got the Tailscale QR", with the actual reason
-  // gone. Captured here and handed to printPairingQr to reprint after the
+  // failed (an expired lease, a broker error, ...). Captured here and handed to printPairingQr to reprint after the
   // clear, so the explanation survives.
   const provisioningLog: string[] = [];
   const log = (m: string) => {
@@ -1939,22 +1923,17 @@ async function connectRemote(
   let relay: ProvisionedRelay;
   try {
     relay = await provisionRelay({
-      configuredUrl: config.remote.brokerUrl,
       log,
-      // Only ever asked when there is no Pro lease AND Tailscale can't carry
-      // the relay either — the one situation with no automatic answer. Raced
-      // through askAnywhere so a paired phone can answer it too, and defaulted
-      // to "no" so an unattended run (autonomous mode, or nobody at either
-      // screen) proceeds straight to the actionable install guidance instead
-      // of hanging on a question nobody is there to read.
+      // Only ever asked when this machine has no usable Pro lease. Raced through askAnywhere so a paired phone can answer it
+      // too, and defaulted to "no" so an unattended run goes straight to the guidance instead of waiting on nobody.
       confirmLinkFlow: async () => {
         const answer = await askAnywhere(
           {
             id: `link_${runId}_${Date.now()}`,
             kind: "blocking",
             prompt:
-              "No relay is set up on this machine, and Tailscale is not running.\n" +
-              "Link this machine to YIMPIM Pro now and get a zero-config cloud tunnel?\n" +
+              "Remote control runs through YIMPIM Pro, and this machine is not linked yet.\n" +
+              "Link this machine to YIMPIM Pro now?\n" +
               "(you'll get a code to scan with your phone)",
             fallback: "n",
             askedAt: new Date().toISOString(),
@@ -1962,15 +1941,6 @@ async function connectRemote(
           `Link this machine to YIMPIM Pro now? ${YES_NO_ENTER_NO}: `
         );
         return answer.trim().toLowerCase().startsWith("y");
-      },
-      // The relay listens on loopback only. Tailscale publishes it, so nothing
-      // is bound to a public or even a LAN interface.
-      startLocalRelay: async () => {
-        const { createRelay } = await import("./remote/relay.js");
-        const server = createRelay();
-        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
-        const port = (server.address() as any).port as number;
-        return { server, port };
       },
     });
   } catch (err: any) {
@@ -1991,9 +1961,8 @@ async function connectRemote(
     brokerUrl: relay.url,
     allowAnswer: true,
     redactLogs: config.remote.redactLogs,
-    // Binds this session to the Pro account on the cloud broker. Never sent to
-    // a configured/Tailscale relay: a lease is a bearer credential.
-    leaseToken: relay.source === "cloud" ? getValidProToken() ?? undefined : undefined,
+    // Binds this session to the Pro account on the hosted broker.
+    leaseToken: getValidProToken() ?? undefined,
     // Without this, `this.uploads` (UploadCollector) is never constructed —
     // every "attach" chunk from the phone silently no-ops through
     // `this.uploads?.accept(p)`, `done` is always undefined, `onAttach` never
@@ -4195,18 +4164,6 @@ async function main(): Promise<void> {
   if (args.command === "setup") {
     const { runSetup } = await import("./setup.js");
     process.exitCode = await runSetup(true);
-    return;
-  }
-  if (args.command === "relay") {
-    const portArg = args.positionals.find((p) => /^\d+$/.test(p));
-    const port = portArg ? Number(portArg) : 8787;
-    const { createRelay } = await import("./remote/relay.js");
-    createRelay().listen(port, "0.0.0.0", () => {
-      console.log(`\nYIMPIM relay listening on port ${port}.`);
-      console.log(`It only ever sees encrypted data — it cannot read your code.`);
-      console.log(`\nPoint your machines at it with:`);
-      console.log(`  yimpim config set remote.brokerUrl https://<this-host>\n`);
-    });
     return;
   }
   if (args.command === "link") {
