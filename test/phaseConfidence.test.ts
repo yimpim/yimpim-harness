@@ -4,7 +4,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { confidenceSummary } from "../src/phaseConfidence.js";
+import { confidenceSummary, pipelineVerdict } from "../src/phaseConfidence.js";
 
 const src = (f: string) => fs.readFileSync(f, "utf8").replace(/\r\n/g, "\n");
 const row = (label: string, name: string, confidence?: string) => ({ label, name, confidence });
@@ -28,6 +28,25 @@ describe("the end-of-task summary", () => {
   });
   test("both kinds together give both lines", () => {
     assert.equal(confidenceSummary([row("1/2", "A", "static-only"), row("2/2", "B", "partial")]).length, 2);
+  });
+});
+
+describe("the success banner", () => {
+  test("says verified cleanly only when every phase that had a verdict was verified", () => {
+    assert.equal(pipelineVerdict([]), "Pipeline verified cleanly.");
+    assert.equal(pipelineVerdict([row("1/2", "A", "verified"), row("2/2", "Setup")]), "Pipeline verified cleanly.");
+  });
+  test("a static-only or partial phase changes it, so it never contradicts the warning under it", () => {
+    for (const c of ["static-only", "partial"]) {
+      const rows = [row("1/2", "A", "verified"), row("2/2", "B", c)];
+      assert.equal(pipelineVerdict(rows), "Pipeline finished (unverified phases remain).");
+      assert.ok(confidenceSummary(rows).length > 0, "the warning prints exactly when the banner changes");
+    }
+  });
+  test("index.ts prints that verdict, not a fixed sentence", () => {
+    const idx = src("src/index.ts");
+    assert.match(idx, /\[ALL PHASES SUCCEEDED\] \$\{pipelineVerdict\(phaseConfidences\)\}/);
+    assert.doesNotMatch(idx, /\[ALL PHASES SUCCEEDED\] Pipeline verified cleanly/);
   });
 });
 

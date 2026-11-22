@@ -12,6 +12,11 @@ export interface PhaseConfidence {
   confidence?: string;
 }
 
+/** The end of the success banner: "verified cleanly" only when no phase passed without being observed running, so it never sits above a [NOT RUN] warning. */
+export function pipelineVerdict(rows: PhaseConfidence[]): string {
+  return confidenceSummary(rows).length === 0 ? "Pipeline verified cleanly." : "Pipeline finished (unverified phases remain).";
+}
+
 /** Lines for the end-of-task summary; empty when every phase that had a verdict was verified. */
 export function confidenceSummary(rows: PhaseConfidence[]): string[] {
   const judged = rows.filter((r) => r.confidence);

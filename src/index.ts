@@ -58,7 +58,7 @@ import { ensureThreatModel, securityModels } from "./securityPlan.js";
 import { makeCommandReviewer } from "./commandReview.js";
 import { makePanel, pickJudges } from "./commandPanel.js";
 import { EditorSweep, healerFor } from "./editorSweep.js";
-import { confidenceSummary, type PhaseConfidence } from "./phaseConfidence.js";
+import { confidenceSummary, pipelineVerdict, type PhaseConfidence } from "./phaseConfidence.js";
 import { makePackageNotes } from "./conventionPackages.js";
 import { addDesignFollowUps } from "./designFollowUps.js";
 import { panelReviewerFor } from "./securityPanel.js";
@@ -7309,7 +7309,7 @@ The user wants you to decide, not ask: ${d.choice}`);
 
   console.log(`\n==================================================`);
   finish(true);
-  console.log(`✅ [ALL PHASES SUCCEEDED] Pipeline verified cleanly.`);
+  console.log(`✅ [ALL PHASES SUCCEEDED] ${pipelineVerdict(phaseConfidences)}`);
   for (const line of confidenceSummary(phaseConfidences)) console.log(line);
   {
     const t = events.usageDelta(currentTaskUsageStart).totals;
