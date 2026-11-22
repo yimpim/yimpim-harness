@@ -98,6 +98,8 @@ const taskTouchedFiles = new Set<string>();
 let taskProgress: PhaseProgress[] = [];
 // The roadmap unit the running task is, if it is one: marked done when the task passes.
 let activeUnitId: string | undefined;
+// How many verification runs the last phase took (1 = it passed first time, N = N-1 repair attempts). Set by runPhaseWithHealing; read for phase.end.
+let lastPhaseRuns = 1;
 // The folder a "program" request named as the app or code to rebuild from, if any.
 let programReferenceHint: string | null = null;
 // What the classifier decided about the roadmap, when the message was about it.
@@ -2551,7 +2553,7 @@ async function runSetupPhaseInPipeline(
   const phaseText = `${planned.goal}\n${(planned.changes ?? []).join("\n")}`;
   const editsAllowed = !manifestEditsForbidden(phaseText);
   const models = config.models.repair ?? config.models.editor;
-  const maxRuns = (config.limits?.maxRepairAttemptsPerPhase || 3) + 1;
+  const maxRuns = (config.limits?.maxRepairAttemptsPerPhase ?? 10) + 1;
 
   const canAsk = isInteractive() || Boolean(remote?.connected);
   const isEditableManifest = (file: string): boolean => {
@@ -3164,7 +3166,7 @@ ${instructions}`;
     return false;
   }
 
-  const maxRepairs = config.limits?.maxRepairAttemptsPerPhase || 3;
+  const maxRepairs = config.limits?.maxRepairAttemptsPerPhase ?? 10;
   let attempt = 0;
   // Cost visibility: printed after every attempt so a run that's spinning
   // through repairs is visible AS IT HAPPENS, not just in the final summary.
@@ -3181,7 +3183,7 @@ ${instructions}`;
   // itself: raising this further than that has no additional effect, since
   // the outer loop below is already bounded at maxRepairs attempts.
   let visualOnlyRepairs = 0;
-  const maxVisualOnlyRepairs = config.limits?.maxVisualOnlyRepairAttempts || 3;
+  const maxVisualOnlyRepairs = config.limits?.maxVisualOnlyRepairAttempts ?? 3;
   let stopReason: "no_progress" | "visual_cap" | "environmental" | "declined" | undefined;
   // The "these failures look unrelated to your change" question is asked once per phase.
   // Set when the failing tests were already red before this phase (see above).
@@ -3217,7 +3219,9 @@ ${instructions}`;
     });
   }
 
+  lastPhaseRuns = 1;
   while (attempt <= maxRepairs) {
+    lastPhaseRuns = attempt + 1;
     console.log(`\n[VERIFIER] 🛡️ Running verification for ${phaseName} (Attempt ${attempt + 1}/${maxRepairs + 1})...`);
 
     // Verify against the phase's own acceptance criteria, not the editor
@@ -3784,7 +3788,7 @@ installed toolchain) counts as environmental.`
         const triageCandidateFiles = Array.from(
           new Set([...(phase.allowedPaths ?? []), ...externalPaths, ...manifestCandidates])
         );
-        agentTools.beginPlannerInspection(triageCandidateFiles);
+        agentTools.beginPlannerInspection(triageCandidateFiles, plannerReadBudget(triageCandidateFiles.length));
         const triagePrompt = `A build/verification failure needs to be diagnosed — NOT fixed. You have read-only
 tools; there is no patch_file or write_file here. Do NOT call run_dependency_install or
 run_project_command either — they actually run things and would mutate the project mid-diagnosis; if the failure looks
@@ -3827,7 +3831,7 @@ Instructions:
         // compiler errors it bundles into that one entry's detail string).
         const repairPlannerMaxRounds = computeRepairPlannerMaxRounds(
           result.blockingFailures,
-          config.limits?.maxToolRounds || 40
+          config.limits?.maxToolRounds ?? 40
         );
 
         try {
@@ -7211,7 +7215,7 @@ The user wants you to decide, not ask: ${d.choice}`);
           phaseId: planned.id,
           name: planned.name,
           passed: false,
-          attempts: config.limits.maxRepairAttemptsPerPhase + 1,
+          attempts: lastPhaseRuns,
         });
         mergeManualSteps(memory, agentTools);
         saveCodebaseMemory(memoryFile, memory);
@@ -7242,7 +7246,7 @@ The user wants you to decide, not ask: ${d.choice}`);
         phaseId: planned.id,
         name: planned.name,
         passed: true,
-        attempts: 1,
+        attempts: lastPhaseRuns,
       });
 
       // Persist after every phase so a crash or Ctrl-C resumes in the right place.

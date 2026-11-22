@@ -144,7 +144,7 @@ export const ConfigSchema = z.object({
   limits: z
     .object({
       maxDiscoveryQuestions: z.number().default(4),
-      maxToolRounds: z.number().default(40),
+      maxToolRounds: z.number().int().min(1).default(40),
       // A real, well-diagnosed defect routinely needs more than 3 tries,
       // especially once a phase bundles several unrelated bugs — a phase
       // that aborts at attempt 4 over a genuine fix still in progress reads
@@ -154,7 +154,7 @@ export const ConfigSchema = z.object({
       // index.ts), gives a second model a real shot before the phase gives
       // up — without raising this, a model stuck on the same blind spot
       // would just get nudged the same way 10 times instead of 3.
-      maxRepairAttemptsPerPhase: z.number().default(10),
+      maxRepairAttemptsPerPhase: z.number().int().min(0).default(10),
       /** Separately trackable since vision is this pipeline's least reliable
        *  evidence tier — deliberately NOT raised alongside
        *  maxRepairAttemptsPerPhase above: a hallucinated "looks wrong" is a
@@ -162,7 +162,7 @@ export const ConfigSchema = z.object({
        *  attempts chasing one is exactly the failure mode this cap exists
        *  to prevent. Still can't exceed maxRepairAttemptsPerPhase in
        *  practice, since the overall repair loop is bounded by that too. */
-      maxVisualOnlyRepairAttempts: z.number().default(3),
+      maxVisualOnlyRepairAttempts: z.number().int().min(0).default(3),
       // No fixed cap is ever truly "enough" — some file will always be
       // bigger than whatever number is picked here (real files well past
       // this have shown up in practice). The actual fix is read_file's
@@ -171,8 +171,8 @@ export const ConfigSchema = z.object({
       // first chunk; this cap is just the per-call ceiling under that —
       // raised from 120k since 187k real files were landing well past the
       // old default on a single whole-file read.
-      maxFileBytes: z.number().default(60_000),
-      maxSearchResults: z.number().default(100),
+      maxFileBytes: z.number().int().min(1).default(60_000),
+      maxSearchResults: z.number().int().min(1).default(100),
       // The most distinct files one phase may modify; a write past it is refused. 0 (the default) = no limit: a phase that touches many files is a sign the plan was broad,
       // which is worth knowing, but refusing an edit half-way leaves the work half-done, and none of the safety rules depends on a count.
       maxFilesPerPhase: z.number().min(0).default(0),

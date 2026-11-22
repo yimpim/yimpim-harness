@@ -159,7 +159,7 @@ describe("the tool: offered to REPAIR for a failing test only, and nowhere else"
     const src = fs.readFileSync("src/index.ts", "utf8");
     assert.ok(src.includes("const progress = evaluateRepairProgress("));
     assert.ok(src.includes("const currentFailureSignature = failureSignature(result.blockingFailures);"));
-    assert.ok(src.includes("const maxRepairs = config.limits?.maxRepairAttemptsPerPhase || 3;"));
+    assert.ok(src.includes("const maxRepairs = config.limits?.maxRepairAttemptsPerPhase ?? 10;"));
     assert.ok(!/testTier/.test(fs.readFileSync("src/repairPolicy.ts", "utf8")));
   });
 

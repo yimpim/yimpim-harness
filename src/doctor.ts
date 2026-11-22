@@ -413,9 +413,10 @@ export async function runDoctor(
   lines.push("");
   lines.push(`  ${WARN} Set a spend limit on your OpenRouter key before running.`);
   lines.push(`    YIMPIM does not cap spend itself. https://openrouter.ai/settings/keys`);
-  if (config.limits.maxRepairAttemptsPerPhase > 5) {
-    lines.push(`  ${WARN} maxRepairAttemptsPerPhase=${config.limits.maxRepairAttemptsPerPhase} is high; 2-3 is usually enough`);
-    lines.push(`    lower it: yimpim config set limits.maxRepairAttemptsPerPhase 3`);
+  // 10 is the default (split between the primary and backup editor model), so only a value above it is worth a warning.
+  if (config.limits.maxRepairAttemptsPerPhase > 10) {
+    lines.push(`  ${WARN} maxRepairAttemptsPerPhase=${config.limits.maxRepairAttemptsPerPhase} is above the default of 10; each attempt is a full editor pass`);
+    lines.push(`    lower it: yimpim config set limits.maxRepairAttemptsPerPhase 10`);
   }
   lines.push("");
 

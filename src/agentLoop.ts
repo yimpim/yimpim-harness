@@ -507,11 +507,11 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
   // scaled by index.ts from how many blocking failures it's triaging.
   const maxRounds = options.maxRoundsOverride ??
     (agentName === "ADVISOR"
-      ? Math.min(config.limits?.maxToolRounds || 40, 16)
+      ? Math.min(config.limits?.maxToolRounds ?? 40, 16)
       : isPlanner
         ? // Room for every file it may read (a round can read several) plus the plan.
-          Math.min(config.limits?.maxToolRounds || 40, Math.max(12, agentTools.plannerInspectionBudgetLeft() + 4))
-        : config.limits?.maxToolRounds || 40);
+          Math.min(config.limits?.maxToolRounds ?? 40, Math.max(12, agentTools.plannerInspectionBudgetLeft() + 4))
+        : config.limits?.maxToolRounds ?? 40);
   const MAX_ADVISOR_INSPECTIONS = 12;
 
   // Wrapped from here (not reindented, to keep this diff reviewable — every
