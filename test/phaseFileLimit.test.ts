@@ -86,7 +86,7 @@ describe("the scope warning", () => {
     assert.equal(t.filesWrittenThisPhase().length, 3, "they are still recorded as written (the change set depends on that)");
   });
 
-  test("an ordinary test file outside the plan is NOT exempt: only the focus folder is", async () => {
+  test("an ordinary test file outside the plan is exempt too (see scopeExemptTests.test.ts); a spec document is not", async () => {
     const t = tools();
     t.beginPhase(["src/planned.ts"], undefined as any, "p");
     const w = await warnings(async () => {

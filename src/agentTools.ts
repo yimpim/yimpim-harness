@@ -6,7 +6,7 @@ import crypto from "crypto";
 import { execFile } from "child_process";
 import type { ReviewRequest, ReviewOutcome, ActionReview } from "./commandReview.js";
 import { cleanScratch, scratchTarget, SCRATCH_DIR } from "./scratch.js";
-import { isFocusPath } from "./focusTests.js";
+import { isFocusPath, isScopeExemptPath, EXEMPT_TEST_CEILING } from "./focusTests.js";
 import type { EditorSweep, SweepOutcome } from "./editorSweep.js";
 import { missingTool, missingToolMessage } from "./projectTools.js";
 import { lookAlikeOf } from "./packageNames.js";
@@ -1079,6 +1079,8 @@ export class AgentTools {
   private plannerInspectedRanges = new Map<string, Array<{ start?: number; end?: number }>>();
   private plannerMaxInspectedFiles = PLANNER_MAX_INSPECTED_FILES;
   private maxFilesPerPhase = 0; // 0 = no limit
+  /** Files written this phase that are the user's tests (isScopeExemptPath): in filesWritten too, but counted against their own ceiling, not maxFilesPerPhase. */
+  private exemptWritten = new Set<string>();
   private currentPhaseName?: string;
   private activeAgent = "EDITOR";
   /** Accumulates across the WHOLE run — never reset by beginPhase. */
@@ -1291,6 +1293,7 @@ export class AgentTools {
    */
   public beginPhase(plannedFiles: string[] = [], maxFiles?: number, phaseName?: string): void {
     this.filesWritten.clear();
+    this.exemptWritten.clear();
     this.referencesShown.clear();
     this.filesInspected.clear();
     this.dependencyInstallMemo.clear();
@@ -1645,9 +1648,20 @@ export class AgentTools {
     const key = relPath.replace(/\\/g, "/");
     if (this.filesWritten.has(key)) return;
 
-    if (this.maxFilesPerPhase > 0 && this.filesWritten.size >= this.maxFilesPerPhase) {
+    if (isScopeExemptPath(key)) {
+      // A user's test: its own ceiling, so reconciling stale assertions neither uses the phase's file slots nor runs without a bound.
+      if (this.exemptWritten.size >= EXEMPT_TEST_CEILING) {
+        throw new Error(
+          `[WRITE BUDGET] This phase has already modified ${this.exemptWritten.size} test files (limit ${EXEMPT_TEST_CEILING}) and "${relPath}" would be another. ` +
+            `Fix the tests that fail for the change made, not every test in the repository.`
+        );
+      }
+      return;
+    }
+    const mainUsed = this.filesWritten.size - this.exemptWritten.size;
+    if (this.maxFilesPerPhase > 0 && mainUsed >= this.maxFilesPerPhase) {
       throw new Error(
-        `[WRITE BUDGET] This phase has already modified ${this.filesWritten.size} files ` +
+        `[WRITE BUDGET] This phase has already modified ${mainUsed} files ` +
           `(limit ${this.maxFilesPerPhase}) and "${relPath}" would be another. ` +
           `If the reported problem is environmental (missing emulator, absent toolchain) it cannot be fixed by editing source — ` +
           `call conclude_task(status='CANNOT_LOCATE') instead. Otherwise the change is too broad for one phase.`
@@ -1664,6 +1678,10 @@ export class AgentTools {
     this.assertWriteBudget(relPath);
 
     this.filesWritten.add(key);
+    if (isScopeExemptPath(key)) {
+      this.exemptWritten.add(key); // a user's test: not warned about, not counted against the phase's file budget
+      return;
+    }
 
     if (this.plannedFiles.length > 0) {
       // The focused tests the harness has the Editor write for every change are never in a plan: they are not a stray edit, so they are not warned about.
@@ -1671,7 +1689,7 @@ export class AgentTools {
       if (!expected) {
         console.warn(
           `[SCOPE] ⚠️ "${relPath}" is outside this phase's planned files ` +
-            (this.maxFilesPerPhase > 0 ? `(${this.filesWritten.size}/${this.maxFilesPerPhase} used).` : `(${this.filesWritten.size} file(s) written this phase).`)
+            (this.maxFilesPerPhase > 0 ? `(${this.filesWritten.size - this.exemptWritten.size}/${this.maxFilesPerPhase} used).` : `(${this.filesWritten.size - this.exemptWritten.size} file(s) written this phase).`)
         );
       }
     }

@@ -45,6 +45,26 @@ export function isTestPath(rel: string): boolean {
   );
 }
 
+/**
+ * A user's test file the harness may rewrite without it counting against a phase's file budget or being warned about as out of plan (a repair reconciling stale assertions after an
+ * intentional change). Test directories and executable test file names, in any language. NOT exempt: the harness's own paths (reference/, .yimpim/), specification folders (spec/, specs/),
+ * and documents (*.md), which stay warned and counted. Separate from isTestPath, which other callers rely on (it treats specs/ as tests).
+ */
+export const EXEMPT_TEST_CEILING = 25;
+export function isScopeExemptPath(rel: string): boolean {
+  const p = posix(rel).replace(/^\.\//, "");
+  const segs = p.split("/");
+  if (segs.some((s) => /^(spec|specs|reference|\.yimpim)$/i.test(s))) return false;
+  if (/\.(md|mdx|markdown)$/i.test(p)) return false;
+  if (isFocusPath(p)) return true;
+  if (segs.slice(0, -1).some((s) => /^(__tests__|tests?|e2e)$/i.test(s))) return true;
+  const base = segs[segs.length - 1];
+  return (
+    /\.test\.[a-z0-9]+$/i.test(base) ||
+    (CODE_EXT.test(base) && (/\.spec\.[a-z0-9]+$/i.test(base) || /_test\.[a-z0-9]+$/i.test(base) || /^test_[^/]+\.[a-z0-9]+$/i.test(base)))
+  );
+}
+
 export function isFocusPath(rel: string): boolean {
   return new RegExp(`(^|/)${FOCUS_DIRNAME}/`).test(posix(rel));
 }
