@@ -60,8 +60,14 @@ describe("translateForRemote", () => {
         exchangeId: undefined,
         tokensUsed: undefined,
         costUsd: undefined,
+        elapsedMs: undefined,
       },
     });
+  });
+
+  test("agent.end carries how long the worker ran, for the phone's worker card", () => {
+    const out: any = translateForRemote({ type: "agent.end", agent: "EDITOR", rounds: 4, outcome: "completed", elapsedMs: 72000 }, undefined, taskId, "w-1");
+    assert.equal(out.payload.elapsedMs, 72000);
   });
 
   test("agent.end carries this worker's own tokensUsed/costUsd through when present", () => {

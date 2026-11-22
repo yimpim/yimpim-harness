@@ -347,7 +347,7 @@ export type RemoteEvent =
    *  which can diverge from the worker that actually ran (e.g. QA's own
    *  internal calls are labeled VERIFIER/verifier-nav/verifier-visual, not
    *  QA). Omitted (not zero) when genuinely unknown, same as task.end's. */
-  | { kind: "worker.end"; taskId: string; workerId: string; agent: string; outcome: string; exchangeId?: string; tokensUsed?: number; costUsd?: number }
+  | { kind: "worker.end"; taskId: string; workerId: string; agent: string; outcome: string; exchangeId?: string; tokensUsed?: number; costUsd?: number; elapsedMs?: number }
   /** One file write/patch, with the same line diff stat already shown in the console hint. `changeId` keys the full diff for `fetch_diff`. */
   | { kind: "file.changed"; taskId: string; workerId?: string; agent: string; path: string; action: "created" | "modified"; added: number; removed: number; changeId?: string; phaseId?: string }
   /** One QA evidence-ledger entry — YIMPIM's own per-requirement/per-check result, not a parsed test-runner report (YIMPIM has no JUnit-style named-test data). */

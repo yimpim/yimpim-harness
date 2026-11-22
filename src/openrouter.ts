@@ -1,4 +1,5 @@
 import { AgentConfig } from "./config.js";
+import { fallbackTag } from "./workerLedger.js";
 import { events, TokenUsage } from "./events.js";
 import { runControl, AbortedError } from "./remote/control.js";
 import { hasPinnedInput, writeRawAbove } from "./terminalInput.js";
@@ -431,7 +432,7 @@ export class OpenRouterClient {
     const modelList = orderByHealth(requested, this.modelHealth);
     if (modelList.length > 1 && modelList[0] !== requested[0]) {
       const mins = Math.ceil(((this.modelHealth.get(requested[0])?.cooldownUntil ?? 0) - Date.now()) / 60_000);
-      console.log(`[FALLBACK] ${requested[0]} failed a recent call — trying ${modelList[0]} first (it is tried first again in ~${Math.max(1, mins)}m).`);
+      console.log(`[${fallbackTag(options?.agent)}] ${requested[0]} failed a recent call — trying ${modelList[0]} first (it is tried first again in ~${Math.max(1, mins)}m).`);
     }
     let lastError: Error | null = null;
     // Insufficient-credits retries (see the 402 branch below) are uncounted
@@ -825,7 +826,7 @@ export class OpenRouterClient {
       }
 
       if (modelList.indexOf(model) < modelList.length - 1) {
-        console.log(`[FALLBACK] Switching from ${model}...`);
+        console.log(`[${fallbackTag(options?.agent)}] Switching from ${model}...`);
       }
     }
 

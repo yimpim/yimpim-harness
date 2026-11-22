@@ -50,6 +50,7 @@ import { fixTaskFor, isFixTask, savePendingFixes, loadPendingFixes, settlePendin
 import { directFixFor, setMustPass } from "./directFix.js";
 import { taskQuestionMode, isNewProject } from "./questionScope.js";
 import { parseCodeRefs, resolveOnDisk, type CodeRef } from "./codeContext.js";
+import { WorkerLedger, announces, workerLine, totalsLine, breakdownLines, phaseWorkersLine } from "./workerLedger.js";
 import { checkExistence, existencePlannerSection, renderExistence, JUDGE_SYSTEM, JUDGE_WHOLE_SYSTEM, JUDGE_COMBINE_SYSTEM } from "./existence.js";
 import { roadmapCompleteAnswer, cacheKey, readCache, writeCache, newTally, countCall, renderTally } from "./existenceSupport.js";
 import { type Intent, parseIntentReply, routeFacts } from "./routeIntent.js";
@@ -4533,6 +4534,10 @@ async function main(): Promise<void> {
   // running — every agent that touches it (Editor, Repair, QA, ...), not
   // the whole task's running total.
   let currentPhaseUsageStart: UsageReport = events.usageReport();
+  // The desktop's view of what each persona cost (time, tokens, money): a line when a worker finishes, a line per phase, a breakdown per task.
+  const workerLedger = new WorkerLedger();
+  let currentTaskStartedAt = Date.now();
+  let currentPhaseStartedAt = Date.now();
   /** The phase currently being measured, and the finished phases' totals for this task (see RemoteStatus.phaseUsage). */
   let currentPhaseUsageId: string | undefined;
   let phaseUsageLog: Record<string, PhaseUsageWire> = {};
@@ -4589,7 +4594,16 @@ async function main(): Promise<void> {
   // Lifetime usage ledger: every recorded model call, attributed to the task
   // and phase that were current at that moment (neither while idle, e.g. /ask).
   // Registered once, here, for the same reason as the onEmit listener below.
+  // The persona's own line when a worker finishes: how long, how many tokens, what it cost, and which model answered when it was not the first one configured.
+  events.onEmit((event) => {
+    if (event.type === "agent.start") workerLedger.start(event.agent, event.models ?? []);
+    else if (event.type === "agent.end") {
+      const run = workerLedger.end(event.agent, event.elapsedMs ?? 0, event.tokensUsed ?? 0, event.costUsd, currentPhaseUsageId);
+      if (announces(run)) console.log(workerLine(run));
+    }
+  });
   events.onUsage((agent, model, usage) => {
+    workerLedger.noteModel(model);
     const role = (QA_USAGE_SUBROLES.includes(agent) ? "QA" : agent).toUpperCase();
     const phase = taskRunning && currentPhaseForEvents
       ? { id: currentPhaseForEvents.id, name: currentPhaseForEvents.name, executor: currentPhaseForEvents.executor }
@@ -5229,6 +5243,8 @@ async function main(): Promise<void> {
     currentTaskId = `task-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     currentPhaseForEvents = undefined;
     currentTaskUsageStart = requestUsageStart ?? events.usageReport();
+    workerLedger.resetTask();
+    currentTaskStartedAt = Date.now();
     currentPhaseUsageStart = events.usageReport();
     currentPhaseUsageId = undefined;
     phaseUsageLog = {};
@@ -6096,6 +6112,8 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
     // task it runs — without this snapshot, this task's "done" summary would
     // silently fold in the previous task's spend too.
     currentTaskUsageStart = requestUsageStart ?? events.usageReport();
+    workerLedger.resetTask();
+    currentTaskStartedAt = Date.now();
     requestUsageStart = null;
     // Also reset here, not just at each phase's own start below: Discovery
     // and Planner both run BEFORE any phase begins, and their own agent.end
@@ -7134,6 +7152,7 @@ The user wants you to decide, not ask: ${d.choice}`);
       closePhaseUsage();
       currentPhaseUsageStart = events.usageReport();
       currentPhaseUsageId = planned.id;
+      currentPhaseStartedAt = Date.now();
       writeProgress();
       remote?.updateStatus({
         state: "running",
@@ -7236,7 +7255,10 @@ The user wants you to decide, not ask: ${d.choice}`);
         timestamp: new Date().toISOString(),
       });
 
-      console.log(`\n✅ [PHASE ${label} COMPLETE] ${planned.name}`);
+      const phaseTotals = events.usageDelta(currentPhaseUsageStart).totals;
+      console.log(`\n✅ [PHASE ${label} COMPLETE] ${planned.name} — ${totalsLine(Date.now() - currentPhaseStartedAt, phaseTotals.total, phaseTotals.costKnown ? phaseTotals.cost : undefined)}`);
+      const phaseRows = workerLedger.phaseRows(planned.id);
+      if (phaseRows.length > 0) console.log(`   ${phaseWorkersLine(phaseRows)}`);
     }
   }
 
@@ -7272,6 +7294,14 @@ The user wants you to decide, not ask: ${d.choice}`);
   console.log(`\n==================================================`);
   finish(true);
   console.log(`✅ [ALL PHASES SUCCEEDED] Pipeline verified cleanly.`);
+  {
+    const t = events.usageDelta(currentTaskUsageStart).totals;
+    const rows = workerLedger.taskRows();
+    if (rows.length > 0) {
+      console.log(`\n📊 [TASK TOTAL] ${totalsLine(Date.now() - currentTaskStartedAt, t.total, t.costKnown ? t.cost : undefined)}`);
+      console.log(breakdownLines(rows).join("\n"));
+    }
+  }
   console.log(`🧠 Repo map and live rules persisted for next run.`);
   console.log(`==================================================`);
   // A clean finish is the signal that whatever an earlier task's failure

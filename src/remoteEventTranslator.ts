@@ -153,6 +153,8 @@ export function translateForRemote(
           // verifier-nav/verifier-visual, not QA).
           tokensUsed: event.tokensUsed,
           costUsd: event.costUsd,
+          // How long the worker ran (additive: an older phone build ignores it).
+          elapsedMs: event.elapsedMs,
         },
       };
     }

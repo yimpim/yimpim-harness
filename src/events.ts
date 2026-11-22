@@ -77,6 +77,8 @@ export type YimpimEvent =
        */
       tokensUsed?: number;
       costUsd?: number;
+      /** How long this worker ran, from its agent.start to this agent.end. Set by EventBus.emit(), like the usage above. */
+      elapsedMs?: number;
     }
   | { type: "model.call"; agent: string; model: string; ok: boolean; elapsedMs: number; usage?: TokenUsage; error?: string }
   | { type: "tool.call"; agent: string; tool: string; target?: string }
@@ -152,6 +154,7 @@ class EventBus {
   // wide (never two agent.start without an intervening agent.end), so a
   // single scalar is enough; there is nothing to stack.
   private currentWorkerUsageStart: UsageReport | undefined;
+  private currentWorkerStartedAt: number | undefined;
 
   /**
    * Notified on every emit() regardless of `enabled` — unlike the gated
@@ -204,7 +207,12 @@ class EventBus {
     // here, once, rather than leaving every subscriber to reconstruct it.
     if (event.type === "agent.start") {
       this.currentWorkerUsageStart = this.usageReport();
-    } else if (event.type === "agent.end" && this.currentWorkerUsageStart) {
+      this.currentWorkerStartedAt = Date.now();
+    } else if (event.type === "agent.end" && this.currentWorkerStartedAt !== undefined) {
+      event.elapsedMs = Math.max(0, Date.now() - this.currentWorkerStartedAt);
+      this.currentWorkerStartedAt = undefined;
+    }
+    if (event.type === "agent.end" && this.currentWorkerUsageStart) {
       const delta = this.usageDelta(this.currentWorkerUsageStart).totals;
       event.tokensUsed = delta.total;
       if (delta.costKnown) event.costUsd = delta.cost;
