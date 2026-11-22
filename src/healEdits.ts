@@ -13,6 +13,7 @@ import { promisify } from "util";
 import { excerptAround, type Digest } from "./failureDigest.js";
 import { isTestPath } from "./focusTests.js";
 import { SAFE, numbered, readRange, unseenRanges } from "./codeContext.js";
+import { SENSITIVE_PATHSPECS } from "./sensitivePaths.js";
 
 const OUTLINE = /^\s*(?:describe|it|test|context|suite|beforeEach|beforeAll|afterEach|afterAll)\b.*[(`'"]|^\s*def test_|^\s*func Test|^\s*@Test|^\s*fun\s+[`\w]|^\s*(?:public |private )?(?:void|async def)\s+test/;
 
@@ -142,7 +143,7 @@ export async function searchRepo(repoRoot: string, pattern: string): Promise<str
   const p = String(pattern ?? "").trim().slice(0, 200);
   if (p.length < 2) return "(search text too short)";
   try {
-    const { stdout } = await execFileAsync("git", ["grep", "-n", "-I", "-F", "--max-count=4", "-e", p], { cwd: repoRoot, maxBuffer: 4 * 1024 * 1024 });
+    const { stdout } = await execFileAsync("git", ["grep", "-n", "-I", "-F", "--max-count=4", "-e", p, "--", ".", ...SENSITIVE_PATHSPECS], { cwd: repoRoot, maxBuffer: 4 * 1024 * 1024 });
     const rows = stdout.split(/\r?\n/).filter(Boolean).slice(0, 50).map((l) => l.slice(0, 220));
     return rows.length ? `--- search "${p}"\n${rows.join("\n")}` : `--- search "${p}"\n(no matches)`;
   } catch (e: any) {

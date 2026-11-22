@@ -21,6 +21,7 @@
  */
 
 import fs from "node:fs";
+import { lazyIgnore, NATIVE_TREES, DEFAULT_BLOCKED_DIRECTORIES } from "./projectPaths.js";
 import path from "node:path";
 
 export interface MemoryText {
@@ -40,7 +41,7 @@ export interface MemoryReconcileStats {
 
 const STALE_PREFIX_RE = /^\[STALE[^\]]*\]\s*/;
 const STALE_SUFFIX_RE = /\s*\(no longer on disk: [^)]*\)\s*$/;
-const DEFAULT_BLOCKED = [".git", "node_modules", ".venv", "venv", "__pycache__", ".agent", "dist", "build", ".gradle", ".idea"];
+const DEFAULT_BLOCKED = DEFAULT_BLOCKED_DIRECTORIES;
 const GENERATED_PREFIXES = ["dist/", "build/", "coverage/", ".expo/", "node_modules/", ".agent/", ".git/", "out/", "target/"];
 
 /** Repo-relative file or directory paths an entry names, de-duplicated. */
@@ -79,7 +80,8 @@ function existsInRepo(repoRoot: string, rel: string): boolean {
   return fs.existsSync(abs);
 }
 
-const INDEX_SKIP = new Set(["node_modules", ".git", ".agent", "dist", "build", ".expo", "coverage", "android", "ios", "Pods", ".gradle", "target"]);
+// The shared ignore list (projectPaths.ts) plus the native trees an Expo prebuild writes.
+const INDEX_SKIP = lazyIgnore(NATIVE_TREES);
 
 /** Every file under the repo (repo-relative, posix), for the "is this an abbreviated path?" check. */
 function listRepoPaths(repoRoot: string): string[] {

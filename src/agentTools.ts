@@ -38,6 +38,7 @@ import { diffStore } from "./diffStore.js";
 import { isJunkScreenName } from "./navGraph.js";
 import { sanitizeQaSetup, saveQaSetup } from "./qaSetup.js";
 import { isMustPass, lockedProblem, refusalFor } from "./directFix.js";
+import { compileBlockedPatterns, DEFAULT_BLOCKED_FILE_PATTERNS, isSensitiveName } from "./sensitivePaths.js";
 import { DEFAULT_MAX_ENTRIES, fingerprintOf, mergeComponentEntry } from "./repoMap.js";
 
 const execFileAsync = promisify(execFile);
@@ -58,7 +59,6 @@ const READABLE_AGENT_METADATA = new Set([
  * blockedFilePatterns' "*.env.*" glob is actually trying to stop. See
  * isSensitivePath's own comment for the real failure this was built from.
  */
-const SAFE_ENV_TEMPLATE_RE = /^\.?env\.(example|sample|template|dist|defaults?)$/i;
 
 export const TOOLS_SCHEMA = [
   {
@@ -1244,24 +1244,18 @@ export class AgentTools {
       askFn ??
       (async () => (await promptOnce("Your answer: ")).trim());
 
-    // Pull directly from the YAML config safety block
-    const rawPatterns = config.safety?.blockedFilePatterns || [
-      "*.keystore",
-      "*.jks",
-      "*.p12",
-      "*.pem",
-      "*.key",
-      ".env",
-      "*.env.*",
-    ];
+    // The user's list from the YAML safety block (the shared default when there is none), as case-insensitive RegExps.
+    this.blockedPatterns = compileBlockedPatterns(config.safety?.blockedFilePatterns || DEFAULT_BLOCKED_FILE_PATTERNS);
+  }
 
-    // Convert glob patterns to case-insensitive RegExp
-    this.blockedPatterns = rawPatterns.map((p) => {
-      const escaped = p
-        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-        .replace(/\*/g, ".*");
-      return new RegExp(`^${escaped}$`, "i");
-    });
+  /** A `path:line:text` row of grep output, kept unless its file is a secrets file or sits in a blocked folder. A row with no recognisable path is kept. */
+  private searchLineAllowed(row: string): boolean {
+    const m = /^(.*?):\d+:/.exec(row);
+    if (!m) return true;
+    const rel = m[1].replace(/\\/g, "/").replace(/^\.\//, "");
+    const blocked = this.config.safety?.blockedDirectories ?? [];
+    if (rel.split("/").some((seg) => blocked.includes(seg))) return false;
+    return !this.isSensitivePath(rel);
   }
 
   private isSensitivePath(filePath: string): boolean {
@@ -1278,8 +1272,7 @@ export class AgentTools {
     // (not gated on the default vs. a customized blockedFilePatterns list):
     // these specific suffixes are unambiguous by convention, never real
     // secrets, on any stack — this isn't specific to one project's config.
-    if (SAFE_ENV_TEMPLATE_RE.test(fileName)) return false;
-    return this.blockedPatterns.some((pattern) => pattern.test(fileName));
+    return isSensitiveName(fileName, this.blockedPatterns);
   }
 
   /**
@@ -1801,9 +1794,10 @@ export class AgentTools {
       } catch {}
     }
 
-    // Hard clamp to 15 words to prevent token bloat
+    // Hard clamp (memory.summaryWordLimit, 15 by default) to prevent token bloat
+    const wordLimit = this.config.memory?.summaryWordLimit ?? 15;
     const words = entry.summary.trim().split(/\s+/);
-    const prunedSummary = words.length > 15 ? words.slice(0, 15).join(" ") + "..." : entry.summary;
+    const prunedSummary = words.length > wordLimit ? words.slice(0, wordLimit).join(" ") + "..." : entry.summary;
 
     // Merged, not replaced: a re-registration must not wipe what an earlier task
     // confirmed about this file, and must not keep it either once the file has
@@ -2717,7 +2711,8 @@ export class AgentTools {
           timeout: 20000,
           maxBuffer: 8 * 1024 * 1024,
         });
-        const lines = stdout.split(/\r?\n/).filter(Boolean);
+        // A match inside a secrets file or a blocked folder is never shown: read_file refuses those files, so a search must not be the way around it.
+        const lines = stdout.split(/\r?\n/).filter(Boolean).filter((l) => this.searchLineAllowed(l));
         if (lines.length === 0) return "No matches found.";
         const shown = lines.slice(0, maxResults);
         const suffix =

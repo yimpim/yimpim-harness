@@ -8,6 +8,7 @@
  * is worth. "Built" means the code is present, not that it works: QA is still the check for behaviour.
  */
 import { collectFiles, type FileText } from "./securityAudit.js";
+import { TEST_OR_SPEC_DIR } from "./projectPaths.js";
 import type { BuiltUnit } from "./roadmap.js";
 import { parseCodeRefs, resolveRefs, mergeRefs, locateQuote, type CodeRef } from "./codeContext.js";
 
@@ -66,7 +67,7 @@ const norm = (s: string) => s.replace(/\s+/g, " ").trim();
 // requirement, never proof that this project has it. Matched by whole folder name: "preferences/" is not one.
 // The same, for a requirement that is ABOUT a test: test files are then the evidence, everything else stays out.
 const NOT_EVIDENCE_TESTS_OK = /(^|\/)(fixtures?|mocks?|examples?|samples?|docs?|node_modules|dist|build|references?|[\w-]+_reference|android-ui)\/|\.(stories|min)\.[a-z]+$/i;
-const NOT_EVIDENCE = /(^|\/)(__tests__|tests?|specs?|e2e|fixtures?|mocks?|examples?|samples?|docs?|node_modules|dist|build|references?|[\w-]+_reference|android-ui)\/|\.(test|spec|stories|min)\.[a-z]+$/i;
+const NOT_EVIDENCE = new RegExp(String.raw`(^|\/)(${TEST_OR_SPEC_DIR}|fixtures?|mocks?|examples?|samples?|docs?|node_modules|dist|build|references?|[\w-]+_reference|android-ui)\/|\.(test|spec|stories|min)\.[a-z]+$`, "i");
 
 // ---------------------------------------------------------------------------
 // 1. the requirements

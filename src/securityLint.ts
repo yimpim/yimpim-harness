@@ -7,6 +7,7 @@
  * Patterns come from vendor secret formats and the OWASP / CWE / MASVS / CIS material behind securityRules.ts.
  */
 import fs from "node:fs";
+import { TEST_OR_SPEC_DIR } from "./projectPaths.js";
 import path from "node:path";
 
 export interface SecSignal {
@@ -20,7 +21,7 @@ export interface SegmentLike {
   diff: string;
 }
 
-const SKIP_FILE = /(^|\/)(__tests__|tests?|spec|e2e|fixtures?|mocks?|__mocks__|examples?|samples?|docs?|node_modules|vendor|dist|build)\/|\.(test|spec|stories|min)\.[a-z]+$|\.(md|mdx|txt|lock|svg|png|jpe?g|gif|ico|pdf|woff2?|ttf|snap)$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|go\.sum)$/i;
+const SKIP_FILE = new RegExp(String.raw`(^|\/)(${TEST_OR_SPEC_DIR}|fixtures?|mocks?|__mocks__|examples?|samples?|docs?|node_modules|vendor|dist|build)\/|\.(test|spec|stories|min)\.[a-z]+$|\.(md|mdx|txt|lock|svg|png|jpe?g|gif|ico|pdf|woff2?|ttf|snap)$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|go\.sum)$`, "i");
 const ENV_FILE = /(^|\/)\.env(\.[a-z0-9_-]+)?$/i;
 const ENV_EXAMPLE = /\.(example|sample|template|dist)$/i;
 const SUPPRESS = /nosec|nosemgrep|noqa:\s*S\d|pragma:\s*allowlist\s*secret|eslint-disable(-next)?-line[^\n]*security|security-ignore|gitleaks:allow/i;

@@ -94,6 +94,5 @@ interaction:
 memory:
   maxEntries: 50
   summaryWordLimit: 15
-  stateFile: ".agent/repo_map.json"
 remote:
   brokerUrl: ""

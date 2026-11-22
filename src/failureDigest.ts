@@ -10,6 +10,7 @@
  */
 
 import fs from "fs";
+import { lazyIgnore } from "./projectPaths.js";
 import path from "path";
 
 const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
@@ -26,7 +27,7 @@ const PY_FRAME = /File "([^"]+)", line (\d+)/;
 const NOISE = /(^|[\\/])(node_modules|site-packages|dist-packages|\.gradle|\.pub-cache|\.git)([\\/]|$)|^node:|^internal[\\/]|[\\/]usr[\\/](lib|local)[\\/]|<anonymous>/;
 /** Generated output INSIDE the project: judged on the path within the repository, since a CI machine may well build under /build/. */
 const GENERATED = /(^|\/)(dist|build|vendor|\.expo|\.next|target)\//;
-const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".expo", ".next", "target", "Pods", "venv", ".venv", "__pycache__", ".gradle", "coverage"]);
+const SKIP_DIRS = lazyIgnore();
 
 const posix = (p: string) => p.replace(/\\/g, "/");
 

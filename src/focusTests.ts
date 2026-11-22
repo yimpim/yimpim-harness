@@ -16,6 +16,8 @@
  */
 
 import fsSync from "fs";
+import { lazyIgnore, NATIVE_TREES, inTestOrSpecDir, TEST_DIR, SPEC_DIR_NAMES } from "./projectPaths.js";
+
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -24,10 +26,8 @@ const execFileAsync = promisify(execFile);
 
 export const FOCUS_DIRNAME = "_focus";
 
-const SKIP_DIRS = new Set([
-  "node_modules", ".git", ".agent", "dist", "build", ".expo", "android", "ios", "Pods", ".gradle",
-  "coverage", ".next", "venv", ".venv", "__pycache__", "target", ".idea", ".dart_tool",
-]);
+// The shared ignore list (projectPaths.ts) plus the native trees an Expo prebuild writes.
+const SKIP_DIRS = lazyIgnore(NATIVE_TREES);
 const CODE_EXT = /\.(tsx?|jsx?|mjs|cjs|py|kt|java|go|rs|swift|dart|cs|rb|php|vue|svelte)$/i;
 
 const posix = (p: string) => p.replace(/\\/g, "/");
@@ -38,7 +38,7 @@ const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
 export function isTestPath(rel: string): boolean {
   const p = posix(rel);
   return (
-    /(^|\/)(__tests__|tests?|specs?)\//i.test(p) ||
+    inTestOrSpecDir(p) ||
     /\.(test|spec)\.[a-z0-9]+$/i.test(p) ||
     /(^|\/)test_[^/]+\.py$/i.test(p) ||
     /_test\.(py|go)$/i.test(p)
@@ -51,13 +51,16 @@ export function isTestPath(rel: string): boolean {
  * and documents (*.md), which stay warned and counted. Separate from isTestPath, which other callers rely on (it treats specs/ as tests).
  */
 export const EXEMPT_TEST_CEILING = 25;
+/** A folder name that holds the user's tests (exempt), and the names that stay protected: specification folders and the harness's own places. */
+const TEST_SEGMENT = new RegExp("^(" + TEST_DIR + ")$", "i");
+const PROTECTED_SEGMENT = new RegExp("^(" + [...SPEC_DIR_NAMES, "reference", "\\.yimpim"].join("|") + ")$", "i");
 export function isScopeExemptPath(rel: string): boolean {
   const p = posix(rel).replace(/^\.\//, "");
   const segs = p.split("/");
-  if (segs.some((s) => /^(spec|specs|reference|\.yimpim)$/i.test(s))) return false;
+  if (segs.some((s) => PROTECTED_SEGMENT.test(s))) return false;
   if (/\.(md|mdx|markdown)$/i.test(p)) return false;
   if (isFocusPath(p)) return true;
-  if (segs.slice(0, -1).some((s) => /^(__tests__|tests?|e2e)$/i.test(s))) return true;
+  if (segs.slice(0, -1).some((s) => TEST_SEGMENT.test(s))) return true;
   const base = segs[segs.length - 1];
   return (
     /\.test\.[a-z0-9]+$/i.test(base) ||

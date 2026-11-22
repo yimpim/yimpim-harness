@@ -4,6 +4,7 @@
  * code, written into the plan, and never wait for anyone. A person who set `planning.questions: all` asked to be asked everything, and still is.
  */
 import fs from "fs";
+import { TEST_OR_SPEC_DIR } from "./projectPaths.js";
 import path from "path";
 import { execFileSync } from "child_process";
 import type { QuestionMode } from "./planner.js";
@@ -15,7 +16,7 @@ const STARTER_MAX_SOURCE_FILES = 80;
 const STARTER_MAX_COMMITS = 3;
 
 const SOURCE = /\.(tsx?|jsx?|mjs|cjs|py|kt|java|swift|go|rs|rb|php|cs|vue|svelte|dart|c|cc|cpp|h)$/i;
-const NOT_THE_PROJECT = /(^|\/)(node_modules|dist|build|\.agent|\.git|reference|references|__tests__|tests?|docs?)\//i;
+const NOT_THE_PROJECT = new RegExp(String.raw`(^|\/)(node_modules|dist|build|\.agent|\.git|reference|references|${TEST_OR_SPEC_DIR}|docs?)\/`, "i");
 
 /** How many source files the project has: git's list when it is a repository, else a bounded walk. Tests, docs, reference material and dependencies do not count. */
 export function sourceFileCount(repoRoot: string): number {

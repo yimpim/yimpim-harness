@@ -5,11 +5,13 @@
  */
 
 import fs from "fs";
+import { lazyIgnore, NATIVE_TREES } from "./projectPaths.js";
 import path from "path";
 import { runSuite } from "./testRun.js";
 
 const posix = (p: string) => p.replace(/\\/g, "/");
-const SKIP = new Set(["node_modules", ".git", ".agent", "dist", "build", ".expo", "coverage", ".next", "android", "ios", "Pods", ".gradle"]);
+// The shared ignore list (projectPaths.ts) plus the native trees an Expo prebuild writes, which settling a JS/TS test does not need.
+const SKIP = lazyIgnore(NATIVE_TREES);
 const TEXT = /\.(?:[cm]?[jt]sx?|json|md|ya?ml|toml|cfg|ini|txt)$/i;
 
 export interface Removal {

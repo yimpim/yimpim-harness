@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
 import { z } from "zod";
+import { DEFAULT_BLOCKED_FILE_PATTERNS } from "./sensitivePaths.js";
+import { DEFAULT_BLOCKED_DIRECTORIES, setBlockedDirectories } from "./projectPaths.js";
 
 /**
  * Every section has defaults so the harness runs against an arbitrary repo with
@@ -208,10 +210,10 @@ export const ConfigSchema = z.object({
       allowedPaths: z.array(z.string()).default([]),
       blockedDirectories: z
         .array(z.string())
-        .default([".git", "node_modules", ".venv", "venv", "__pycache__", ".agent", "dist", "build", ".gradle", ".idea"]),
+        .default(DEFAULT_BLOCKED_DIRECTORIES),
       blockedFilePatterns: z
         .array(z.string())
-        .default(["*.keystore", "*.jks", "*.p12", "*.pem", "*.key", "*.pfx", ".env", "*.env.*", "id_rsa", "id_ed25519"]),
+        .default(DEFAULT_BLOCKED_FILE_PATTERNS),
     })
     .prefault({}),
   recovery: z
@@ -281,8 +283,8 @@ export const ConfigSchema = z.object({
       maxPromptEntries: z.number().int().min(10).max(200).default(50),
       // How many screens the navigation map remembers (.agent/nav_map.json), oldest evicted first.
       maxNavEntries: z.number().int().min(10).max(5000).default(200),
-      summaryWordLimit: z.number().default(15),
-      stateFile: z.string().default(".agent/repo_map.json"),
+      // The longest summary a repo-map entry keeps, in words (longer is cut with "..."); every agent's prompt pays for these.
+      summaryWordLimit: z.number().int().min(3).max(100).default(15),
     })
     .prefault({}),
   provider: z
@@ -355,10 +357,13 @@ export function loadConfig(targetRepoRoot?: string, customConfigPath?: string): 
       );
     }
     console.log(`[CONFIG] Loaded ${p}`);
+    // What every file walker skips follows the user's blocked directories (projectPaths.ts).
+    setBlockedDirectories(parsed.data.safety.blockedDirectories);
     return parsed.data;
   }
 
   // No config anywhere: run on defaults rather than refusing to start.
   console.log(`[CONFIG] No agent.config.yaml found; using built-in defaults.`);
+  setBlockedDirectories(undefined);
   return ConfigSchema.parse({});
 }

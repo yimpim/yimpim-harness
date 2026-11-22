@@ -4,6 +4,7 @@ import path from "path";
 import process from "process";
 import { promisify } from "util";
 import { AgentConfig } from "./config.js";
+import { SENSITIVE_PATHSPECS } from "./sensitivePaths.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -123,7 +124,7 @@ export function createRepoTools(repoRoot: string, config: AgentConfig): RepoTool
 
     async searchCode(pattern: string): Promise<string> {
       try {
-        const { stdout } = await execFileAsync("git", ["grep", "-E", "-n", "-i", pattern], {
+        const { stdout } = await execFileAsync("git", ["grep", "-E", "-n", "-i", pattern, "--", ".", ...SENSITIVE_PATHSPECS], {
           cwd: root,
           maxBuffer: 5 * 1024 * 1024,
         });

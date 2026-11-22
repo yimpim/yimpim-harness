@@ -12,6 +12,7 @@
  * Nothing that looks like a credential is ever written to the report or sent to a model.
  */
 import { SECURITY_NOTICE_SHORT, SECURITY_NOTICE_FULL } from "./disclaimer.js";
+import { lazyIgnore } from "./projectPaths.js";
 import fs from "node:fs";
 import path from "node:path";
 import { execFile, spawn } from "node:child_process";
@@ -28,7 +29,8 @@ const execFileAsync = promisify(execFile);
 export type Ask = (system: string, user: string) => Promise<string>;
 export type Call = (messages: { role: "system" | "user"; content: string }[], label: string, json: boolean) => Promise<string>;
 
-const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "Pods", ".gradle", "venv", ".venv", "__pycache__", ".agent", "vendor", "target", ".dart_tool", "coverage", ".expo", ".turbo", "security"]);
+// The shared ignore list (projectPaths.ts) plus the folder the audit writes its own report into.
+const SKIP_DIRS = lazyIgnore(["security"]);
 const TEXT = /\.(js|jsx|ts|tsx|mjs|cjs|vue|svelte|py|rb|php|java|kt|kts|swift|m|mm|go|rs|cs|dart|scala|sh|bash|ps1|html?|erb|ejs|hbs|twig|xml|plist|gradle|ya?ml|json|toml|tf|tfvars|bicep|sql|rules|conf|ini|env|properties|cfg|dockerfile)$/i;
 const NAMED = /(^|\/)(Dockerfile[^/]*|Jenkinsfile|Procfile|Caddyfile|\.env(\.[a-z0-9_-]+)?|\.npmrc|\.pypirc)$/i;
 

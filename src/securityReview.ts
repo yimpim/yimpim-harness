@@ -9,12 +9,15 @@
  * does the searching. It runs only for changes that touch risky code, so ordinary changes cost nothing.
  */
 import fs from "node:fs";
+import { TEST_OR_SPEC_DIR } from "./projectPaths.js";
+import { lazyIgnore } from "./projectPaths.js";
 import path from "node:path";
 import type { ChangeSet } from "./staticQa.js";
 import { splitDiffByFile } from "./staticQa.js";
 import type { TaskSecurity } from "./securityPlan.js";
 import { securityForPrompt } from "./securityPlan.js";
 import { redactSecrets } from "./securityLint.js";
+import { isSensitiveName } from "./sensitivePaths.js";
 import { SECURITY_NOTICE_SHORT } from "./disclaimer.js";
 
 export type Ask = (system: string, user: string) => Promise<string>;
@@ -27,7 +30,7 @@ const AUDIT_EVIDENCE_CHARS = 52000;
 
 export type Risk = "high" | "medium" | "low";
 
-const NOT_CODE = /(^|\/)(__tests__|tests?|spec|e2e|fixtures?|mocks?|examples?|samples?|docs?|node_modules|vendor|dist|build)\/|\.(test|spec|stories|min)\.[a-z]+$|\.(md|mdx|txt|lock|svg|png|jpe?g|gif|ico|pdf|woff2?|ttf|snap|json)$/i;
+const NOT_CODE = new RegExp(String.raw`(^|\/)(${TEST_OR_SPEC_DIR}|fixtures?|mocks?|examples?|samples?|docs?|node_modules|vendor|dist|build)\/|\.(test|spec|stories|min)\.[a-z]+$|\.(md|mdx|txt|lock|svg|png|jpe?g|gif|ico|pdf|woff2?|ttf|snap|json)$`, "i");
 const HIGH_PATH = /(auth|login|logout|signin|signup|session|token|jwt|oauth|password|passwd|credential|crypto|encrypt|decrypt|secret|payment|billing|checkout|stripe|paypal|webhook|invoice|refund|upload|admin|permission|role|acl|rbac|policy|policies|rls|middleware|guard|iam|sudo|exec|shell|sandbox|deserial|sanitize|validate|cors|firewall|ingress|security|manifest|dockerfile|\.tf$|\.rules$|nginx|sshd)/i;
 const HIGH_CONTENT = /\b(jwt|bearer|password|passwd|hash(ed)?|bcrypt|argon|crypto\.|createCipher|encrypt|decrypt|secret|api[_-]?key|authorization|isAdmin|permission|sessions?\.|cookie|csrf|cors|child_process|subprocess|innerHTML|dangerouslySetInnerHTML|webhook|stripe|payment|refund|service_role|createClient|signed[_-]?url|presign|chmod|iptables)\b|\b(exec|eval|raw)\s*\(|\b(role)\s*[=:]|\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+[\w*`'"]|0\.0\.0\.0\/0/i;
 const MEDIUM_PATH = /(route|router|controller|handler|api|endpoint|service|repository|model|schema|migration|query|resolver|action|function|lambda|worker|job|queue|store|db|database|server)/i;
@@ -41,7 +44,7 @@ export function classifyFile(file: string, added: string): Risk {
 }
 
 const SRC = /\.(js|jsx|ts|tsx|mjs|cjs|vue|svelte|py|rb|php|java|kt|swift|m|go|rs|cs|dart|sh|ya?ml|tf|sql)$/i;
-const WALK_SKIP = new Set(["node_modules", ".git", "dist", "build", ".next", "Pods", ".gradle", "venv", ".venv", "__pycache__", ".agent", "vendor", "target", ".dart_tool"]);
+const WALK_SKIP = lazyIgnore();
 
 function sourceFiles(root: string, limit = 3000): string[] {
   const out: string[] = [];
@@ -229,7 +232,7 @@ export interface ReviewOptions {
 
 export async function securityReview(o: ReviewOptions): Promise<SecurityReviewResult | null> {
   if (o.change.isEmpty) return null;
-  const segs = splitDiffByFile(o.change.diff).filter((s) => s.file && !NOT_CODE.test(s.file));
+  const segs = splitDiffByFile(o.change.diff).filter((s) => s.file && !NOT_CODE.test(s.file) && !isSensitiveName(s.file));
   if (segs.length === 0) return null;
   const added = (d: string) => d.split(/\r?\n/).filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1)).join("\n");
   const ranked = segs

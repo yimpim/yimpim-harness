@@ -4,6 +4,7 @@ import { events, TokenUsage } from "./events.js";
 import { runControl, AbortedError } from "./remote/control.js";
 import { hasPinnedInput, writeRawAbove } from "./terminalInput.js";
 import { trackCall } from "./liveCalls.js";
+import { redactMessages } from "./redact.js";
 import { tuneRequest, isReasoningRejected, isPriceCapMiss } from "./requestTuning.js";
 
 export interface FunctionTool {
@@ -428,6 +429,8 @@ export class OpenRouterClient {
     messages: ChatMessage[],
     options?: CompleteOptions
   ): Promise<any> {
+    // Credential-shaped values never leave this machine (redact.ts); a [REDACT] line says so when one is replaced.
+    messages = redactMessages(messages);
     const requested = Array.isArray(models) ? models : [models];
     const modelList = orderByHealth(requested, this.modelHealth);
     if (modelList.length > 1 && modelList[0] !== requested[0]) {

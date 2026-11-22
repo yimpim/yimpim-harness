@@ -5,9 +5,10 @@
  */
 import fs from "fs";
 import path from "path";
+import { isSensitiveName } from "./sensitivePaths.js";
 
-/** A repo-relative path a model may be shown: inside the project, and not git, agent or dependency folders. */
-export const SAFE = (rel: string) => !rel.startsWith("..") && !path.isAbsolute(rel) && !/(^|\/)(\.git|\.agent|\.yimpim|node_modules)(\/|$)/.test(rel);
+/** A repo-relative path a model may be shown: inside the project, not git, agent or dependency folders, and not a secrets file (.env, keys, service-account JSON). */
+export const SAFE = (rel: string) => !rel.startsWith("..") && !path.isAbsolute(rel) && !/(^|\/)(\.git|\.agent|\.yimpim|node_modules)(\/|$)/.test(rel) && !isSensitiveName(rel);
 
 /** Lines from..to, each as `12| code` (the number is not part of the code). */
 export const numbered = (lines: string[], from: number, to: number): string => {
@@ -83,7 +84,7 @@ export function parseCodeRefs(text: string): CodeRef[] {
   const out: CodeRef[] = [];
   for (const m of text.matchAll(CITE)) {
     const file = posix(m[1]);
-    if (!file || path.isAbsolute(file) || file.split("/").some((s) => s === ".." || s === "node_modules" || s === ".git" || s === ".agent" || s === ".yimpim") || /^\d+(\.\d+)+$/.test(file)) continue;
+    if (!file || path.isAbsolute(file) || file.split("/").some((s) => s === ".." || s === "node_modules" || s === ".git" || s === ".agent" || s === ".yimpim") || isSensitiveName(file) || /^\d+(\.\d+)+$/.test(file)) continue;
     const a = Number(m[2] ?? m[4] ?? m[6]);
     const bRaw = m[3] ?? m[5] ?? m[7];
     if (!Number.isFinite(a) || a < 1) {

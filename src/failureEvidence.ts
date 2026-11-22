@@ -11,6 +11,7 @@
  */
 
 import fs from "fs";
+import { SENSITIVE_PATHSPECS } from "./sensitivePaths.js";
 import path from "path";
 import { execFileSync } from "child_process";
 import type { Cluster, Digest } from "./failureDigest.js";
@@ -52,7 +53,7 @@ export function symbolFromMessage(message: string): string | undefined {
 /** Where a name is exported or defined in the project's own code (not in tests): up to three `file:line`. */
 export function whereDefined(repoRoot: string, name: string): { file: string; line: number }[] {
   const re = `(export\\s+(default\\s+)?(async\\s+)?(function\\*?|const|let|var|class|type|interface)\\s+${name}\\b|export\\s*\\{[^}]*\\b${name}\\b|^\\s*def\\s+${name}\\s*\\(|^func\\s+${name}\\s*\\()`;
-  const out = git(repoRoot, ["grep", "-nIE", re, "--", ":(exclude)node_modules", ":(exclude)dist", ":(exclude)build"]);
+  const out = git(repoRoot, ["grep", "-nIE", re, "--", ":(exclude)node_modules", ...SENSITIVE_PATHSPECS, ":(exclude)dist", ":(exclude)build"]);
   const found: { file: string; line: number }[] = [];
   for (const row of out.split(/\r?\n/)) {
     const m = /^([^:]+):(\d+):/.exec(row);
@@ -136,7 +137,7 @@ const snippet = (s: string) => s.replace(/\s+/g, " ").slice(0, 40).trim();
 function whenTextAppeared(repoRoot: string, text: string, notInTests = true): { hash: string; date: string; subject: string; file?: string } | undefined {
   const s = snippet(text);
   if (s.length < 4) return undefined;
-  const log = git(repoRoot, ["log", `-S${s}`, "--format=%h%x09%ad%x09%s", "--date=short", "--reverse", "--", ".", ":(exclude)node_modules", ...(notInTests ? [":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ...SCRATCH] : [])]).split(/\r?\n/).find(Boolean);
+  const log = git(repoRoot, ["log", `-S${s}`, "--format=%h%x09%ad%x09%s", "--date=short", "--reverse", "--", ".", ":(exclude)node_modules", ...SENSITIVE_PATHSPECS, ...(notInTests ? [":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ...SCRATCH] : [])]).split(/\r?\n/).find(Boolean);
   if (!log) return undefined;
   const [hash, date, ...rest] = log.split("\t");
   return { hash, date, subject: rest.join("\t") };
@@ -170,19 +171,19 @@ function textTheTestLooksFor(repoRoot: string, cluster: Cluster): string[] {
   for (const text of textsOnLine(line)) {
     const probe = snippet(text);
     // The app's own code, and separately the written spec: a text only the spec has is a text the CODE is missing.
-    const inCode = git(repoRoot, ["grep", "-nIF", probe, "--", ":(exclude)node_modules", ":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ...SCRATCH, ":(exclude)docs", ":(exclude)*.md"]).split(/\r?\n/).find(Boolean);
+    const inCode = git(repoRoot, ["grep", "-nIF", probe, "--", ":(exclude)node_modules", ...SENSITIVE_PATHSPECS, ":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ...SCRATCH, ":(exclude)docs", ":(exclude)*.md"]).split(/\r?\n/).find(Boolean);
     if (inCode) {
       out.push(`The test looks for "${probe}", which the app still has at ${inCode.split(":").slice(0, 2).join(":")}.`);
       continue;
     }
-    const inSpec = git(repoRoot, ["grep", "-nIF", probe, "--", "docs", "*.md", ":(exclude)node_modules"]).split(/\r?\n/).find(Boolean);
+    const inSpec = git(repoRoot, ["grep", "-nIF", probe, "--", "docs", "*.md", ":(exclude)node_modules", ...SENSITIVE_PATHSPECS]).split(/\r?\n/).find(Boolean);
     if (inSpec) {
       out.push(
         `The test looks for "${probe}". The app's own code does not contain it, but the written spec does (${inSpec.split(":").slice(0, 2).join(":")}): the CODE may be missing what the spec requires, so do not change the test to match.`
       );
       continue;
     }
-    const last = git(repoRoot, ["log", `-S${probe}`, "--format=%h%x09%ad%x09%s", "--date=short", "-n", "1", "--", ".", ":(exclude)node_modules", ":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ...SCRATCH]).split(/\r?\n/).find(Boolean);
+    const last = git(repoRoot, ["log", `-S${probe}`, "--format=%h%x09%ad%x09%s", "--date=short", "-n", "1", "--", ".", ":(exclude)node_modules", ...SENSITIVE_PATHSPECS, ":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ...SCRATCH]).split(/\r?\n/).find(Boolean);
     const [hash, date, ...subject] = (last ?? "").split("\t");
     out.push(`The test looks for "${probe}" and nothing in the app's own code contains it any more${hash ? ` (last changed in ${hash} on ${date}: "${subject.join(" ").slice(0, 90)}")` : ""}.`);
   }
@@ -223,7 +224,7 @@ export function evidenceFor(repoRoot: string, testFile: string, cluster: Cluster
   const er = expectedAndReceived(cluster.detail ?? cluster.message);
   if (er) {
     const appeared = whenTextAppeared(repoRoot, er.received);
-    const expectedStill = git(repoRoot, ["grep", "-nIF", snippet(er.expected), "--", ":(exclude)node_modules", ":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ...SCRATCH]).split(/\r?\n/).find(Boolean);
+    const expectedStill = git(repoRoot, ["grep", "-nIF", snippet(er.expected), "--", ":(exclude)node_modules", ...SENSITIVE_PATHSPECS, ":(exclude)*test*", ":(exclude)__tests__", ":(exclude)reference", ...SCRATCH]).split(/\r?\n/).find(Boolean);
     lines.push(`The test expects "${snippet(er.expected)}" and the app gives "${snippet(er.received)}".`);
     if (appeared) lines.push(`The app's "${snippet(er.received)}" first appeared in ${appeared.hash} on ${appeared.date}: "${appeared.subject.slice(0, 90)}".`);
     lines.push(expectedStill ? `The app still has "${snippet(er.expected)}" at ${expectedStill.split(":").slice(0, 2).join(":")}.` : `Nothing in the app's own code contains "${snippet(er.expected)}" any more: the app changed away from what the test expects.`);

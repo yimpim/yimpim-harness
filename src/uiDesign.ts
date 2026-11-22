@@ -11,6 +11,7 @@
  * A model chooses what judgement should choose; code checks what can be measured. Nothing is installed.
  */
 import fs from "node:fs";
+import { lazyIgnore, NATIVE_TREES } from "./projectPaths.js";
 import path from "node:path";
 import { buildPalette, parsePaletteChoice, tokensCss, ROLE_KEYS, type PaletteSystem } from "./palette.js";
 import { normalizeColor } from "./svgSafety.js";
@@ -26,6 +27,8 @@ export type Call = (models: string[], messages: { role: "system" | "user" | "ass
 
 import { DESIGN_DIR, THEME_FILE, findBrandKit, writeUiTheme, type BrandFacts } from "./identity.js";
 export { DESIGN_DIR, findBrandKit, type BrandFacts };
+// The shared ignore list (projectPaths.ts) plus the native trees an Expo prebuild writes.
+const UI_SKIP = lazyIgnore(NATIVE_TREES);
 
 // ---------------------------------------------------------------------------
 // what the project already is
@@ -72,7 +75,7 @@ export function detectUiStack(repoRoot: string): UiStack {
       return;
     }
     for (const e of entries) {
-      if (e.name.startsWith(".") || ["node_modules", "dist", "build", "android", "ios", DESIGN_DIR].includes(e.name)) continue;
+      if (e.name.startsWith(".") || e.name === DESIGN_DIR || UI_SKIP.has(e.name)) continue;
       const full = path.join(dir, e.name);
       if (e.isDirectory()) walk(full, depth + 1);
       else if (/^(theme|tokens|colors|colours|palette|tailwind\.config|design-tokens)\.(ts|tsx|js|cjs|mjs|json|css)$/i.test(e.name)) themeFiles.push(path.relative(repoRoot, full).replace(/\\/g, "/"));

@@ -5,6 +5,7 @@
  * Native, Android and iOS rules, and a Go service in Kubernetes to Go, container and cluster rules.
  */
 import fs from "node:fs";
+import { lazyIgnore } from "./projectPaths.js";
 import path from "node:path";
 import { LANG_PACKS, UNIVERSAL, type Pack, type SecRule } from "./securityRules.js";
 import { PLATFORM_PACKS } from "./securityVendors.js";
@@ -67,7 +68,8 @@ const FILES: [string, RegExp][] = [
   ["web", /(^|\/)(index\.html|[^/]+\.html|vite\.config\.[jt]s|next\.config\.[a-z]+|webpack\.config\.[a-z]+)$/],
 ];
 
-const SKIP = new Set(["node_modules", ".git", "dist", "build", ".next", "Pods", ".gradle", "venv", ".venv", "__pycache__", ".agent", "vendor", "target", "bin", "obj", ".dart_tool"]);
+// The shared ignore list (projectPaths.ts) plus the .NET build folders.
+const SKIP = lazyIgnore(["bin", "obj"]);
 
 /** Manifest dependency names of every flavour, lower-cased. */
 function readDependencies(file: string, text: string): string[] {
