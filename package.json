@@ -18,6 +18,7 @@
     "prepare": "npm run build"
   },
   "dependencies": {
+    "@clack/prompts": "1.9.0",
     "@supabase/supabase-js": "^2.49.1",
     "openai": "^6.0.0",
     "opentype.js": "2.0.0",

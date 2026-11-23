@@ -44,7 +44,9 @@ export function writeGlobalConfig(data: Record<string, any>): string {
     "   yimpim config set <key> <value>",
   ].join("\n");
 
-  fs.writeFileSync(file, doc.toString({ lineWidth: 0 }), "utf-8");
+  // Owner-only: it holds no secret (the key lives in the OS credential store), but it is personal settings all the same.
+  fs.writeFileSync(file, doc.toString({ lineWidth: 0 }), { encoding: "utf-8", mode: 0o600 });
+  try { fs.chmodSync(file, 0o600); } catch { /* Windows: permissions come from the user profile folder */ }
   return file;
 }
 

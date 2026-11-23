@@ -160,9 +160,11 @@ import {
 } from "./cli.js";
 import { resolveConfig, locateConfigFile, writeSetting, clearSetting } from "./settings.js";
 import { globalConfigPath } from "./globalConfig.js";
-import { type SpecialistCommand, type SpecialistChoice, unsetRoles, shouldAsk, hasBeenAsked, markAsked, parseChoice, promptLines, promptOptions, fallbackHint } from "./specialistPrompt.js";
+import { type SpecialistCommand, type SpecialistChoice, unsetRoles, shouldAsk, hasBeenAsked, markAsked, promptLines, specialistChoices, fallbackHint } from "./specialistPrompt.js";
 import { PERSONAS, Persona, candidatesFor, chainProblem, fetchCatalog, formatModel, roleInfoWire, type CatalogModel } from "./models.js";
-import { pickModel, askHidden, isCancelAnswer } from "./setup.js";
+import { p as wizard, answered, canRunWizard, withExclusiveStdin, WizardCancelled } from "./wizard/prompts.js";
+import { checkKey, describeKey, looksLikeOpenRouterKey, maskKey, sanitize, spendLimitWarning } from "./wizard/keyCheck.js";
+import { pickChain } from "./wizard/modelPicker.js";
 import { storeApiKey } from "./secrets.js";
 import { RunLock, describeHeldLock } from "./runLock.js";
 import { events, formatTokens, UsageReport } from "./events.js";
@@ -931,397 +933,209 @@ async function answerIfQuestion(
 }
 
 /**
- * The one line every settings menu (/model, /model-sort, /api-key) prints at
- * its bottom, so "how do I get out of this without changing anything" has the
- * same answer everywhere instead of being discoverable only by pressing
- * Ctrl-C. Deliberately one constant: the wording and the accepted words
- * (isCancelAnswer's CANCEL_WORDS) have to stay in step, and a second copy of
- * this string is exactly how they'd drift apart.
+ * /api-key: replace the OpenRouter key. Typed masked, checked live, and only then saved; a rejected or cancelled key leaves the
+ * working one exactly as it was. The wizard screen writes to the terminal directly, so nothing here reaches a paired phone.
  */
-const MENU_EXIT_HINT = 'Press ESC, Enter, or type "cancel" to leave menu';
-
-/**
- * `rl.question` on a TTY runs readline's own line editor, which never resolves
- * on a lone ESC — there is no newline to submit — so a menu that advertises
- * "press ESC to leave" would be lying: the keypress just sits there and the
- * prompt waits for a line that is never coming. Mirrors setup.ts's own
- * askOrEscape (the picker's inner prompts use it), kept local here because
- * that one is private to the wizard.
- *
- * Resolves undefined on ESC and "" on a bare Enter, which callers treat
- * identically: leave the menu, change nothing. Piped input (tests, CI) has no
- * keypress stream at all, so ESC can never arrive there — plain readline,
- * unchanged.
- */
-async function askOrEscape(rl: readline.Interface, prompt: string): Promise<string | undefined> {
-  if (!process.stdin.isTTY) return (await rl.question(prompt)).trim();
-
-  emitKeypressEvents(process.stdin);
-  let onKeypress: ((str: string, key?: { name?: string }) => void) | undefined;
-  const escaped = new Promise<undefined>((resolve) => {
-    onKeypress = (_str: string, key?: { name?: string }) => {
-      if (key?.name !== "escape") return;
-      // Resolved BEFORE the cleanup emit below so this always wins the race.
-      resolve(undefined);
-      // Let the abandoned question settle with an empty line instead of
-      // leaving it pending — readline holds exactly one question callback.
-      try {
-        (process.stdin as any).emit("keypress", "\r", { name: "return", sequence: "\r" });
-      } catch {}
-    };
-    process.stdin.on("keypress", onKeypress);
-  });
-
-  try {
-    // Rejections are captured as values rather than left to propagate: when
-    // ESC wins this race the question is abandoned, and an abandoned
-    // rejection would otherwise resurface later as an unhandled rejection.
-    const answered = rl.question(prompt).then(
-      (value) => ({ ok: true as const, value: value.trim() }),
-      (error) => ({ ok: false as const, error })
-    );
-    const winner = await Promise.race([answered, escaped]);
-    if (winner === undefined) return undefined;
-    if (!winner.ok) throw winner.error;
-    return winner.value;
-  } finally {
-    if (onKeypress) process.stdin.off("keypress", onKeypress);
-  }
-}
-
-/**
- * Runs `fn` (a prompt-owning helper like pickModel, which watches for ESC
- * itself) while separately recording whether a lone ESC keypress arrived
- * during it. The picker's own ESC handling resolves undefined, but so does a
- * legitimate blank answer on an optional prompt — this is how the caller
- * tells a real cancellation from "no thanks" when the return value alone
- * can't. TTY-only: piped input has no keypress stream, so nothing is watched
- * and `escaped` is always false.
- */
-async function withEscWatch<T>(fn: () => Promise<T>): Promise<{ value: T; escaped: boolean }> {
-  if (!process.stdin.isTTY) return { value: await fn(), escaped: false };
-
-  emitKeypressEvents(process.stdin);
-  let escaped = false;
-  const onKeypress = (_str: string, key?: { name?: string }) => {
-    if (key?.name === "escape") escaped = true;
-  };
-  process.stdin.on("keypress", onKeypress);
-  try {
-    const value = await fn();
-    return { value, escaped };
-  } finally {
-    process.stdin.off("keypress", onKeypress);
-  }
-}
-
 async function changeApiKey(client: OpenRouterClient): Promise<void> {
-  // The call site (the /api-key dispatch branch) already brackets this whole
-  // function with pauseInput()/resumeInput() so the persistent input line
-  // isn't fighting this function's own raw-mode-aware prompt for the same
-  // keystrokes. readline.Interface manages raw mode itself for its own line
-  // editing and turns it OFF on close() — captured/restored here anyway as a
-  // second layer, so this function is still correct in isolation (e.g. under
-  // a future direct call) rather than depending on the caller's bracket.
-  const wasRaw = Boolean((process.stdin as any).isRaw);
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    console.log(`  ${MENU_EXIT_HINT}`);
-    const entered = await askHidden(rl, "Paste your new OpenRouter key (hidden): ");
-    // askHidden resolves "" for both a bare Enter and a lone ESC (see its own
-    // comment); a falsy result also covers undefined/null should a caller ever
-    // widen the signature. All of them mean "leave this alone", and this is
-    // checked before anything touches the stored key, so a cancelled rotation
-    // leaves the working key exactly as it was rather than blanking it.
-    if (!entered || !entered.trim() || isCancelAnswer(entered)) {
-      console.log("No key entered. Nothing changed.");
-      return;
-    }
-
-    console.log("Checking the new key against OpenRouter…");
-    try {
-      await fetchCatalog(entered);
-    } catch (err: any) {
-      console.log(`\nThat key was rejected: ${err.message}`);
-      console.log(`Nothing was changed — your previous key is still active.\n`);
-      return;
-    }
-
-    const backend = storeApiKey(entered);
-    client.setApiKey(entered);
-
-    console.log(`\n✓ Key updated and verified.`);
-    console.log(`  Saved to ${describeBackend(backend)}.`);
-    console.log(`  Applied immediately — the next model call uses it.\n`);
-
-    // loadApiKey() checks the env var before the credential store, so a stale
-    // value left in the shell would silently keep winning on every future
-    // run — "I rotated my key but it's still broken" with no clue why. Catch
-    // that here rather than let the next session rediscover it as a mystery.
-    if (process.env.OPENROUTER_API_KEY) {
-      console.log(`⚠ OPENROUTER_API_KEY is also set in this shell's environment, and that`);
-      console.log(`  takes priority over the key just saved. Future runs from this shell will`);
-      console.log(`  keep using the OLD value until it is cleared:`);
-      console.log(`    Windows (PowerShell): Remove-Item Env:OPENROUTER_API_KEY`);
-      console.log(`    macOS/Linux:          unset OPENROUTER_API_KEY`);
-      console.log(`  (and remove it from your shell profile if it is set there permanently)\n`);
-    }
-  } catch (err: any) {
-    console.log(`\nCancelled — nothing changed. (${err.message})\n`);
-  } finally {
-    rl.close();
-    process.stdin.setRawMode?.(wasRaw);
+  if (!canRunWizard()) {
+    console.log("Changing the key needs an interactive terminal. Run `yimpim setup` on one, or set OPENROUTER_API_KEY.");
+    return;
   }
-}
-
-async function changeModel(config: AgentConfig, repoRoot: string, preselect?: Persona): Promise<void> {
-  // See changeApiKey's own comment above for why this capture/restore matters.
-  const wasRaw = Boolean((process.stdin as any).isRaw);
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
-    let persona: (typeof PERSONAS)[number] | undefined = preselect ? PERSONAS.find((p) => p.key === preselect) : undefined;
-    if (!persona) {
-    console.log(`\nWhich role?`);
-    PERSONAS.forEach((p, i) =>
-      console.log(
-        `  ${i + 1}. ${p.label.padEnd(18)} currently ${config.models[p.key]?.join("  →  ") || "(unset)"}` +
-          (p.optional ? "  [optional]" : "")
-      )
-    );
-    console.log(`  ${MENU_EXIT_HINT}`);
-    const raw = await askOrEscape(rl, "Choose (number or name): ");
-
-    // ESC, a bare Enter, or one of the advertised exit words — every one of
-    // them is a deliberate "get me out of here", not a mistyped role name.
-    // Checked BEFORE the lookup below so none of them ever reaches the
-    // "Not a role" message, which would otherwise read as an error for what
-    // was a legitimate way to leave.
-    if (raw === undefined) {
-      console.log(`\nCancelled — no changes made.\n`);
-      return;
-    }
-    const choice = raw.trim().toLowerCase();
-    if (!choice || isCancelAnswer(choice)) {
-      console.log(`\nCancelled — no changes made.\n`);
-      return;
-    }
-
-    persona =
-      PERSONAS[Number(choice) - 1] ??
-      PERSONAS.find((p) => p.key === choice || p.label.toLowerCase() === choice);
-
-    if (!persona) {
-      console.log(`Not a role. Try one of: ${PERSONAS.map((p) => p.key).join(", ")}, or a number.`);
-      return;
-    }
-    }
-    if (!persona) return;
-
-    const { key: apiKey } = loadApiKey();
-    if (!apiKey) {
-      console.log(`No API key available. Run \`yimpim setup\` first.`);
-      return;
-    }
-
-    console.log(`Checking which models your key can reach…`);
-    const catalog = await fetchCatalog(apiKey);
-    const options = candidatesFor(catalog, persona);
-    if (options.length === 0) {
-      console.log(`No model your key can reach meets ${persona.label}'s requirements (tools/vision).`);
-      return;
-    }
-
-    const existingChain = config.models[persona.key] ?? [];
-    const primary = await pickModel(
-      rl,
-      `${persona.label} — primary`,
-      persona.blurb +
-        (persona.volume === "high" ? "  ⚠ high volume: this choice drives your bill." : "") +
-        (persona.optional ? "  (optional — press Enter to leave this role unconfigured)" : ""),
-      options,
-      existingChain[0],
-      Boolean(persona.optional)
-    );
-    if (!primary) {
-      // Two ways to land here, and both mean "write nothing at all": ESC (or
-      // one of the exit words) in the picker, or a deliberate blank answer to
-      // an optional role's prompt. Either way the role keeps whatever chain it
-      // already had — this is a cancellation, never an error, so it must not
-      // fall through to the writeSetting call below.
-      console.log(
-        persona.optional && existingChain.length === 0
-          ? `\nLeft ${persona.label} unconfigured — no changes made.\n`
-          : `\nCancelled — ${persona.label} left as it was (${existingChain.join("  →  ")}).\n`
-      );
-      return;
-    }
-    let chain: string[];
-    if (persona.multi) {
-      // A set to rotate through (the logo designer and its judge): keep adding until a blank answer or the maximum.
-      chain = [primary];
-      while (chain.length < persona.multi.max) {
-        const { value: more, escaped } = await withEscWatch(() =>
-          pickModel(
-            rl,
-            `${persona.label} — model ${chain.length + 1} of up to ${persona.multi!.max}`,
-            "Add another model to rotate through (a different provider gives more variety), or press Enter to finish.",
-            options.filter((m) => !chain.includes(m.id)),
-            existingChain[chain.length],
-            true
-          )
-        );
-        if (escaped) {
-          console.log(`\nCancelled — ${persona.label} left as it was (${existingChain.join("  →  ") || "unset"}).\n`);
+    await withExclusiveStdin(async () => {
+      const entered = answered(
+        await wizard.password({
+          message: "New OpenRouter API key",
+          mask: "•",
+          validate: (v) => (v && v.trim() ? undefined : "Paste your key, or press Esc to cancel."),
+        })
+      ).trim();
+      if (!looksLikeOpenRouterKey(entered)) {
+        const useIt = answered(await wizard.confirm({ message: "That doesn't look like an OpenRouter key (they start with sk-or-). Use it anyway?", initialValue: false }));
+        if (!useIt) {
+          wizard.log.info("Nothing changed. Your previous key is still active.");
           return;
         }
-        if (!more) break;
-        chain.push(more);
       }
-    } else {
-      const { value: backup, escaped: backupEscaped } = await withEscWatch(() =>
-        pickModel(
-          rl,
-          `${persona.label} — backup`,
-          "Used only if the primary is unavailable.",
-          options.filter((m) => m.id !== primary),
-          existingChain[1],
-          true
-        )
-      );
-      // pickModel resolves undefined for BOTH a blank answer and an ESC, and on
-      // this prompt a blank answer is a legitimate, documented "just the primary,
-      // no backup" (allowNone is true) — so the two can't be told apart from the
-      // return value alone. ESC here still has to mean "leave the menu", not
-      // "commit the primary I just picked", so the keypress itself is what's
-      // watched for.
-      if (backupEscaped) {
-        console.log(`\nCancelled — ${persona.label} left as it was (${existingChain.join("  →  ") || "unset"}).\n`);
+      const s = wizard.spinner();
+      s.start("Checking the new key with OpenRouter");
+      const result = await checkKey(entered);
+      if (!result.ok) {
+        s.error(result.reason);
+        wizard.log.info("Nothing changed. Your previous key is still active.");
         return;
       }
-      chain = backup ? [primary, backup] : [primary];
-    }
+      s.stop(`Key works: ${describeKey(result.info)}`);
+      const warn = spendLimitWarning(result.info);
+      if (warn) wizard.log.warn(warn);
 
-    // Same target-file precedence as `yimpim config set`: a project config wins
-    // over the global one if this repo has its own, so /model never surprises
-    // a project that deliberately pins its own models.
-    const target = locateConfigFile(repoRoot) ?? globalConfigPath();
-    writeSetting(target, `models.${persona.key}`, chain);
+      const backend = storeApiKey(entered);
+      client.setApiKey(entered);
+      wizard.log.success(`Key ${maskKey(entered)} saved to ${describeBackend(backend)} and applied: the next model call uses it.`);
 
-    // Written to disk for future runs, and mutated here so the REST of this
-    // session — the very next task typed — uses it immediately rather than
-    // requiring a restart.
-    config.models[persona.key] = chain;
-
-    console.log(`\n✓ ${persona.label}: ${chain.join("  →  ")}`);
-    console.log(`  Written to ${target}`);
-    console.log(`  Applied immediately — the next task in this session uses it.\n`);
+      // loadApiKey() reads the environment before the credential store, so a stale value left in the shell would keep winning.
+      if (process.env.OPENROUTER_API_KEY) {
+        wizard.log.warn(
+          [
+            "OPENROUTER_API_KEY is also set in this shell, and it takes priority over the key just saved.",
+            "Future runs from this shell keep using the OLD value until it is cleared:",
+            "  Windows (PowerShell): Remove-Item Env:OPENROUTER_API_KEY",
+            "  macOS/Linux:          unset OPENROUTER_API_KEY",
+          ].join("\n")
+        );
+      }
+    });
   } catch (err: any) {
-    console.log(`\nCancelled — nothing changed. (${err.message})\n`);
-  } finally {
-    rl.close();
-    process.stdin.setRawMode?.(wasRaw);
+    if (err instanceof WizardCancelled) console.log("Cancelled. Nothing changed.");
+    else console.log(`Cancelled. Nothing changed. (${sanitize(err?.message ?? String(err))})`);
+  }
+}
+
+/**
+ * /model: change the model for one role, or with `preselect` go straight to that role (the specialist-model question uses it).
+ * Picked from the whole catalog the role can use, written to the same file `yimpim config set` would write, and applied to the
+ * rest of this session at once.
+ */
+async function changeModel(config: AgentConfig, repoRoot: string, preselect?: Persona): Promise<void> {
+  if (!canRunWizard()) {
+    console.log("Changing models needs an interactive terminal. Use `yimpim config set models.<role> <model-id>` instead.");
+    return;
+  }
+  try {
+    await withExclusiveStdin(async () => {
+      const role: Persona =
+        preselect ??
+        answered(
+          await wizard.select<Persona>({
+            message: "Which role?",
+            maxItems: 14,
+            options: PERSONAS.map((p) => ({
+              value: p.key,
+              label: `${p.label.padEnd(20)} ${config.models[p.key]?.join("  →  ") || "(unset)"}`,
+              hint: p.optional ? "optional" : undefined,
+            })),
+          })
+        );
+      const persona = PERSONAS.find((p) => p.key === role)!;
+
+      const { key: apiKey } = loadApiKey();
+      if (!apiKey) {
+        wizard.log.error("No API key available. Run `yimpim setup` first.");
+        return;
+      }
+      const s = wizard.spinner();
+      s.start("Loading the models your key can reach");
+      let catalog: CatalogModel[];
+      try {
+        catalog = await fetchCatalog(apiKey);
+      } catch (err: any) {
+        s.error(`Could not load the model list: ${sanitize(err?.message ?? String(err), apiKey)}`);
+        return;
+      }
+      const options = candidatesFor(catalog, persona);
+      s.stop(`${options.length} models can serve ${persona.label}`);
+      if (options.length === 0) {
+        wizard.log.warn(`No model your key can reach can serve ${persona.label}.`);
+        return;
+      }
+
+      wizard.log.message(persona.blurb + (persona.volume === "high" ? "  High volume: this choice drives your bill." : ""));
+      const existingChain = config.models[persona.key] ?? [];
+      const chain = await pickChain(persona, options, existingChain);
+      if (!chain) {
+        if (existingChain.length === 0) {
+          wizard.log.info(`${persona.label} left unset. Nothing changed.`);
+          return;
+        }
+        // An optional role cleared on purpose ("Leave unset (clear it)").
+        const target = locateConfigFile(repoRoot) ?? globalConfigPath();
+        clearSetting(target, `models.${persona.key}`);
+        (config.models as Record<Persona, string[] | undefined>)[persona.key] = undefined;
+        wizard.log.success(`${persona.label} cleared; it uses its fallback again. Written to ${target}.`);
+        return;
+      }
+
+      // Same file precedence as `yimpim config set`: a project's own config wins over the global one.
+      const target = locateConfigFile(repoRoot) ?? globalConfigPath();
+      writeSetting(target, `models.${persona.key}`, chain);
+      config.models[persona.key] = chain;
+      wizard.log.success(`${persona.label}: ${chain.join("  →  ")}\nWritten to ${target}. The next task in this session uses it.`);
+    });
+  } catch (err: any) {
+    if (err instanceof WizardCancelled) console.log("Cancelled. Nothing changed.");
+    else console.log(`Cancelled. Nothing changed. (${sanitize(err?.message ?? String(err))})`);
   }
 }
 
 /**
  * The first time /pentest or /design runs with its specialist role unset: say what will be used instead and offer to pick now. Never
- * forced: Enter carries on with the fallback, and the answer is remembered so it is asked once per command. Where nobody can answer
- * (no terminal), it only says what is being used. Returns false when the person cancelled.
+ * forced: the first choice carries on with the fallback, and the answer is remembered so it is asked once per command. Where nobody
+ * can answer (no terminal), it only says what is being used. Returns false when the person cancelled.
  */
 async function ensureSpecialistModel(command: SpecialistCommand, config: AgentConfig, repoRoot: string): Promise<boolean> {
   if (unsetRoles(command, config.models).length === 0) return true;
-  if (!shouldAsk(command, config.models, { interactive: isInteractive() })) {
-    if (!isInteractive() && !hasBeenAsked(command)) console.log(`[${command.toUpperCase()}] ${fallbackHint(command, config.models)}`);
+  if (!shouldAsk(command, config.models, { interactive: canRunWizard() })) {
+    if (!canRunWizard() && !hasBeenAsked(command)) console.log(`[${command.toUpperCase()}] ${fallbackHint(command, config.models)}`);
     return true;
   }
 
-  pauseInput();
-  const wasRaw = Boolean((process.stdin as any).isRaw);
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   let choice: SpecialistChoice;
   try {
-    console.log("");
-    for (const l of promptLines(command, config.models)) console.log(l);
-    console.log("");
-    for (const l of promptOptions()) console.log(l);
-    choice = parseChoice(await askOrEscape(rl, "Choose: "));
-  } finally {
-    rl.close();
-    process.stdin.setRawMode?.(wasRaw);
+    choice = await withExclusiveStdin(async () => {
+      wizard.log.message(promptLines(command, config.models).join("\n"));
+      return answered(await wizard.select<SpecialistChoice>({ message: "What now?", options: specialistChoices() }));
+    });
+  } catch (err) {
+    if (!(err instanceof WizardCancelled)) throw err;
+    choice = "cancel";
   }
-
-  try {
-    if (choice === "cancel") {
-      console.log("Cancelled. Nothing was run.");
-      return false;
-    }
-    markAsked(command);
-    if (choice === "pick") {
+  if (choice === "cancel") {
+    console.log("Cancelled. Nothing was run.");
+    return false;
+  }
+  markAsked(command);
+  if (choice === "pick") {
+    // One bracket around every role, so the session input line is not brought back between pickers.
+    await withExclusiveStdin(async () => {
       for (const role of unsetRoles(command, config.models)) await changeModel(config, repoRoot, role);
-    }
-    return true;
-  } finally {
-    resumeInput();
+    });
   }
+  return true;
 }
 
 const PROVIDER_SORT_CHOICES = [
-  { value: "default" as const, blurb: "OpenRouter's own default — price-first" },
-  { value: "throughput" as const, blurb: "Favor the fastest-responding backend. Avoids ones that are currently slow/stalled." },
-  { value: "price" as const, blurb: "Always the cheapest backend, regardless of speed." },
-  { value: "latency" as const, blurb: "Favor the backend with the lowest time-to-first-token." },
+  { value: "default" as const, blurb: "OpenRouter's own default, price first" },
+  { value: "throughput" as const, blurb: "The fastest backend; avoids ones that are slow right now" },
+  { value: "price" as const, blurb: "Always the cheapest backend, whatever its speed" },
+  { value: "latency" as const, blurb: "The backend that starts answering soonest" },
 ];
 
 /**
- * /model-sort — how OpenRouter picks a backend provider per call. Surfaced
- * because "default" is price-first and can hang on a degraded provider for
- * a full request timeout before falling back; "throughput" sidesteps that
- * without needing a maintained list of which providers are bad this week.
+ * /model-sort: how OpenRouter picks a backend provider per call. "default" is price first and can hang on a degraded provider for a
+ * full request timeout before falling back; "throughput" avoids that without a maintained list of which providers are bad this week.
  */
 async function changeProviderSort(config: AgentConfig, repoRoot: string): Promise<void> {
-  // See changeApiKey's own comment for why this capture/restore matters.
-  const wasRaw = Boolean((process.stdin as any).isRaw);
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  if (!canRunWizard()) {
+    console.log("Use `yimpim config set provider.sort <default|throughput|price|latency>` instead.");
+    return;
+  }
   try {
-    console.log(`\nProvider sort (currently: ${config.provider.sort}):`);
-    PROVIDER_SORT_CHOICES.forEach((c, i) => console.log(`  ${i + 1}. ${c.value.padEnd(10)} ${c.blurb}`));
-    console.log(`  ${MENU_EXIT_HINT}`);
-    const raw = await askOrEscape(rl, "Choose (number or name): ");
-
-    // ESC, a bare Enter, or an advertised exit word: leave without touching
-    // the stored setting, and without the "Not an option" message that would
-    // otherwise read as a mistake rather than a deliberate exit.
-    if (raw === undefined) {
-      console.log(`\nCancelled — no changes made.\n`);
-      return;
-    }
-    const choice = raw.trim().toLowerCase();
-    if (!choice || isCancelAnswer(choice)) {
-      console.log(`\nCancelled — no changes made.\n`);
-      return;
-    }
-
-    const picked =
-      PROVIDER_SORT_CHOICES[Number(choice) - 1] ??
-      PROVIDER_SORT_CHOICES.find((c) => c.value === choice);
-
-    if (!picked) {
-      console.log(`Not an option. Try one of: ${PROVIDER_SORT_CHOICES.map((c) => c.value).join(", ")}, or a number.`);
-      return;
-    }
-
-    const target = locateConfigFile(repoRoot) ?? globalConfigPath();
-    writeSetting(target, "provider.sort", picked.value);
-    config.provider.sort = picked.value;
-
-    console.log(`\n✓ Provider sort: ${picked.value}`);
-    console.log(`  Written to ${target}`);
-    console.log(`  Applied immediately — the next model call uses it.\n`);
+    await withExclusiveStdin(async () => {
+      const picked = answered(
+        await wizard.select({
+          message: `How should OpenRouter pick a provider? (now: ${config.provider.sort})`,
+          initialValue: config.provider.sort,
+          options: PROVIDER_SORT_CHOICES.map((c) => ({ value: c.value, label: c.value, hint: c.blurb })),
+        })
+      );
+      const target = locateConfigFile(repoRoot) ?? globalConfigPath();
+      writeSetting(target, "provider.sort", picked);
+      config.provider.sort = picked;
+      wizard.log.success(`Provider sort: ${picked}. Written to ${target}. The next model call uses it.`);
+    });
   } catch (err: any) {
-    console.log(`\nCancelled — nothing changed. (${err.message})\n`);
-  } finally {
-    rl.close();
-    process.stdin.setRawMode?.(wasRaw);
+    if (err instanceof WizardCancelled) console.log("Cancelled. Nothing changed.");
+    else console.log(`Cancelled. Nothing changed. (${sanitize(err?.message ?? String(err))})`);
   }
 }
 
@@ -4240,7 +4054,7 @@ async function main(): Promise<void> {
   }
 
   // First run: nobody should have to read docs to get started.
-  if (args.command === "run" && needsSetup() && !args.yes) {
+  if (args.command === "run" && needsSetup() && !args.yes && !args.json) {
     if (!isInteractive()) {
       console.error(`\nYIMPIM is not set up yet. Run \`yimpim setup\` on a terminal first.\n`);
       process.exit(1);
@@ -5816,7 +5630,7 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
           }
         } else if (trimmed === "/model" || trimmed === "/models") {
           // These three menus do their own raw-mode-aware ESC handling and
-          // own short-lived readline.Interfaces (askOrEscape/askHidden) —
+          // own wizard screens (src/wizard/prompts.ts) —
           // pausing the persistent input line first hands them truly
           // exclusive stdin instead of two things reacting to the same
           // keystroke, and resumeInput() puts the pinned prompt right back

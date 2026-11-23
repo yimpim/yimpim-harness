@@ -74,16 +74,6 @@ export function shouldAsk(command: SpecialistCommand, models: Chains, opts: { in
 
 export type SpecialistChoice = "use" | "pick" | "cancel";
 
-/** Enter uses the fallback, p picks now, ESC (undefined), q or cancel stops. Anything else is read as Enter's opposite only when it is a clear p. */
-export function parseChoice(answer: string | undefined): SpecialistChoice {
-  if (answer === undefined) return "cancel";
-  const a = answer.trim().toLowerCase();
-  if (a === "") return "use";
-  if (a === "p" || a === "pick") return "pick";
-  if (a === "q" || a === "quit" || a === "cancel" || a === "esc") return "cancel";
-  return "use";
-}
-
 export function promptLines(command: SpecialistCommand, models: Chains): string[] {
   const used = (r: Persona) => fallbackChain(r, models).join("  →  ") || "(none)";
   if (command === "pentest") {
@@ -101,8 +91,13 @@ export function promptLines(command: SpecialistCommand, models: Chains): string[
   return out;
 }
 
-export function promptOptions(): string[] {
-  return ["  Enter   use those for now", "  p       pick models now", "  Esc     cancel"];
+/** The choices, in order: the first (what Enter takes) carries on with the fallback. Esc cancels. */
+export function specialistChoices(): { value: SpecialistChoice; label: string; hint?: string }[] {
+  return [
+    { value: "use", label: "Use those for now", hint: "you will not be asked again" },
+    { value: "pick", label: "Pick models now" },
+    { value: "cancel", label: "Cancel", hint: "nothing runs" },
+  ];
 }
 
 /** Said instead of asking, where nobody can answer (a remote or unattended run). */

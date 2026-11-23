@@ -79,6 +79,7 @@ describe("what set_model accepts", () => {
   test("the remote handler refuses an unacceptable chain with the reason, and the desktop /model builds a set", () => {
     const idx = src("index.ts");
     assert.match(idx, /const problem = chainProblem\(persona, chain\);\s*if \(problem\) \{\s*refuse\(problem\);\s*return;\s*\}/);
-    assert.match(idx, /if \(persona\.multi\) \{[\s\S]*?model \$\{chain\.length \+ 1\} of up to \$\{persona\.multi!\.max\}[\s\S]*?chain\.push\(more\);/);
+    // The desktop picker (setup, /model and the specialist question share it) builds a set for a multi-model role.
+    assert.match(src("wizard/modelPicker.ts"), /if \(persona\.multi\) \{[\s\S]*?model \$\{chain\.length \+ 1\} of up to \$\{persona\.multi\.max\}[\s\S]*?chain\.push\(next\);/);
   });
 });

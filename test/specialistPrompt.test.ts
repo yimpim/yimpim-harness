@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  fallbackChain, unsetRoles, shouldAsk, hasBeenAsked, markAsked, parseChoice, promptLines, fallbackHint, COMMAND_ROLES,
+  fallbackChain, unsetRoles, shouldAsk, hasBeenAsked, markAsked, specialistChoices, promptLines, fallbackHint, COMMAND_ROLES,
 } from "../src/specialistPrompt.js";
 
 const dirs: string[] = [];
@@ -69,18 +69,9 @@ describe("asked once, never forced", () => {
   });
 });
 
-describe("the answer", () => {
-  test("Enter uses the fallback, p picks, ESC and cancel words stop", () => {
-    assert.equal(parseChoice(""), "use");
-    assert.equal(parseChoice("  "), "use");
-    assert.equal(parseChoice("p"), "pick");
-    assert.equal(parseChoice("P"), "pick");
-    assert.equal(parseChoice(undefined), "cancel");
-    assert.equal(parseChoice("cancel"), "cancel");
-    assert.equal(parseChoice("q"), "cancel");
-  });
-  test("anything unclear carries on with the fallback rather than blocking", () => {
-    assert.equal(parseChoice("yes"), "use");
+describe("the choices", () => {
+  test("the first choice, the one Enter takes, carries on with the fallback; pick and cancel follow", () => {
+    assert.deepEqual(specialistChoices().map((c) => c.value), ["use", "pick", "cancel"]);
   });
 });
 

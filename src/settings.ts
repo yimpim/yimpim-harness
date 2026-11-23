@@ -513,6 +513,13 @@ export function resolveConfig(opts: ResolveOptions = {}): ResolvedConfig {
  * Write a single setting back to the YAML file, preserving comments and
  * formatting via the yaml Document API rather than re-serialising a plain object.
  */
+/** The personal config under ~/.yimpim is written owner-only; a project config keeps whatever the repository gives it. */
+function writeConfigFile(configPath: string, text: string): void {
+  const personal = path.resolve(configPath) === path.resolve(globalConfigPath());
+  fs.writeFileSync(configPath, text, personal ? { encoding: "utf-8", mode: 0o600 } : "utf-8");
+  if (personal) try { fs.chmodSync(configPath, 0o600); } catch { /* Windows */ }
+}
+
 export function writeSetting(configPath: string, key: string, value: unknown): void {
   const def = findSetting(key);
   if (!def) throw new Error(`Unknown setting "${key}".`);
@@ -536,7 +543,7 @@ export function writeSetting(configPath: string, key: string, value: unknown): v
     );
   }
 
-  fs.writeFileSync(configPath, doc.toString(), "utf-8");
+  writeConfigFile(configPath, doc.toString());
 }
 
 /**
@@ -570,7 +577,7 @@ export function clearSetting(configPath: string, key: string): void {
     );
   }
 
-  fs.writeFileSync(configPath, doc.toString(), "utf-8");
+  writeConfigFile(configPath, doc.toString());
 }
 
 /**

@@ -144,7 +144,7 @@ export function loadApiKey(): { key?: string; backend?: SecretBackend } {
 }
 
 /** Every backend except the environment variable — the actual saved credential. */
-function loadStoredKey(): { key?: string; backend?: SecretBackend } {
+export function loadStoredKey(): { key?: string; backend?: SecretBackend } {
   if (process.platform === "darwin" && has("security")) {
     try {
       const out = run("security", ["find-generic-password", "-s", SERVICE, "-a", ACCOUNT, "-w"]);
