@@ -1316,6 +1316,11 @@ export class AgentTools {
     return [...this.filesWritten];
   }
 
+  /** Every write so far, re-writes of the same file included: compare two readings to tell whether a pass wrote anything at all. */
+  public writesSoFar(): number {
+    return this.writeEpoch;
+  }
+
   /** Every read/search/list/outline target inspected so far this phase, in order. */
   public inspectedThisPhase(): string[] {
     return [...this.filesInspected];

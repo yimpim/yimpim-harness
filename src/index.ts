@@ -28,6 +28,7 @@ import {
   renderTestGuidance,
   renderTestsNotNeededForGoal,
   runFocusedTests,
+  isTestPath,
 } from "./focusTests.js";
 import { winSafeCommand } from "./capabilities.js";
 import { neutralizeLegacyQuarantine } from "./quarantine.js";
@@ -42,7 +43,8 @@ import { ensureDesignSystem } from "./uiDesign.js";
 import { stageDesignImage } from "./designDelivery.js";
 import { parseLenient } from "./jsonRepair.js";
 import { splitJobs, unplannedJobs } from "./jobsList.js";
-import { healTests, renderHealReport, failingTestFiles, failureText, fixItemsFor } from "./testHeal.js";
+import { healTests, renderHealReport, failingTestFiles, failureText, fixItemsFor, importedSources } from "./testHeal.js";
+import { failureOutOfReach, describeOutOfReach, type OutOfReach } from "./outOfReach.js";
 import { HEAL_REPLY_STRUCTURED } from "./healSchema.js";
 import { sandboxFor, securityReviewCall } from "./healSandbox.js";
 import { renderLog, runSuiteLogged } from "./testLog.js";
@@ -274,6 +276,8 @@ interface TaskPhase {
    *  process restarts (see PhaseRepairContext below). Omitted only by
    *  degraded single-phase plans, which have nothing to resume into anyway. */
   id?: string;
+  /** The phases after this one and their files: a failure whose fix belongs to one of them is out of this phase's reach (outOfReach.ts). */
+  laterPhases?: { name: string; files: string[] }[];
 }
 
 interface CodebaseMemory {
@@ -1618,6 +1622,20 @@ async function handleMerge(
 async function agentTouchedPaths(repo: RepoTools, preExisting: Set<string>): Promise<string[]> {
   const now = await snapshotDirtyPaths(repo);
   return [...now].filter((p) => !preExisting.has(p) && !isHarnessArtifact(p));
+}
+
+/** Test files the agent created in this phase: touched by it, and not in HEAD. */
+async function createdTestFiles(repo: RepoTools, preExisting: Set<string>): Promise<string[]> {
+  const out: string[] = [];
+  for (const rel of await agentTouchedPaths(repo, preExisting)) {
+    if (!isTestPath(rel)) continue;
+    try {
+      await repo.git(["cat-file", "-e", `HEAD:${rel.replace(/\\/g, "/")}`]);
+    } catch {
+      out.push(rel);
+    }
+  }
+  return out;
 }
 
 /**
@@ -3021,7 +3039,10 @@ ${instructions}`;
   // the outer loop below is already bounded at maxRepairs attempts.
   let visualOnlyRepairs = 0;
   const maxVisualOnlyRepairs = config.limits?.maxVisualOnlyRepairAttempts ?? 3;
-  let stopReason: "no_progress" | "visual_cap" | "environmental" | "declined" | undefined;
+  let stopReason: "no_progress" | "visual_cap" | "environmental" | "declined" | "out_of_reach" | undefined;
+  // Whether the last repair attempt wrote anything (undefined until one has run), and what was out of its reach when it stopped for that.
+  let lastRepairEdited: boolean | undefined;
+  let outOfReach: OutOfReach | undefined;
   // The "these failures look unrelated to your change" question is asked once per phase.
   // Set when the failing tests were already red before this phase (see above).
   let testDebtNote = "";
@@ -3417,6 +3438,34 @@ Test hook just added: ${hookHowTo}` : hookHowTo;
       return true;
     }
 
+    // A repair that wrote nothing, against failures only in tests this phase wrote, whose fix is in a later phase's file: no further attempt
+    // can do better (repair may not touch that file), so stop after this one instead of spending the rest of the budget on it.
+    const repairJustEdited = lastRepairEdited;
+    lastRepairEdited = undefined;
+    if (repairJustEdited === false) {
+      const reach = failureOutOfReach({
+        failures: result.blockingFailures ?? [],
+        createdTestFiles: await createdTestFiles(repo, preExistingDirty),
+        allowedPaths: phase.allowedPaths ?? [],
+        laterPhases: phase.laterPhases ?? [],
+        importsOf: (t) => {
+          try {
+            return importedSources(repoRoot, t, fs.readFileSync(path.join(repoRoot, t), "utf8"));
+          } catch {
+            return [];
+          }
+        },
+        repairEdited: false,
+      });
+      if (reach) {
+        stopReason = "out_of_reach";
+        outOfReach = reach;
+        console.error("");
+        for (const line of describeOutOfReach(reach, maxRepairs - attempt)) console.error(line);
+        break;
+      }
+    }
+
     // Signature of THIS failure, independent of wording noise, so two
     // consecutive identical failures are detectable even though the editor
     // genuinely tried something in between.
@@ -3791,6 +3840,7 @@ ${repairPlan
       // process instead of just failing this phase cleanly.
       // run_test is bound for this one call and unbound after it, so nothing else can reach it (an unbound run_test answers "only available in a heal sandbox").
       if (testTier) agentTools.bindSandboxRunTest(repairRunTestFor({ client, config, repoRoot }));
+      const writesBeforeRepair = agentTools.writesSoFar();
       try {
         const repairResult = await runToolAgent({
           prompt: repairPayload,
@@ -3812,6 +3862,7 @@ ${repairPlan
         if (repaired) editorHowToVerify = repaired;
         editorDeltas = mergeDeltas(editorDeltas, extractAssertionDeltas(repairResult));
         editorTestsNotNeeded = extractTestsNotNeeded(repairResult) ?? editorTestsNotNeeded;
+        lastRepairEdited = agentTools.writesSoFar() !== writesBeforeRepair;
 
         // The initial Editor's "already implemented" claim only ever excused
         // the FIRST empty diff. QA has since found a real failure, so from
@@ -3862,6 +3913,8 @@ ${repairPlan
           ? `you chose to stop after QA found test failures unrelated to this change in: ${phaseName}`
           : stopReason === "environmental"
           ? `repair could not attribute the failure to any code defect in: ${phaseName} — see the escalation above`
+          : stopReason === "out_of_reach" && outOfReach
+          ? `the failing test written in ${phaseName} needs a change to ${outOfReach.target}, which the plan gives to "${outOfReach.owner}"`
           : `all ${maxRepairs} repair attempts were exhausted for: ${phaseName}`;
   console.error(`\n❌ [PHASE FAILED] ${failureReason}`);
 
@@ -7030,6 +7083,7 @@ The user wants you to decide, not ask: ${d.choice}`);
           (planned.executor === "EDITOR" ? renderTestGuidance(repoRoot, planned.files) : ""),
         allowedPaths: planned.files,
         files: planned.files,
+        laterPhases: plan.phases.slice(index + 1).map((p) => ({ name: p.name, files: p.files })),
         verificationGoal: phaseVerificationGoal(plan, planned),
       };
 
