@@ -350,7 +350,7 @@ Press Tab after typing a command's start (e.g. "/mo") to complete it.
 
   /remote-control   Pair your phone — sets up everything and shows a QR code
   /link             Link this machine to YIMPIM Pro (cloud-tunnel lease)
-  /model            Change the model for one role (discovery/planner/editor/verifier)
+  /model            Change the model for any role (Planner, Editor, Verifier, Designer, Security, ...)
   /model-sort       How OpenRouter picks a backend per call (default/throughput/price/latency)
   /api-key          Rotate your OpenRouter key (desktop only)
   /ask              Ask a question, read-only — nothing gets changed

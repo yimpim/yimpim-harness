@@ -107,7 +107,7 @@ GETTING STARTED
 IN A SESSION
   Type what you want done, or just ask a question — "what's the best stack
   for this?" gets an answer, not a plan. Or use a slash command:
-    /remote-control   Show a QR code to pair your phone (watch + stop runs)
+    /remote-control   Show a QR code to pair your phone (YIMPIM Pro)
     /link             Link this machine to YIMPIM Pro (cloud-tunnel lease)
     /model            Change the model for one role
     /api-key          Rotate your OpenRouter key
@@ -115,7 +115,7 @@ IN A SESSION
     /status           Models, settings and readiness
     /plan             The current plan
     /memory           What YIMPIM has learned about this repo
-    /help             Command list
+    /help             Every command (also /design, /roadmap, /tests, /pentest, ...)
     /exit             Quit
 
 OTHER COMMANDS
