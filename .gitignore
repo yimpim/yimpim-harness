@@ -32,3 +32,6 @@ src/combined_typescript.txt
 docs/remote_history/
 QA_REVIEW.md
 verify-tmp.txt
+
+# The harness writes a live checklist here in every project it works on; it is never part of this repo
+PROGRESS.md

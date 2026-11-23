@@ -534,7 +534,7 @@ function listSegments(repoRoot: string): { path: string; firstEventId: number; l
 /**
  * Everything from the start of the NEWEST task segment onward (open or
  * closed), plus every between-segment after it — used to cap a brand-new
- * pairing's initial replay (DESKTOP_TASK_HISTORY_FILES_TASK.md §3d) to the
+ * pairing's initial replay to the
  * current task/screen instead of a project's entire history. Anything
  * older is fetched on demand via `history.list` + `fetch_history{taskId}`.
  * Falls back to everything when no task has ever run yet (there's nothing
@@ -588,7 +588,7 @@ export function readHistoryBacklog(repoRoot: string): HistoryEntry[] {
  * The very first call for a repo this process (watermark still 0 — i.e. a
  * brand-new pairing since startup, not a reconnect that already caught up
  * once) is capped to readFromNewestTask rather than the full project
- * history (DESKTOP_TASK_HISTORY_FILES_TASK.md §3d) — everything older is
+ * history — everything older is
  * available on demand via `history.list` + `fetch_history{taskId}`. The
  * watermark still advances to the TRUE total either way, so nothing older
  * is ever replayed live later either; it was never meant to be.

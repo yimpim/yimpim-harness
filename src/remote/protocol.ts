@@ -98,7 +98,7 @@ export type RemoteVerb =
    * first. Pure read of something already produced, same "always safe"
    * characterization as fetch_diff/fetch_history. `beforeTaskId` omitted
    * means "start from the newest"; given, it pages strictly older than that
-   * task (DESKTOP_TASK_HISTORY_FILES_TASK.md §3a). `limit` defaults to 50,
+   * task. `limit` defaults to 50,
    * capped at 100 server-side regardless of what's requested.
    */
   | { verb: "history.list"; limit?: number; beforeTaskId?: string }
@@ -229,8 +229,7 @@ export interface RemoteStatus {
 }
 
 /**
- * One row of the desktop's `tasks.index` (DESKTOP_TASK_HISTORY_FILES_TASK.md
- * §2) — the History list's own unit, built from a task's `task.start`
+ * One row of the desktop's `tasks.index`, the History list's own unit, built from a task's `task.start`
  * (title/prompt/attachments, pending a goal), refreshed at `plan.ready`
  * (title upgraded to the goal, phaseCount filled in), and finalized at
  * `task.end` (state/endedAt/tokensUsed/costUsd/lastEventId). One line per

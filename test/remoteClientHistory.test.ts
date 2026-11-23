@@ -109,7 +109,7 @@ async function collectLiveDecoded(
   }
 }
 
-/** Canonical form for an "identical after key sorting" comparison (DESKTOP_EVENT_CONTRACT_V2_TASK.md's own acceptance-criterion wording). */
+/** Canonical form for an "identical after key sorting" comparison (the event contract's own acceptance-criterion wording). */
 function sortKeysDeep(value: any): any {
   if (Array.isArray(value)) return value.map(sortKeysDeep);
   if (value && typeof value === "object") {
@@ -123,7 +123,7 @@ function sortKeysDeep(value: any): any {
   return value;
 }
 
-// DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance criterion 1: "for any event,
+// Event contract v2, acceptance criterion 1: "for any event,
 // the JSON sent live, the JSON replayed into a new pairing, and the JSON
 // returned by fetch_history are byte-for-byte equal after key sorting."
 // Both "replayed into a new pairing" and "returned by fetch_history" go
@@ -132,7 +132,7 @@ function sortKeysDeep(value: any): any {
 // (the full backlog for a fresh pairing, vs. just the entries after some
 // eventId for a gap-recovery fetch_history) -- so this test exercises both
 // call shapes against the one live-pushed event to lock in that equivalence.
-describe("DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance: replay identity", () => {
+describe("event contract v2 acceptance: replay identity", () => {
   test("the same event is byte-for-byte identical (after key sorting) whether sent live, replayed into a fresh pairing, or returned via fetch_history", async () => {
     const repoRoot = await makeTempRepo();
 
@@ -175,7 +175,7 @@ describe("DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance: replay identity", () => 
     assert.equal(canon(fetchedPayload), canon(livePayload), "fetch_history's re-served copy of this event must be byte-identical (after key sorting) to the live event");
   });
 
-  // DESKTOP_TASK_HISTORY_FILES_TASK.md acceptance criterion 5: "a >500-event
+  // Task history files, acceptance criterion 5: "a >500-event
   // task pages correctly" and "byte-identical to live" -- for the NEW
   // task-scoped fetch_history{taskId}, not just the repo-wide cursor above.
   test("fetch_history{taskId}'s re-served event is byte-identical (after key sorting) to the live event", async () => {
@@ -202,13 +202,13 @@ describe("DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance: replay identity", () => 
   });
 });
 
-// DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance criterion 6: "two tasks run
+// Event contract v2, acceptance criterion 6: "two tasks run
 // back to back in one process -> no event of task B carries task A's id, and
 // the first status of B has zeroed usage fields." The zeroed-usage half is
 // already covered at the source (events.test.ts's usageDelta isolation
 // tests -- buildUsageStatusPatch in index.ts is just usageDelta wrapped); this
 // covers the taskId half end to end through the real push()/durable-log path.
-describe("DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance: isolation (two tasks back to back)", () => {
+describe("event contract v2 acceptance: isolation (two tasks back to back)", () => {
   test("no event belonging to task B's run is ever found carrying task A's id in the durable log", async () => {
     const repoRoot = await makeTempRepo();
     const originalFetch = globalThis.fetch;
@@ -252,7 +252,7 @@ describe("DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance: isolation (two tasks bac
   });
 });
 
-// DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance criterion 5: "every task.start
+// Event contract v2, acceptance criterion 5: "every task.start
 // is followed by exactly one task.end (including after a crash/restart ->
 // interrupted). A corrective planner pass carries retryOf." The retryOf half
 // is covered in remoteEventTranslator.test.ts; this is the full task-lifecycle
@@ -260,7 +260,7 @@ describe("DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance: isolation (two tasks bac
 // ending cleanly), then a THIRD task.start with no task.end at all -- the
 // process ending mid-task, exactly like a crash -- followed by the same
 // reconcileInterruptedTask() a real restart calls at startup.
-describe("DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance: lifecycle (crash -> interrupted)", () => {
+describe("event contract v2 acceptance: lifecycle (crash -> interrupted)", () => {
   test("every task.start in the durable log has exactly one task.end, including a crashed one closed retroactively as 'interrupted'", async () => {
     const repoRoot = await makeTempRepo();
     const originalFetch = globalThis.fetch;

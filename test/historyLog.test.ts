@@ -118,7 +118,7 @@ describe("readHistoryBacklog", () => {
     });
   });
 
-  // DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance criterion 2: "eventId strictly
+  // Event contract v2, acceptance criterion 2: "eventId strictly
   // increases across the whole durable log, including across desktop restarts.
   // Test: write, restart, write -> no reuse, no gap reset." allocateEventId's
   // in-memory counter is scoped per-repoRoot and seeded lazily on first use --
@@ -151,7 +151,7 @@ describe("readHistoryBacklog", () => {
     assert.deepEqual(allIds, [1, 2, 3, 4, 5]);
   });
 
-  // DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance criterion 7 (back-compat),
+  // Event contract v2, acceptance criterion 7 (back-compat),
   // at the data layer: a log file written before eventId existed (every line
   // has no eventId field at all, just {kind, payload, at}) must still parse
   // cleanly and keep working once eventId-aware code starts appending to it
@@ -298,7 +298,7 @@ describe("appendHistoryEntry — per-task segmentation, never trimmed", () => {
   });
 });
 
-// DESKTOP_TASK_HISTORY_FILES_TASK.md acceptance criterion 4: tasks.index is
+// Task history files, acceptance criterion 4: tasks.index is
 // built from task.start (create), refreshed at plan.ready (title/phaseCount),
 // and finalized at task.end (state/endedAt/usage/lastEventId) -- one line
 // per task, rewritten in place, never duplicated.
@@ -380,7 +380,7 @@ describe("tasks.index (listTasks)", () => {
   });
 });
 
-// DESKTOP_TASK_HISTORY_FILES_TASK.md acceptance criterion 5: fetch_history{taskId}
+// Task history files, acceptance criterion 5: fetch_history{taskId}
 // returns exactly that task's own events, byte-identical to what a live push
 // would have sent, paged at the caller's limit; an unknown/evicted taskId
 // answers missing:true instead of a false "nothing past this point".
@@ -540,7 +540,7 @@ describe("appendHistoryEntry — task retention (keep the most recent N, evict t
     assert.ok(openFile?.startsWith("between_1-open"), "the still-open between-segment must survive retention no matter how old it is");
   });
 
-  // DESKTOP_TASK_HISTORY_FILES_TASK.md acceptance criterion 9, verbatim: "with
+  // Task history files, acceptance criterion 9, verbatim: "with
   // the limit set to 3 in a test, creating a 4th task evicts the oldest
   // task's file, its index line, and between-files older than the oldest
   // kept task."
@@ -612,7 +612,7 @@ describe("readHistoryBacklogForReplay", () => {
     assert.deepEqual(first.map((e) => e.kind), ["plan.ready", "status"]);
   });
 
-  // DESKTOP_TASK_HISTORY_FILES_TASK.md acceptance criterion 8: "a fresh
+  // Task history files, acceptance criterion 8: "a fresh
   // pairing receives only the newest task + later between-task events."
   test("acceptance criterion 8: a fresh pairing (watermark still 0) is capped to the newest task onward, not the whole project", async () => {
     const repoRoot = await makeTempRepo();
@@ -791,7 +791,7 @@ describe("reconcileInterruptedTask", () => {
     assert.equal(end!.payload.state, "interrupted");
     assert.equal(end!.payload.tokensUsed, undefined, "a crashed process's usage tracker is gone — nothing honest to report");
 
-    // DESKTOP_TASK_HISTORY_FILES_TASK.md acceptance criterion 3: the index
+    // Task history files, acceptance criterion 3: the index
     // line must say interrupted too, not just the event itself.
     const indexEntry = readRawTaskIndex(repoRoot).find((e) => e.taskId === "task-1");
     assert.ok(indexEntry, "the task must still have an index line");
@@ -830,7 +830,7 @@ describe("reconcileInterruptedTask", () => {
   });
 });
 
-// DESKTOP_EVENT_CONTRACT_V2_TASK.md acceptance criterion 3: "fetch_history{afterEventId}
+// Event contract v2, acceptance criterion 3: "fetch_history{afterEventId}
 // over a log with >=1,200 events, several sharing one millisecond across a page
 // boundary, returns every event exactly once." This is exactly the scenario the
 // legacy `at`-based cursor (readHistoryBacklogSince) cannot safely handle --
