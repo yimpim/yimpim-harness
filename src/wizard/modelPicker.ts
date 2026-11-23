@@ -221,7 +221,7 @@ export async function pickOne(o: {
 }
 
 /**
- * A role's whole chain: a primary and an optional backup, or for a multi-model role (logo designer, logo judge) a set picked
+ * A role's whole chain: a primary and an optional backup, or for a multi-model role (Designer, Designer Judge) a set picked
  * one by one. Returns undefined when an optional role was skipped. Esc anywhere throws WizardCancelled.
  */
 export async function pickChain(

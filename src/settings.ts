@@ -116,7 +116,7 @@ export const SETTINGS: SettingDef[] = [
     type: "string[]",
     group: "Models",
     description:
-      "Optional. The logo designer (/design). Unlike the other roles this is a SET to rotate through, not a fallback chain: " +
+      "Optional. The Designer (/design). Unlike the other roles this is a SET to rotate through, not a fallback chain: " +
       "different models propose and draw different concepts, because one model alone settles into one style. Several models " +
       "from different providers works best. Unset: reuses models.planner.",
   },
@@ -125,7 +125,7 @@ export const SETTINGS: SettingDef[] = [
     type: "string[]",
     group: "Models",
     description:
-      "Optional. Looks at the renders the designer makes and judges them. Unset: falls back to models.verifierVision, then " +
+      "Optional. The Designer Judge: looks at the renders the Designer makes and judges them. Unset: falls back to models.verifierVision, then " +
       "models.editorVision.",
   },
   {

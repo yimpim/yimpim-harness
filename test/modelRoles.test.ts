@@ -8,7 +8,7 @@ const persona = (k: string) => PERSONAS.find((p) => p.key === k)!;
 const cat = (id: string, tools: boolean, vision: boolean, cost = 1): CatalogModel => ({ id, promptCost: cost, completionCost: cost, contextLength: 8000, supportsTools: tools, supportsVision: vision });
 
 describe("the specialist roles are in the picker", () => {
-  test("logo designer, logo judge and security exist, are optional, and are kept out of first-run setup", () => {
+  test("Designer, Designer Judge and security exist, are optional, and are kept out of first-run setup", () => {
     for (const k of ["designer", "designerVision", "security"]) {
       const p = persona(k);
       assert.ok(p, k);
@@ -42,7 +42,7 @@ describe("what the desktop tells a phone about each role", () => {
     assert.equal(info.length, PERSONAS.length);
     assert.deepEqual(info.map((i) => i.role), PERSONAS.map((p) => p.key));
     const d = info.find((i) => i.role === "designer")!;
-    assert.deepEqual([d.label, d.optional, d.multi, d.needsVision], ["Logo designer", true, { min: 1, max: 6 }, false]);
+    assert.deepEqual([d.label, d.optional, d.multi, d.needsVision], ["Designer", true, { min: 1, max: 6 }, false]);
     assert.match(d.blurb, /Pick 3 from different providers/);
     const e = info.find((i) => i.role === "editor")!;
     assert.deepEqual([e.optional, e.multi, e.needsTools, e.volume], [false, null, true, "high"]);

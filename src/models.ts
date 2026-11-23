@@ -164,7 +164,7 @@ export const PERSONAS: PersonaNeeds[] = [
   },
   {
     key: "designer",
-    label: "Logo designer",
+    label: "Designer",
     blurb:
       "The models that propose and draw logo and brand concepts, rotated so each concept comes from a different one " +
       "(one model alone drifts into one style). Pick 3 from different providers; strong coding and geometry skill " +
@@ -178,7 +178,7 @@ export const PERSONAS: PersonaNeeds[] = [
   },
   {
     key: "designerVision",
-    label: "Logo judge (Vision)",
+    label: "Designer Judge",
     blurb:
       "Looks at the rendered concepts (light and dark, small, greyscale) and judges them. Pick at least 2 from " +
       "different providers so the judge is not the model that drew the mark. Optional: unset uses Verifier (Vision).",
