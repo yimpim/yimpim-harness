@@ -33,24 +33,27 @@ const MIN_ANNOUNCE_TOKENS = 5000;
 export const money = (usd: number): string => (usd < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`);
 
 export class WorkerLedger {
-  private live?: { agent: string; chain: string[]; used: Set<string> };
+  /** Workers running now, innermost last: they nest (a worker waits while the security judges decide on its command). */
+  private live: { agent: string; chain: string[]; used: Set<string> }[] = [];
   private task = new Map<string, RoleRow>();
   private phases = new Map<string, Map<string, RoleRow>>();
 
-  /** A worker began (the event bus runs one at a time). */
+  /** A worker began, possibly inside another one. */
   start(agent: string, chain: string[]): void {
-    this.live = { agent, chain: [...chain], used: new Set() };
+    this.live.push({ agent, chain: [...chain], used: new Set() });
   }
 
-  /** A model answered a call inside the running worker. */
+  /** A model answered a call inside the innermost running worker. */
   noteModel(model: string): void {
-    this.live?.used.add(model);
+    this.live[this.live.length - 1]?.used.add(model);
   }
 
   /** The worker ended: it is added to the task's and the phase's totals, and described. */
   end(agent: string, ms: number, tokens: number, cost: number | undefined, phaseId?: string): WorkerRun {
-    const live = this.live?.agent === agent ? this.live : undefined;
-    this.live = undefined;
+    let i = this.live.length - 1;
+    while (i >= 0 && this.live[i].agent !== agent) i--;
+    const live = i >= 0 ? this.live[i] : undefined;
+    if (i >= 0) this.live.length = i;
     const chain = live?.chain ?? [];
     const fallbacks = chain.length > 1 ? [...(live?.used ?? [])].filter((m) => m !== chain[0]) : [];
     const add = (rows: Map<string, RoleRow>) => {
@@ -77,7 +80,7 @@ export class WorkerLedger {
   resetTask(): void {
     this.task.clear();
     this.phases.clear();
-    this.live = undefined;
+    this.live = [];
   }
 
   taskRows(): [string, RoleRow][] {

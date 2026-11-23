@@ -138,6 +138,16 @@ export interface UsageReport {
   totals: UsageBucket;
 }
 
+/** One running worker: when it started, the usage then, and what the workers nested inside it used (subtracted from its own). */
+interface WorkerFrame {
+  agent: string;
+  usageStart: UsageReport;
+  startedAt: number;
+  childMs: number;
+  childTokens: number;
+  childCost: number;
+}
+
 class EventBus {
   private seq = 0;
   private enabled = false;
@@ -150,13 +160,11 @@ class EventBus {
     totals: { calls: 0, prompt: 0, completion: 0, total: 0, cost: 0, costKnown: false },
   };
 
-  // Snapshot taken the moment the currently-active worker's agent.start
-  // fires, consumed (and cleared) the moment its agent.end fires — see
-  // emit()'s own handling of both. Workers run strictly sequentially system-
-  // wide (never two agent.start without an intervening agent.end), so a
-  // single scalar is enough; there is nothing to stack.
-  private currentWorkerUsageStart: UsageReport | undefined;
-  private currentWorkerStartedAt: number | undefined;
+  // The workers running now, innermost last. Workers DO overlap: a worker that asks to run a command waits while the security judges
+  // (workers of their own, often three at once) decide, so a single slot was overwritten by the judges' start and cleared by their end,
+  // and the outer worker (REPAIR, QA) then reported 0s and no cost. Each frame keeps what its nested workers used, so a worker reports
+  // its OWN time and usage and the per-worker breakdown still adds up to the phase's total, with nothing counted twice.
+  private workerStack: WorkerFrame[] = [];
 
   /**
    * Notified on every emit() regardless of `enabled` — unlike the gated
@@ -208,17 +216,26 @@ class EventBus {
     // own doc comment on tokensUsed/costUsd for why that matters) — computed
     // here, once, rather than leaving every subscriber to reconstruct it.
     if (event.type === "agent.start") {
-      this.currentWorkerUsageStart = this.usageReport();
-      this.currentWorkerStartedAt = Date.now();
-    } else if (event.type === "agent.end" && this.currentWorkerStartedAt !== undefined) {
-      event.elapsedMs = Math.max(0, Date.now() - this.currentWorkerStartedAt);
-      this.currentWorkerStartedAt = undefined;
-    }
-    if (event.type === "agent.end" && this.currentWorkerUsageStart) {
-      const delta = this.usageDelta(this.currentWorkerUsageStart).totals;
-      event.tokensUsed = delta.total;
-      if (delta.costKnown) event.costUsd = delta.cost;
-      this.currentWorkerUsageStart = undefined;
+      this.workerStack.push({ agent: event.agent, usageStart: this.usageReport(), startedAt: Date.now(), childMs: 0, childTokens: 0, childCost: 0 });
+    } else if (event.type === "agent.end" && this.workerStack.length > 0) {
+      // The innermost running worker of this name (workers of one name can overlap, e.g. three security judges); a start that never
+      // ended above it is dropped with it.
+      let i = this.workerStack.length - 1;
+      while (i >= 0 && this.workerStack[i].agent !== event.agent) i--;
+      if (i < 0) i = this.workerStack.length - 1;
+      const frame = this.workerStack[i];
+      this.workerStack.length = i;
+      const elapsed = Math.max(0, Date.now() - frame.startedAt);
+      const delta = this.usageDelta(frame.usageStart).totals;
+      event.elapsedMs = Math.max(0, elapsed - frame.childMs);
+      event.tokensUsed = Math.max(0, delta.total - frame.childTokens);
+      if (delta.costKnown) event.costUsd = Math.max(0, delta.cost - frame.childCost);
+      const parent = this.workerStack[this.workerStack.length - 1];
+      if (parent) {
+        parent.childMs += elapsed;
+        parent.childTokens += delta.total;
+        parent.childCost += delta.cost;
+      }
     }
 
     for (const cb of this.subscribers) cb(event);
