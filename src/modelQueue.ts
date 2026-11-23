@@ -20,6 +20,7 @@ const AGENT_FAMILY: Record<string, string> = {
   REPLAN: "planner",
   EDITOR: "editor",
   REPAIR: "repair",
+  REPAIR_PLANNER: "repairPlanner",
   VERIFIER: "verifier",
   QA: "verifier",
   "verifier-nav": "verifier",

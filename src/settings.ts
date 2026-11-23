@@ -51,6 +51,14 @@ export const SETTINGS: SettingDef[] = [
       "opportunistic, not load-bearing).",
   },
   {
+    key: "models.existence",
+    type: "string[]",
+    group: "Models",
+    description:
+      "Optional. Model chain for the first, cheaper look at whether what you asked for already exists in the code. " +
+      "The Planner's model settles whatever it cannot. Unset: uses models.discovery.",
+  },
+  {
     key: "models.planner",
     type: "string[]",
     group: "Models",
@@ -94,6 +102,14 @@ export const SETTINGS: SettingDef[] = [
     description:
       "Optional. Used instead of models.repair for the WHOLE phase, only on a task with an attached image. " +
       "Unset: reuses models.editorVision (or models.repair/models.editor) exactly, no warning.",
+  },
+  {
+    key: "models.repairPlanner",
+    type: "string[]",
+    group: "Models",
+    description:
+      "Optional. Model chain for the short triage pass that diagnoses a failed phase before Repair edits anything. " +
+      "Unset: uses models.planner, exactly as before this role existed.",
   },
   {
     key: "models.verifier",

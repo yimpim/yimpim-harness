@@ -23,7 +23,7 @@ export type ModelChains = Record<Persona, string[]>;
 export function emptyChains(): ModelChains {
   return {
     discovery: [], planner: [], editor: [], repair: [], verifier: [],
-    discoveryVision: [], editorVision: [], repairVision: [], verifierVision: [],
+    discoveryVision: [], editorVision: [], repairVision: [], verifierVision: [], existence: [], repairPlanner: [],
     designer: [], designerVision: [], security: [],
   };
 }

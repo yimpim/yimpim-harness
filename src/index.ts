@@ -161,7 +161,7 @@ import {
 import { resolveConfig, locateConfigFile, writeSetting, clearSetting } from "./settings.js";
 import { globalConfigPath } from "./globalConfig.js";
 import { type SpecialistCommand, type SpecialistChoice, unsetRoles, shouldAsk, hasBeenAsked, markAsked, promptLines, specialistChoices, fallbackHint } from "./specialistPrompt.js";
-import { PERSONAS, Persona, candidatesFor, chainProblem, fetchCatalog, formatModel, roleInfoWire, type CatalogModel } from "./models.js";
+import { PERSONAS, Persona, unsetLabel, candidatesFor, chainProblem, fetchCatalog, formatModel, roleInfoWire, type CatalogModel } from "./models.js";
 import { p as wizard, answered, canRunWizard, withExclusiveStdin, WizardCancelled, ESC_HINT } from "./wizard/prompts.js";
 import { checkKey, describeKey, looksLikeOpenRouterKey, maskKey, sanitize, spendLimitWarning } from "./wizard/keyCheck.js";
 import { pickChain } from "./wizard/modelPicker.js";
@@ -1012,7 +1012,7 @@ async function changeModel(config: AgentConfig, repoRoot: string, preselect?: Pe
             maxItems: 14,
             options: PERSONAS.map((p) => ({
               value: p.key,
-              label: `${p.label.padEnd(20)} ${config.models[p.key]?.join("  →  ") || "(unset)"}`,
+              label: `${p.label.padEnd(20)} ${config.models[p.key]?.join("  →  ") || unsetLabel(p, (k) => PERSONAS.find((x) => x.key === k)?.label ?? k)}`,
               hint: p.optional ? "optional" : undefined,
             })),
           })
@@ -2816,7 +2816,7 @@ ${instructions}`;
           client,
           config,
           agentTools,
-          models: config.models.planner,
+          models: config.models.repairPlanner ?? config.models.planner,
           agentName: "REPAIR_PLANNER",
           maxRoundsOverride: 12,
           reason: "Stalled Editor: naming the exact file and section to change",
@@ -3681,7 +3681,7 @@ Instructions:
             client,
             config,
             agentTools,
-            models: config.models.planner,
+            models: config.models.repairPlanner ?? config.models.planner,
             agentName: "REPAIR_PLANNER",
             maxRoundsOverride: repairPlannerMaxRounds,
           });

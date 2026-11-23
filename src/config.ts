@@ -53,6 +53,8 @@ export const ConfigSchema = z.object({
       // behave identically to before this role existed.
       repair: z.array(z.string()).min(1).optional(),
       repairVision: z.array(z.string()).min(1).optional(),
+      // The bounded triage pass that diagnoses a failed phase before Repair edits. Unset: the planner's models, as before this role existed.
+      repairPlanner: z.array(z.string()).min(1).optional(),
       // The Designer (logos, icons, brand marks). Unlike the other roles this
       // is a SET to rotate through, not a fallback chain: different models
       // propose and draw different concepts, because one model alone settles

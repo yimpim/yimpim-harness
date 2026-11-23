@@ -58,6 +58,8 @@ YIMPIM talks to models through OpenRouter only. Each role can use a different mo
 | Verifier | Reviews each change against what you asked for. |
 | Verifier (Vision) | Looks at screenshots of your app. |
 | Discovery | Reads the project to learn how it is built. |
+| Existence | The first, cheaper look at whether what you asked for is already in the code. Optional; uses Discovery's model when unset. |
+| Repair Planner | Diagnoses a failed phase before Repair edits anything. Optional; uses the Planner's model when unset. |
 | Security | `/pentest` and the review of risky changes. Optional; falls back to the Verifier, then the Planner. |
 | Designer | `/design`: proposes and draws logo concepts. A set of models to rotate through. Optional; falls back to the Planner. |
 | Designer Judge (Vision) | `/design`: looks at the rendered concepts and judges them. Needs a vision-capable model. Optional. |

@@ -28,6 +28,8 @@ export type Persona =
   | "editorVision"
   | "repairVision"
   | "verifierVision"
+  | "existence"
+  | "repairPlanner"
   | "designer"
   | "designerVision"
   | "security";
@@ -50,6 +52,13 @@ export interface PersonaNeeds {
   multi?: { min: number; max: number };
   /** Left out of the first-run setup wizard (it is still in /model and on the phone): opt-in specialist roles. */
   advanced?: boolean;
+  /** For an optional role that follows another one when unset: said in /model so "(unset)" is not a mystery. */
+  fallsBackTo?: Persona;
+}
+
+/** What /model shows for a role with no models of its own. */
+export function unsetLabel(p: Pick<PersonaNeeds, "fallsBackTo">, labelOf: (key: Persona) => string): string {
+  return p.fallsBackTo ? `(unset: uses ${labelOf(p.fallsBackTo)})` : "(unset)";
 }
 
 /** The wire shape of one role's description, so a phone can build its picker from what the desktop sends. */
@@ -161,6 +170,30 @@ export const PERSONAS: PersonaNeeds[] = [
     requiresVision: true,
     volume: "low",
     optional: true,
+  },
+  {
+    key: "existence",
+    label: "Existence",
+    blurb:
+      "The first, cheaper look at whether what you asked for is already in the code (the \"what already exists\" check); " +
+      "the Planner's model settles whatever it cannot. Optional: unset uses Discovery's models.",
+    requiresTools: false,
+    requiresVision: false,
+    volume: "low",
+    optional: true,
+    fallsBackTo: "discovery",
+  },
+  {
+    key: "repairPlanner",
+    label: "Repair Planner",
+    blurb:
+      "Diagnoses a failed phase from the evidence before Repair edits anything: a short, bounded triage pass. " +
+      "Worth a model that reasons well about failures. Optional: unset uses the Planner's models.",
+    requiresTools: true,
+    requiresVision: false,
+    volume: "low",
+    optional: true,
+    fallsBackTo: "planner",
   },
   {
     key: "designer",
