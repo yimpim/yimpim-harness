@@ -286,11 +286,19 @@ describe("the whole step", () => {
   });
 });
 
-test("nothing a routine run executes can start a capture: only the explicit critique may import it", () => {
-  const importers = fs
-    .readdirSync("src", { recursive: true })
-    .map(String)
-    .filter((f) => /\.ts$/.test(f) && f.replace(/\\/g, "/") !== "uiCapture.ts")
-    .filter((f) => /from "\.\.?\/(?:[\w/]*\/)?uiCapture\.js"/.test(fs.readFileSync(path.join("src", f), "utf8")));
-  assert.deepEqual(importers, [], "only the explicit /design critique command (added in a later commit) may import uiCapture");
+/** The modules that start a browser or a dev server for design work, and the only files allowed to import them. */
+const USER_INITIATED: Record<string, string[]> = {
+  "uiCapture.ts": [],
+  "uiReference.ts": [],
+};
+
+test("nothing a routine run executes can start a capture or open a reference: only the explicit commands may import them", () => {
+  const files = fs.readdirSync("src", { recursive: true }).map((f) => String(f).replace(/\\/g, "/")).filter((f) => f.endsWith(".ts"));
+  for (const [mod, allowed] of Object.entries(USER_INITIATED)) {
+    const imports = new RegExp(`from "\\.\\.?/(?:[\\w/]*/)?${mod.replace(/\.ts$/, "")}\\.js"`);
+    const importers = files.filter((f) => f !== mod && imports.test(fs.readFileSync(path.join("src", f), "utf8")));
+    assert.deepEqual(importers, allowed, `${mod} may be imported only by the explicit /design commands (added in later commits)`);
+  }
+  // The check itself works: the test file imports uiCapture in exactly the form it looks for.
+  assert.match(fs.readFileSync("test/uiCapture.test.ts", "utf8"), new RegExp(`from "\\.\\.?/(?:[\\w/]*/)?uiCapture\\.js"`));
 });
