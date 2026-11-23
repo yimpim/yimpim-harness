@@ -160,6 +160,7 @@ import {
 } from "./cli.js";
 import { resolveConfig, locateConfigFile, writeSetting, clearSetting } from "./settings.js";
 import { globalConfigPath } from "./globalConfig.js";
+import { type SpecialistCommand, type SpecialistChoice, unsetRoles, shouldAsk, hasBeenAsked, markAsked, parseChoice, promptLines, promptOptions, fallbackHint } from "./specialistPrompt.js";
 import { PERSONAS, Persona, candidatesFor, chainProblem, fetchCatalog, formatModel, roleInfoWire, type CatalogModel } from "./models.js";
 import { pickModel, askHidden, isCancelAnswer } from "./setup.js";
 import { storeApiKey } from "./secrets.js";
@@ -1073,11 +1074,13 @@ async function changeApiKey(client: OpenRouterClient): Promise<void> {
   }
 }
 
-async function changeModel(config: AgentConfig, repoRoot: string): Promise<void> {
+async function changeModel(config: AgentConfig, repoRoot: string, preselect?: Persona): Promise<void> {
   // See changeApiKey's own comment above for why this capture/restore matters.
   const wasRaw = Boolean((process.stdin as any).isRaw);
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
+    let persona: (typeof PERSONAS)[number] | undefined = preselect ? PERSONAS.find((p) => p.key === preselect) : undefined;
+    if (!persona) {
     console.log(`\nWhich role?`);
     PERSONAS.forEach((p, i) =>
       console.log(
@@ -1103,7 +1106,7 @@ async function changeModel(config: AgentConfig, repoRoot: string): Promise<void>
       return;
     }
 
-    const persona =
+    persona =
       PERSONAS[Number(choice) - 1] ??
       PERSONAS.find((p) => p.key === choice || p.label.toLowerCase() === choice);
 
@@ -1111,6 +1114,8 @@ async function changeModel(config: AgentConfig, repoRoot: string): Promise<void>
       console.log(`Not a role. Try one of: ${PERSONAS.map((p) => p.key).join(", ")}, or a number.`);
       return;
     }
+    }
+    if (!persona) return;
 
     const { key: apiKey } = loadApiKey();
     if (!apiKey) {
@@ -1215,6 +1220,48 @@ async function changeModel(config: AgentConfig, repoRoot: string): Promise<void>
   } finally {
     rl.close();
     process.stdin.setRawMode?.(wasRaw);
+  }
+}
+
+/**
+ * The first time /pentest or /design runs with its specialist role unset: say what will be used instead and offer to pick now. Never
+ * forced: Enter carries on with the fallback, and the answer is remembered so it is asked once per command. Where nobody can answer
+ * (no terminal), it only says what is being used. Returns false when the person cancelled.
+ */
+async function ensureSpecialistModel(command: SpecialistCommand, config: AgentConfig, repoRoot: string): Promise<boolean> {
+  if (unsetRoles(command, config.models).length === 0) return true;
+  if (!shouldAsk(command, config.models, { interactive: isInteractive() })) {
+    if (!isInteractive() && !hasBeenAsked(command)) console.log(`[${command.toUpperCase()}] ${fallbackHint(command, config.models)}`);
+    return true;
+  }
+
+  pauseInput();
+  const wasRaw = Boolean((process.stdin as any).isRaw);
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let choice: SpecialistChoice;
+  try {
+    console.log("");
+    for (const l of promptLines(command, config.models)) console.log(l);
+    console.log("");
+    for (const l of promptOptions()) console.log(l);
+    choice = parseChoice(await askOrEscape(rl, "Choose: "));
+  } finally {
+    rl.close();
+    process.stdin.setRawMode?.(wasRaw);
+  }
+
+  try {
+    if (choice === "cancel") {
+      console.log("Cancelled. Nothing was run.");
+      return false;
+    }
+    markAsked(command);
+    if (choice === "pick") {
+      for (const role of unsetRoles(command, config.models)) await changeModel(config, repoRoot, role);
+    }
+    return true;
+  } finally {
+    resumeInput();
   }
 }
 
@@ -5231,7 +5278,11 @@ async function main(): Promise<void> {
     }
   };
 
-  const runPentestJob = (request: string): Promise<void> => asOwnTask(("/pentest " + request).trim(), async () => {
+  const runPentestJob = async (request: string): Promise<void> => {
+    if (!(await ensureSpecialistModel("pentest", config, repoRoot))) return;
+    await runPentestJobNow(request);
+  };
+  const runPentestJobNow = (request: string): Promise<void> => asOwnTask(("/pentest " + request).trim(), async () => {
     const secModels = securityModels(config.models);
     console.log(`🛡️ [PENTEST] Starting a read-only security audit of this project with ${secModels.join(", ")} (models.security). This takes a few minutes and uses a handful of model calls.`);
     try {
@@ -5317,7 +5368,11 @@ async function main(): Promise<void> {
     return handled;
   };
 
-  const runDesignJob = (request: string): Promise<void> => asOwnTask(("/design " + request).trim(), async () => {
+  const runDesignJob = async (request: string): Promise<void> => {
+    if (!(await ensureSpecialistModel("design", config, repoRoot))) return;
+    await runDesignJobNow(request);
+  };
+  const runDesignJobNow = (request: string): Promise<void> => asOwnTask(("/design " + request).trim(), async () => {
     const models = config.models.designer ?? config.models.planner;
     const visionModels = config.models.designerVision ?? config.models.verifierVision ?? config.models.editorVision ?? config.models.verifier;
     console.log("🎨 [DESIGN] Starting. This takes a few minutes and uses a number of model calls (capped by designer.maxCalls).");

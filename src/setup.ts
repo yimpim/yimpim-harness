@@ -503,9 +503,48 @@ export async function runSetup(force = false): Promise<number> {
       models[persona.key] = backup ? [primary, backup] : [primary];
     }
 
+    // ---- 5. Specialist roles (optional) ----------------------------------
+    // Security, logo designer and logo judge each fall back to a role set above, so this is skippable. Asked once here so people know they exist.
+    line();
+    line("  5. Specialist models (optional)");
+    line("     Three more roles are used only by /pentest and /design. Each falls back to a role");
+    line("     you just set, and you can set them any time with /model.");
+    const wantsSpecialists = (await ask(rl, `     Set them up now? ${YES_NO_ENTER_NO}: `)).trim().toLowerCase();
+    if (wantsSpecialists === "y" || wantsSpecialists === "yes") {
+      for (const persona of PERSONAS) {
+        if (!persona.advanced) continue;
+        const options = candidatesFor(catalog, persona);
+        if (options.length === 0) continue;
+        const existingChain: string[] = current?.models?.[persona.key] ?? [];
+        const first = await pickModel(rl, `${persona.label}`, persona.blurb + "  (press Enter to skip this role)", options, existingChain[0], true);
+        if (!first) continue;
+        const chain = [first];
+        const maxModels = persona.multi?.max ?? 2;
+        while (chain.length < maxModels) {
+          const more = await pickModel(
+            rl,
+            `${persona.label} — ${persona.multi ? `model ${chain.length + 1} of up to ${maxModels}` : "backup"}`,
+            persona.multi ? "Add another (a different company gives more variety), or press Enter to finish." : "Used only if the first is unavailable.",
+            options.filter((m) => !chain.includes(m.id)),
+            existingChain[chain.length],
+            true
+          );
+          if (!more) break;
+          chain.push(more);
+        }
+        models[persona.key] = chain;
+      }
+    } else {
+      line("     Skipped. You will be asked the first time you run /pentest or /design.");
+      // Re-running setup replaces the model choices, but a specialist role set earlier is not something this run touched.
+      for (const persona of PERSONAS) {
+        if (persona.advanced && Array.isArray(current?.models?.[persona.key])) models[persona.key] = current!.models![persona.key];
+      }
+    }
+
     // Phone remote control needs no setup here: it runs through YIMPIM Pro (/link once, then /remote-control).
     line();
-    line("  5. Phone remote control (YIMPIM Pro)");
+    line("  6. Phone remote control (YIMPIM Pro)");
     line("     Nothing to set up now — run /link once to link this machine, then");
     line("     /remote-control in any session shows a QR code for the YIMPIM app.");
 
