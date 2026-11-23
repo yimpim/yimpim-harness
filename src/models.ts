@@ -178,7 +178,7 @@ export const PERSONAS: PersonaNeeds[] = [
   },
   {
     key: "designerVision",
-    label: "Designer Judge",
+    label: "Designer Judge (Vision)",
     blurb:
       "Looks at the rendered concepts (light and dark, small, greyscale) and judges them. Pick at least 2 from " +
       "different providers so the judge is not the model that drew the mark. Optional: unset uses Verifier (Vision).",

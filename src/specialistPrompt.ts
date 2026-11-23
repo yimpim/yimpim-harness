@@ -1,5 +1,5 @@
 /**
- * The three specialist roles (Security, Designer, Designer Judge) are not asked for on first setup, and each falls back to a role the
+ * The three specialist roles (Security, Designer, Designer Judge (Vision)) are not asked for on first setup, and each falls back to a role the
  * user already set. This is the logic for the one short question that tells them so: asked at the end of setup, and the first time
  * /pentest or /design runs with its role unset. Never forced: the fallback always works, and the answer is remembered so it is only
  * ever asked once per command.
@@ -83,11 +83,11 @@ export function promptLines(command: SpecialistCommand, models: Chains): string[
     ];
   }
   const out = [
-    `/design has no ${unsetRoles("design", models).map((r) => (r === "designer" ? "Designer" : "Designer Judge")).join(" or ")} model set.`,
+    `/design has no ${unsetRoles("design", models).map((r) => (r === "designer" ? "Designer" : "Designer Judge (Vision)")).join(" or ")} model set.`,
   ];
   if (unsetRoles("design", models).includes("designer")) out.push(`The Designer will use your Planner model (${used("designer")}), so every concept comes from one point of view.`);
-  if (unsetRoles("design", models).includes("designerVision")) out.push(`The Designer Judge will use your Verifier (Vision) model (${used("designerVision")}).`);
-  out.push("About 3 Designer models and 2 Designer Judge models, from different companies, give more varied, fairer results.");
+  if (unsetRoles("design", models).includes("designerVision")) out.push(`The Designer Judge (Vision) will use your Verifier (Vision) model (${used("designerVision")}).`);
+  out.push("About 3 Designer models and 2 Designer Judge (Vision) models, from different companies, give more varied, fairer results.");
   return out;
 }
 
@@ -102,7 +102,7 @@ export function specialistChoices(): { value: SpecialistChoice; label: string; h
 
 /** Said instead of asking, where nobody can answer (a remote or unattended run). */
 export function fallbackHint(command: SpecialistCommand, models: Chains): string {
-  const role = command === "pentest" ? "Security" : "Designer / Designer Judge";
+  const role = command === "pentest" ? "Security" : "Designer / Designer Judge (Vision)";
   const using = COMMAND_ROLES[command].map((r) => fallbackChain(r, models).join(" → ")).filter(Boolean).join(" · ");
   return `No ${role} model set, so using ${using}. Set one with /model.`;
 }

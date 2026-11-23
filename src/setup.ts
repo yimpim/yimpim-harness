@@ -234,7 +234,7 @@ async function runSetupSteps(force: boolean): Promise<number> {
     // ---- Specialist roles (optional) ---------------------------------------
     const wantsSpecialists = answered(
       await p.confirm({
-        message: "Set up the specialist models now? (Security for /pentest, Designer and Designer Judge for /design)",
+        message: "Set up the specialist models now? (Security for /pentest, Designer and Designer Judge (Vision) for /design)",
         initialValue: false,
       })
     );

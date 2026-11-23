@@ -125,7 +125,7 @@ export const SETTINGS: SettingDef[] = [
     type: "string[]",
     group: "Models",
     description:
-      "Optional. The Designer Judge: looks at the renders the Designer makes and judges them. Unset: falls back to models.verifierVision, then " +
+      "Optional. The Designer Judge (Vision): looks at the renders the Designer makes and judges them. Unset: falls back to models.verifierVision, then " +
       "models.editorVision.",
   },
   {

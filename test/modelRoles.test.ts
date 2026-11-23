@@ -8,7 +8,7 @@ const persona = (k: string) => PERSONAS.find((p) => p.key === k)!;
 const cat = (id: string, tools: boolean, vision: boolean, cost = 1): CatalogModel => ({ id, promptCost: cost, completionCost: cost, contextLength: 8000, supportsTools: tools, supportsVision: vision });
 
 describe("the specialist roles are in the picker", () => {
-  test("Designer, Designer Judge and security exist, are optional, and are kept out of first-run setup", () => {
+  test("Designer, Designer Judge (Vision) and security exist, are optional, and are kept out of first-run setup", () => {
     for (const k of ["designer", "designerVision", "security"]) {
       const p = persona(k);
       assert.ok(p, k);
@@ -47,6 +47,7 @@ describe("what the desktop tells a phone about each role", () => {
     const e = info.find((i) => i.role === "editor")!;
     assert.deepEqual([e.optional, e.multi, e.needsTools, e.volume], [false, null, true, "high"]);
     assert.equal(info.find((i) => i.role === "designerVision")!.needsVision, true);
+    assert.equal(info.find((i) => i.role === "designerVision")!.label, "Designer Judge (Vision)", "named like the other vision roles");
     JSON.parse(JSON.stringify(info));
   });
   test("model.config carries roleInfo on the wire, and an older phone ignoring it still has roles and scope", () => {
