@@ -46,9 +46,8 @@ describe("the schema", () => {
     const keys = SETTINGS.map((s: { key: string }) => s.key);
     for (const gone of ["verification.androidApplicationId", "verification.androidModule", "verification.devServerUrl"]) assert.equal(keys.includes(gone), false, gone);
   });
-  test("the repo's own agent.config.yaml carries no dead key", () => {
-    const y = fs.readFileSync("agent.config.yaml", "utf8");
-    for (const k of ["verifierPersona", "maxDiscoveryQuestions", "checkpointEveryToolCall", "createPhaseCheckpoint", "maxBackups", "autoResume"]) assert.equal(y.includes(k), false, k);
+  test("the repo ships no agent.config.yaml of its own: a project file overrides a person's global settings, so a stale copy here silently weakened the blocked-file list and shadowed their models", () => {
+    assert.equal(fs.existsSync("agent.config.yaml"), false);
   });
 });
 
@@ -143,8 +142,7 @@ describe("a model with a fallback behind it gets two tries, the last model gets 
   test("a single model has no fallback, so it keeps the full configured number", async () => {
     assert.equal((await chain(["a/one"], cfg({ limits: { apiMaxAttempts: 4 } }))).length, 4);
   });
-  test("the first-byte wait is untouched at 300 s, and this repo's config says 2", () => {
+  test("the first-byte wait is untouched at 300 s", () => {
     assert.match(src("src/openrouter.ts"), /const timeoutDurationMs = 300_000;/);
-    assert.match(fs.readFileSync("agent.config.yaml", "utf8"), /apiMaxAttempts: 2\b/);
   });
 });

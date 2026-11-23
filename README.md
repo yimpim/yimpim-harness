@@ -115,7 +115,7 @@ YIMPIM asks only what it cannot work out. If nobody answers within 30 minutes, a
 
 ## Settings
 
-Settings resolve from lowest to highest: built-in defaults, `agent.config.yaml` (optional, per project), `YIMPIM_*` environment variables, then `--set key=value`.
+Settings resolve from lowest to highest: built-in defaults; your global file, `~/.yimpim/config.yaml` (written by `yimpim setup` and `/model`, and used in every project); an optional project file, which overrides the global one; `YIMPIM_*` environment variables; then `--set key=value`. `yimpim init` writes a commented `agent.config.yaml` into the project for the project file, and `.agent/config.yaml` is read too. The repository itself ships no config file, so your global settings apply when you work on it.
 
 ```bash
 yimpim config list --common
