@@ -289,7 +289,10 @@ describe("the whole step", () => {
 /** The modules that start a browser or a dev server for design work, and the only files allowed to import them. */
 const USER_INITIATED: Record<string, string[]> = {
   "uiCapture.ts": [],
-  "uiReference.ts": [],
+  // The read describes the captured cues; it opens no browser itself.
+  "uiReference.ts": ["referenceRead.ts"],
+  // Spends a vision-model call per reference.
+  "referenceRead.ts": [],
 };
 
 test("nothing a routine run executes can start a capture or open a reference: only the explicit commands may import them", () => {

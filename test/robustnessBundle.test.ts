@@ -110,7 +110,8 @@ describe("the project's own test run is asked about once, not once per variant",
     for (const [rel, c] of Object.entries(files)) fs.writeFileSync(path.join(dir, rel), c);
     return dir;
   };
-  const withTest = (script = "jest") => project({ "package.json": JSON.stringify({ scripts: { test: script, build: "tsc" } }) });
+  // "build" is a real build (it loads the project's own build config), not a plain check like `tsc`, which now runs without asking.
+  const withTest = (script = "jest") => project({ "package.json": JSON.stringify({ scripts: { test: script, build: "vite build" } }) });
   const approvalsFor = (dir: string) => new CommandApprovals(path.join(dir, "..", "appr-" + path.basename(dir) + ".json"));
 
   test("a plain test-runner script needs no approval; any other test script asks until one form is approved", () => {
