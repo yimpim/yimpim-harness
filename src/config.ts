@@ -3,6 +3,18 @@ import { DEFAULT_BLOCKED_FILE_PATTERNS } from "./sensitivePaths.js";
 import { DEFAULT_BLOCKED_DIRECTORIES } from "./projectPaths.js";
 
 /**
+ * A blocked list a person can add to but never shorten: their entries are unioned with the built-in ones, each kept once, built-in first.
+ * These lists are what keeps keys, certificates and build output away from the model, so a config written long ago (or one that sets
+ * only the two entries its author cared about) must not quietly drop the protections added since.
+ */
+function additive(builtIn: readonly string[]) {
+  return z
+    .array(z.string())
+    .default([...builtIn])
+    .transform((own) => [...new Set([...builtIn, ...own])]);
+}
+
+/**
  * Every section has defaults so the harness runs against an arbitrary repo with
  * no agent.config.yaml at all. Only the model chains are worth overriding for
  * most projects; everything else exists to be tightened, not to be required.
@@ -197,12 +209,8 @@ export const ConfigSchema = z.object({
     .prefault({}),
   safety: z
     .object({
-      blockedDirectories: z
-        .array(z.string())
-        .default(DEFAULT_BLOCKED_DIRECTORIES),
-      blockedFilePatterns: z
-        .array(z.string())
-        .default(DEFAULT_BLOCKED_FILE_PATTERNS),
+      blockedDirectories: additive(DEFAULT_BLOCKED_DIRECTORIES),
+      blockedFilePatterns: additive(DEFAULT_BLOCKED_FILE_PATTERNS),
     })
     .prefault({}),
   recovery: z

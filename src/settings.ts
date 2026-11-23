@@ -327,13 +327,15 @@ export const SETTINGS: SettingDef[] = [
     key: "safety.blockedDirectories",
     type: "string[]",
     group: "Safety",
-    description: "Directories the editor may never read or write.",
+    description:
+      "More directories the editor may never read or write. Your entries are added to the built-in list (.git, node_modules, dist, ...); a built-in entry cannot be removed.",
   },
   {
     key: "safety.blockedFilePatterns",
     type: "string[]",
     group: "Safety",
-    description: "Filename globs the editor may never touch (keys, certs, .env).",
+    description:
+      "More filename globs the editor may never touch. Your entries are added to the built-in list (keys, certificates, .env, credentials files, ...); a built-in entry cannot be removed.",
   },
 
   // ---- Interaction -----------------------------------------------------------

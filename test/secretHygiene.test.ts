@@ -166,7 +166,7 @@ describe("one ignore list for every walker", () => {
     assert.equal(s.has("android"), false, "the native trees are only skipped where a stage asks");
     assert.equal(ignoredDirs(NATIVE_TREES).has("android") && ignoredDirs(NATIVE_TREES).has("ios"), true);
   });
-  test("the user's safety.blockedDirectories is what is skipped once the config is loaded", () => {
+  test("the user's safety.blockedDirectories is added to the built-in list for every walker once the config is loaded", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cfg-"));
     try {
       fs.writeFileSync(path.join(dir, "agent.config.yaml"), "safety:\n  blockedDirectories: [generated_stuff, node_modules]\n");
@@ -186,7 +186,7 @@ describe("one ignore list for every walker", () => {
       }
       const s = ignoredDirs();
       assert.equal(s.has("generated_stuff"), true);
-      assert.equal(s.has("dist"), false, "no longer blocked by the user's list");
+      assert.equal(s.has("dist"), true, "a shorter list cannot unblock a built-in directory");
       assert.equal(s.has("coverage"), true, "generated output is always skipped");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
