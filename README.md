@@ -111,7 +111,7 @@ A failed phase is repaired and checked again, up to 10 times by default. Each ph
 
 ## Questions while you are away
 
-YIMPIM asks only what it cannot work out. If nobody answers within 30 minutes, a model picks a sensible answer and notes it in `.agent/assumptions.md`. Requests to run a command, install or delete are refused instead. See `planning.questions` and the `interaction.*` settings.
+YIMPIM asks only what it cannot work out. If nobody answers within 30 minutes, a model picks a sensible answer and notes it in `.agent/assumptions.md`. Requests to run a command, install or delete are refused instead. `planning.questions` sets how much it asks (`essential` is the default, `autonomous` never waits, `all` asks everything), `interaction.answerTimeoutMinutes` changes the 30 minutes, and `interaction.confirmContinue` brings back a "Continue?" question between roadmap units. For example: `yimpim config set planning.questions autonomous`.
 
 ## Settings
 
@@ -123,7 +123,7 @@ yimpim config set limits.maxRepairAttemptsPerPhase 3
 yimpim --set models.editor=some/model "your task"   # this run only
 ```
 
-Every setting lives in one registry, `src/settings.ts`, which feeds `config list`, `init`, validation and help.
+The settings you are meant to change are registered in `src/settings.ts`. That one list feeds `config list` (add `--common` for the short one), `config set`, `--set`, `YIMPIM_*` variables (for example `YIMPIM_PLANNING_QUESTIONS`), `yimpim init` and validation. A few advanced options (the `designer.*`, `security.*` and `heal.*` tuning, retry timing, memory sizes) are not in that list: they have sensible built-in values and can be set by editing a config file by hand.
 
 ## Phone control (YIMPIM Pro)
 

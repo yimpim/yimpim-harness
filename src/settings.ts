@@ -348,6 +348,24 @@ export const SETTINGS: SettingDef[] = [
       "Auto-accept QA sign-off points (visual advisories, deferred design decisions) instead of pausing " +
       "for input — logged to QA_REVIEW.md for later review. Set false to restore interactive prompts.",
   },
+  {
+    key: "planning.questions",
+    type: "enum",
+    choices: ["autonomous", "essential", "all"],
+    group: "Interaction",
+    common: true,
+    description:
+      "How much YIMPIM asks before it plans. essential (default): only the few things worth a person's time. " +
+      "autonomous: never wait; open questions are answered from the code and written into the plan. all: ask everything.",
+  },
+  {
+    key: "interaction.confirmContinue",
+    type: "boolean",
+    group: "Interaction",
+    description:
+      "Ask \"Continue?\" between the units of a roadmap and between queued tasks. Off by default: the work goes on by itself, " +
+      "you can stop it at any time (/stop), and a unit that fails stops it. Turn on to approve each step.",
+  },
 
   // ---- Recovery ------------------------------------------------------------
   {
