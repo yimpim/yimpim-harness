@@ -14,7 +14,7 @@ import {
   rowLayout, wrapText, visibleWidth, pickOne, RAIL_WIDTH, RADIO_WIDTH,
 } from "../src/wizard/modelPicker.js";
 import { PassThrough, Writable } from "node:stream";
-import { canRunWizard, holdRawMode, rawHoldCount } from "../src/wizard/prompts.js";
+import { canRunWizard, holdRawMode, rawHoldCount, ESC_HINT, ESC_WHOLE } from "../src/wizard/prompts.js";
 import { chainsForOneModel, summaryLines, emptyChains, NON_INTERACTIVE_HELP } from "../src/setup.js";
 
 const KEY = "sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
@@ -44,7 +44,7 @@ describe("the OpenRouter key is never shown", () => {
     assert.ok(!sanitize(`leaked ${KEY}`).includes(KEY), "the redaction rules catch it even without the key passed in");
   });
   test("the key prompt is a masked password field with •", () => {
-    for (const f of ["setup.ts", "index.ts"]) assert.match(src(f), /password\(\{[^}]*mask: "•"/s, f);
+    for (const f of ["setup.ts", "index.ts"]) assert.match(src(f), /password\(\{[\s\S]*?mask: "•"/, f);
   });
   test("the key is never written to the config file", () => {
     const setup = src("setup.ts");
@@ -205,6 +205,52 @@ describe("a long third column wraps under itself, never under the id", () => {
     assert.notEqual(cont[col3], " ", `and its text starts there: ${cont}`);
     assert.ok(frame.length <= 24 + 2, "taller rows mean fewer of them, not a frame taller than the terminal");
     assert.ok(frame.some((l) => l.includes("Enter: confirm")), "the footer is still drawn");
+  });
+});
+
+describe("Esc is advertised on every wizard screen", () => {
+  const plain = (s: string) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+
+  async function firstFrame(opts: { wholeChange?: boolean }) {
+    const input = new PassThrough() as any;
+    input.isTTY = true;
+    input.setRawMode = () => {};
+    let written = "";
+    const output = new Writable({ write(c, _e, cb) { written += c.toString(); cb(); } }) as any;
+    output.columns = 100;
+    output.rows = 24;
+    output.isTTY = true;
+    const pending = pickOne({ message: "Editor", models: [m("a/one"), m("b/two")], input, output, ...opts });
+    await new Promise((r) => setTimeout(r, 40));
+    input.write("\x1b");
+    await assert.rejects(pending);
+    return plain(written);
+  }
+
+  test("the model picker says Esc cancels, on the line with its title", async () => {
+    const frame = await firstFrame({});
+    assert.match(frame, /Editor\s+2 models\s+Esc: cancel/);
+  });
+  test("later steps of a pick (backup, next model) say Esc drops the whole change", async () => {
+    const frame = await firstFrame({ wholeChange: true });
+    assert.match(frame, /Esc: cancel the whole change/);
+    const picker = src("wizard/modelPicker.ts");
+    assert.match(picker, /: backup, used only if[^\n]*\n\s*wholeChange: true/);
+    assert.match(picker, /of up to \$\{persona\.multi\.max\}`,\n\s*wholeChange: true/);
+  });
+  test("the role menu, provider sort, specialist question, key prompts and setup menu carry the hint too", () => {
+    assert.equal(plain(ESC_HINT), "Esc: cancel");
+    assert.equal(plain(ESC_WHOLE), "Esc: cancel the whole change");
+    const hasHint = (file: string, title: string) => src(file).split("\n").some((l) => l.includes(title) && l.includes("${ESC_HINT}"));
+    for (const title of ["Which role?", "What now?", "How should OpenRouter pick a provider?", "New OpenRouter API key"]) assert.ok(hasHint("index.ts", title), title);
+    for (const title of ["How do you want to choose models?", "OpenRouter API key"]) assert.ok(hasHint("setup.ts", title), title);
+  });
+  test("Esc in a later step leaves everything as it was: nothing is written before the last step", () => {
+    const idx = src("index.ts");
+    const start = idx.indexOf("async function changeModel(");
+    const body = idx.slice(start, idx.indexOf("\n}\n", start));
+    assert.ok(body.indexOf("await pickChain(") < body.indexOf("writeSetting("), "the settings are written only after the whole chain was picked");
+    assert.ok(body.includes('if (err instanceof WizardCancelled) console.log("Cancelled. Nothing changed.")'));
   });
 });
 

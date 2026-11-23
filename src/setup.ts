@@ -12,7 +12,7 @@ import { CatalogModel, PERSONAS, Persona, candidatesFor, fetchCatalog } from "./
 import { describeBackend, loadStoredKey, storeApiKey, type SecretBackend } from "./secrets.js";
 import { hasGlobalConfig, readGlobalConfig, writeGlobalConfig } from "./globalConfig.js";
 import { which } from "./capabilities.js";
-import { p, answered, canRunWizard, withExclusiveStdin, WizardCancelled } from "./wizard/prompts.js";
+import { p, answered, canRunWizard, withExclusiveStdin, WizardCancelled, ESC_HINT } from "./wizard/prompts.js";
 import { checkKey, describeKey, looksLikeOpenRouterKey, maskKey, sanitize, spendLimitWarning } from "./wizard/keyCheck.js";
 import { pickChain, pickOne, vendorOf, NO_BACKUP } from "./wizard/modelPicker.js";
 
@@ -140,7 +140,7 @@ async function runSetupSteps(force: boolean): Promise<number> {
         p.log.message("Get a key at openrouter.ai/keys. Give it a spend limit: YIMPIM does not cap what it spends.");
         key = answered(
           await p.password({
-            message: "OpenRouter API key",
+            message: `OpenRouter API key  ${ESC_HINT}`,
             mask: "•",
             validate: (v) => (v && v.trim() ? undefined : "Paste your key, or press Esc to cancel."),
           })
@@ -197,7 +197,7 @@ async function runSetupSteps(force: boolean): Promise<number> {
 
     const mode = answered(
       await p.select({
-        message: "How do you want to choose models?",
+        message: `How do you want to choose models?  ${ESC_HINT}`,
         options: [
           { value: "one", label: "Use one model for every role", hint: "quickest; change any role later with /model" },
           { value: "each", label: "Choose a model for each role", hint: "Planner, Editor, Verifier, Repair and more" },

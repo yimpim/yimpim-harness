@@ -5,7 +5,7 @@
  */
 
 import type { CatalogModel, PersonaNeeds } from "../models.js";
-import { p, answered } from "./prompts.js";
+import { p, answered, ESC_HINT, ESC_WHOLE } from "./prompts.js";
 
 export const VISIBLE_ROWS = 12;
 
@@ -179,6 +179,8 @@ export async function pickOne(o: {
   current?: string;
   extra?: ExtraChoice[];
   placeholder?: string;
+  /** A later step of one change: the hint says Esc drops all of it, not just this step. */
+  wholeChange?: boolean;
   /** Test seams; default to the process's own terminal. */
   input?: NodeJS.ReadableStream;
   output?: NodeJS.WritableStream & { columns?: number };
@@ -208,7 +210,7 @@ export async function pickOne(o: {
   const value = await p.autocomplete<string>({
     ...(o.input ? { input: o.input as any } : {}),
     ...(o.output ? { output: o.output as any } : {}),
-    message: `${o.message}  ${models.length} models`,
+    message: `${o.message}  ${models.length} models  ${o.wholeChange ? ESC_WHOLE : ESC_HINT}`,
     options,
     filter: (search, opt) => (extraValues.has(opt.value) ? !search.trim() : matchesQuery(byId.get(opt.value)!, search)),
     maxItems: VISIBLE_ROWS,
@@ -242,6 +244,7 @@ export async function pickChain(
     while (chain.length < persona.multi.max) {
       const next = await pickOne({
         message: `${persona.label}: model ${chain.length + 1} of up to ${persona.multi.max}`,
+        wholeChange: true,
         models: models.filter((m) => !chain.includes(m.id)),
         current: existing[chain.length],
         extra: [{ value: DONE, label: `Done, use ${chain.length === 1 ? "this model" : `these ${chain.length}`}`, hint: "a different company gives more variety" }],
@@ -254,6 +257,7 @@ export async function pickChain(
 
   const backup = await pickOne({
     message: `${persona.label}: backup, used only if ${first} is unavailable`,
+    wholeChange: true,
     models: models.filter((m) => m.id !== first),
     current: existing[1],
     extra: [{ value: NO_BACKUP, label: "No backup" }],

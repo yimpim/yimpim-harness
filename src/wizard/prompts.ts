@@ -11,9 +11,18 @@
  */
 
 import * as p from "@clack/prompts";
+import { styleText } from "node:util";
 import { inputActive, inputInstalled, pauseInput, resumeInput } from "../terminalInput.js";
 
 export { p };
+
+/**
+ * The reminder shown on every screen: clack's own footer lists Enter and typing but not Esc, which cancels the whole screen.
+ * Dim, so it reads as a hint. ESC_WHOLE is for the later steps of a multi-step pick (backup, next model), where Esc drops the
+ * entire change, not just that step.
+ */
+export const ESC_HINT = styleText("dim", "Esc: cancel");
+export const ESC_WHOLE = styleText("dim", "Esc: cancel the whole change");
 
 /** Raised when the person presses Esc or Ctrl+C in a wizard screen. Callers turn it into "nothing changed". */
 export class WizardCancelled extends Error {

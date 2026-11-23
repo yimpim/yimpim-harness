@@ -162,7 +162,7 @@ import { resolveConfig, locateConfigFile, writeSetting, clearSetting } from "./s
 import { globalConfigPath } from "./globalConfig.js";
 import { type SpecialistCommand, type SpecialistChoice, unsetRoles, shouldAsk, hasBeenAsked, markAsked, promptLines, specialistChoices, fallbackHint } from "./specialistPrompt.js";
 import { PERSONAS, Persona, candidatesFor, chainProblem, fetchCatalog, formatModel, roleInfoWire, type CatalogModel } from "./models.js";
-import { p as wizard, answered, canRunWizard, withExclusiveStdin, WizardCancelled } from "./wizard/prompts.js";
+import { p as wizard, answered, canRunWizard, withExclusiveStdin, WizardCancelled, ESC_HINT } from "./wizard/prompts.js";
 import { checkKey, describeKey, looksLikeOpenRouterKey, maskKey, sanitize, spendLimitWarning } from "./wizard/keyCheck.js";
 import { pickChain } from "./wizard/modelPicker.js";
 import { storeApiKey } from "./secrets.js";
@@ -945,7 +945,7 @@ async function changeApiKey(client: OpenRouterClient): Promise<void> {
     await withExclusiveStdin(async () => {
       const entered = answered(
         await wizard.password({
-          message: "New OpenRouter API key",
+          message: `New OpenRouter API key  ${ESC_HINT}`,
           mask: "•",
           validate: (v) => (v && v.trim() ? undefined : "Paste your key, or press Esc to cancel."),
         })
@@ -1007,7 +1007,7 @@ async function changeModel(config: AgentConfig, repoRoot: string, preselect?: Pe
         preselect ??
         answered(
           await wizard.select<Persona>({
-            message: "Which role?",
+            message: `Which role?  ${ESC_HINT}`,
             maxItems: 14,
             options: PERSONAS.map((p) => ({
               value: p.key,
@@ -1083,7 +1083,7 @@ async function ensureSpecialistModel(command: SpecialistCommand, config: AgentCo
   try {
     choice = await withExclusiveStdin(async () => {
       wizard.log.message(promptLines(command, config.models).join("\n"));
-      return answered(await wizard.select<SpecialistChoice>({ message: "What now?", options: specialistChoices() }));
+      return answered(await wizard.select<SpecialistChoice>({ message: `What now?  ${ESC_HINT}`, options: specialistChoices() }));
     });
   } catch (err) {
     if (!(err instanceof WizardCancelled)) throw err;
@@ -1123,7 +1123,7 @@ async function changeProviderSort(config: AgentConfig, repoRoot: string): Promis
     await withExclusiveStdin(async () => {
       const picked = answered(
         await wizard.select({
-          message: `How should OpenRouter pick a provider? (now: ${config.provider.sort})`,
+          message: `How should OpenRouter pick a provider? (now: ${config.provider.sort})  ${ESC_HINT}`,
           initialValue: config.provider.sort,
           options: PROVIDER_SORT_CHOICES.map((c) => ({ value: c.value, label: c.value, hint: c.blurb })),
         })
