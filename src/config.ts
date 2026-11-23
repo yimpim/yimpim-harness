@@ -253,6 +253,8 @@ export const ConfigSchema = z.object({
   remote: z
     .object({
       redactLogs: z.boolean().default(false),
+      /** Include this computer's name in the sealed session.hello event, so a phone with several terminals can tell them apart. */
+      shareHostname: z.boolean().default(true),
     })
     .prefault({}),
   /**

@@ -306,6 +306,11 @@ export type RemoteEvent =
   | { kind: "attach.rejected"; reason: string }
   | { kind: "pong" }
   | { kind: "session.end"; reason: string }
+  /**
+   * Who this terminal is, for a phone that has several: sent sealed at the start of a session and again when the phone pairs, so
+   * the relay never sees a project or host name. `hostname` is left out when `remote.shareHostname` is off.
+   */
+  | { kind: "session.hello"; repoName: string; branch?: string; hostname?: string; platform: string; cliVersion?: string; startedAt: string }
   /** Emitted exactly once, the moment `taskId` is minted (right after the
    *  prompt is captured, before Discovery) — the explicit task-boundary
    *  counterpart to `status.state` transitions, which a client previously had

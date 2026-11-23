@@ -170,7 +170,8 @@ import { RunLock, describeHeldLock } from "./runLock.js";
 import { events, formatTokens, UsageReport } from "./events.js";
 import { usageLedger, toUsageWire, renderLedger } from "./usageLedger.js";
 import { diffStore } from "./diffStore.js";
-import { RemoteSession } from "./remote/client.js";
+import { RemoteSession, SessionLimitError } from "./remote/client.js";
+import { buildSessionHello } from "./remote/hello.js";
 import { PendingQuestion, RemoteStatus } from "./remote/protocol.js";
 import { translateForRemote } from "./remoteEventTranslator.js";
 import {
@@ -1949,7 +1950,7 @@ async function connectRemote(
       onSetModel: (role, chain) => {
         setModelFromRemote(role, chain, config, repoRoot, session);
       },
-    });
+    }, buildSessionHello({ repoRoot, shareHostname: config.remote.shareHostname }));
 
     await printPairingQr(pairingUrl, relay.source, provisioningLog, keepScreen);
     activeQuestionListener = (q: PendingQuestion) => {
@@ -2001,7 +2002,9 @@ async function connectRemote(
 
     return session;
   } catch (err: any) {
-    console.error(`
+    console.error(err instanceof SessionLimitError ? `
+[REMOTE] ${err.message}
+` : `
 [REMOTE] Could not start the session: ${err.message}
 `);
     await relay.stop();

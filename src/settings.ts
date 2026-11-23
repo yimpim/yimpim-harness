@@ -313,6 +313,14 @@ export const SETTINGS: SettingDef[] = [
       "paired phone sees the same narration the terminal does. Turn on if that output " +
       "might quote source you would not want visible on the phone's screen.",
   },
+  {
+    key: "remote.shareHostname",
+    type: "boolean",
+    group: "Remote",
+    description:
+      "Tell the phone this computer's name, so that with several terminals paired you can tell them apart. Sent sealed: the relay " +
+      "never sees it. Turn off to share only the project name and branch.",
+  },
   // ---- Safety --------------------------------------------------------------
   {
     key: "safety.blockedDirectories",

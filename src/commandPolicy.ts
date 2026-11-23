@@ -394,13 +394,58 @@ function entryKey(argv: string[], cwdRel: string, fingerprint = ""): string {
   return JSON.stringify(base);
 }
 
+/** One change to the approvals, kept so it can be replayed on top of whatever another terminal has written meanwhile. */
+type ApprovalOp =
+  | { t: "upsert"; rk: string; key: string; argv: string[]; cwdRel: string; at: string }
+  | { t: "ok"; rk: string; key: string; at: string }
+  | { t: "remove"; rk: string; keys: string[] }
+  | { t: "clear"; rk: string };
+
+/** Applies one change to an approvals file's contents. Returns whether anything changed. */
+function applyApprovalOp(data: ApprovalFile, op: ApprovalOp): boolean {
+  if (op.t === "clear") {
+    const had = (data.repos[op.rk]?.length ?? 0) > 0;
+    delete data.repos[op.rk];
+    return had;
+  }
+  const list = data.repos[op.rk] ?? (op.t === "upsert" ? (data.repos[op.rk] = []) : []);
+  if (op.t === "upsert") {
+    const existing = list.find((e) => e.key === op.key);
+    if (existing) {
+      existing.lastUsedAt = op.at;
+    } else {
+      list.push({ key: op.key, argv: op.argv, cwdRel: op.cwdRel, approvedAt: op.at, lastUsedAt: op.at });
+      if (list.length > MAX_APPROVALS_PER_REPO) {
+        list.sort((a, b) => a.lastUsedAt.localeCompare(b.lastUsedAt));
+        list.splice(0, list.length - MAX_APPROVALS_PER_REPO);
+      }
+    }
+    return true;
+  }
+  if (op.t === "ok") {
+    const hit = list.find((e) => e.key === op.key);
+    if (!hit) return false;
+    hit.lastOkAt = op.at;
+    return true;
+  }
+  const before = list.length;
+  data.repos[op.rk] = list.filter((e) => !op.keys.includes(e.key));
+  return data.repos[op.rk].length !== before;
+}
+
 /**
  * Per-user, per-repo record of commands the user already approved. Matches
  * the exact argv and directory only: approving `npm install` does not
  * approve `npm install some-other-package`.
+ *
+ * Several terminals (one per project) may run at once and share this file. A save therefore re-reads the file, replays THIS
+ * process's own changes on top of it, and writes the result atomically (the same read-merge-write the usage ledger uses), so one
+ * terminal's approval is never lost because another saved a moment later.
  */
 export class CommandApprovals {
   private data: ApprovalFile | undefined;
+  /** This process's changes since its last successful save. */
+  private pending: ApprovalOp[] = [];
 
   constructor(private readonly file: string = approvalsFilePath()) {}
 
@@ -427,13 +472,39 @@ export class CommandApprovals {
     }
   }
 
-  private save(): void {
-    if (!this.data) return;
+  /** The file as it is on disk right now, or empty if it is missing or unreadable (it is never renamed or deleted here). */
+  private readDisk(): ApprovalFile {
     try {
+      const parsed = JSON.parse(fs.readFileSync(this.file, "utf8"));
+      if (parsed?.version === 1 && parsed.repos && typeof parsed.repos === "object") return parsed as ApprovalFile;
+    } catch {
+      /* missing or unreadable */
+    }
+    return { version: 1, repos: {} };
+  }
+
+  /** Apply a change here and queue it for the next save. */
+  private apply(op: ApprovalOp): boolean {
+    const changed = applyApprovalOp(this.load(), op);
+    if (changed) {
+      this.pending.push(op);
+      this.save();
+    }
+    return changed;
+  }
+
+  private save(): void {
+    if (!this.data || this.pending.length === 0) return;
+    try {
+      const merged = this.readDisk();
+      for (const op of this.pending) applyApprovalOp(merged, op);
       fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
       const tmp = `${this.file}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
+      fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), { mode: 0o600 });
       fs.renameSync(tmp, this.file);
+      // What this process sees from now on includes what other terminals approved.
+      this.data = merged;
+      this.pending = [];
     } catch (err: any) {
       console.warn(`[POLICY] Could not save command approvals: ${err?.message ?? err}`);
     }
@@ -446,31 +517,19 @@ export class CommandApprovals {
   }
 
   remember(repoRoot: string, argv: string[], cwdRel: string, fingerprint = ""): void {
-    const data = this.load();
-    const rk = repoKey(repoRoot);
-    const list = (data.repos[rk] ??= []);
-    const key = entryKey(argv, cwdRel, fingerprint);
-    const now = new Date().toISOString();
-    const existing = list.find((e) => e.key === key);
-    if (existing) {
-      existing.lastUsedAt = now;
-    } else {
-      list.push({ key, argv, cwdRel: cwdRel.replace(/\\/g, "/"), approvedAt: now, lastUsedAt: now });
-      if (list.length > MAX_APPROVALS_PER_REPO) {
-        list.sort((a, b) => a.lastUsedAt.localeCompare(b.lastUsedAt));
-        list.splice(0, list.length - MAX_APPROVALS_PER_REPO);
-      }
-    }
-    this.save();
+    this.apply({
+      t: "upsert",
+      rk: repoKey(repoRoot),
+      key: entryKey(argv, cwdRel, fingerprint),
+      argv,
+      cwdRel: cwdRel.replace(/\\/g, "/"),
+      at: new Date().toISOString(),
+    });
   }
 
   /** Records that an approved command exited 0 (never called for elevated commands). */
   markSucceeded(repoRoot: string, argv: string[], cwdRel: string, fingerprint = ""): void {
-    const list = this.load().repos[repoKey(repoRoot)] ?? [];
-    const hit = list.find((e) => e.key === entryKey(argv, cwdRel, fingerprint));
-    if (!hit) return;
-    hit.lastOkAt = new Date().toISOString();
-    this.save();
+    this.apply({ t: "ok", rk: repoKey(repoRoot), key: entryKey(argv, cwdRel, fingerprint), at: new Date().toISOString() });
   }
 
   /** Commands that have exited 0 in this repo, most recent first. */
@@ -514,19 +573,18 @@ export class CommandApprovals {
    * repo. Returns how many were removed.
    */
   revoke(repoRoot: string, which: number | "all"): number {
-    const data = this.load();
     const rk = repoKey(repoRoot);
-    const list = data.repos[rk] ?? [];
-    let removed = 0;
+    const list = this.load().repos[rk] ?? [];
     if (which === "all") {
-      removed = list.length;
-      delete data.repos[rk];
-    } else if (Number.isInteger(which) && which >= 1 && which <= list.length) {
-      list.splice(which - 1, 1);
-      removed = 1;
+      const removed = list.length;
+      if (removed > 0) this.apply({ t: "clear", rk });
+      return removed;
     }
-    if (removed > 0) this.save();
-    return removed;
+    if (Number.isInteger(which) && which >= 1 && which <= list.length) {
+      this.apply({ t: "remove", rk, keys: [list[which - 1].key] });
+      return 1;
+    }
+    return 0;
   }
 
   /** Approved commands for a repo, for display. */

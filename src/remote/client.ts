@@ -23,6 +23,48 @@ import { appendHistoryEntry, HistoryEntry } from "./historyLog.js";
 import type { UsageTotalsWire } from "../usageLedger.js";
 import { roadmapStateWire, type RoadmapWire } from "../roadmap.js";
 
+/** Why the relay ended a session. */
+export type SessionEndReason = "unpaired" | "evicted" | "phone_replaced" | "account_deleted";
+
+/** The relay would not open another terminal for this account: all of its allowance is in use by running desktops. */
+export class SessionLimitError extends Error {
+  constructor(public readonly limit?: number) {
+    super(sessionLimitMessage(limit));
+    this.name = "SessionLimitError";
+  }
+}
+
+export function sessionLimitMessage(limit?: number): string {
+  const n = typeof limit === "number" ? `${limit} terminal${limit === 1 ? "" : "s"}` : "the most terminals your account allows";
+  return `You already have ${n} connected to your phone. Close one, or unpair it in the app, then run /remote-control again.`;
+}
+
+/** What to tell the person when the relay ends this session, and what to do next. */
+export function endedMessage(reason: string, limit?: number): string {
+  switch (reason) {
+    case "unpaired":
+      return "Your phone unpaired this terminal. Run /remote-control to show a fresh QR and pair again.";
+    case "phone_replaced":
+      return "Another phone took over your account, so the phone paired to this terminal was disconnected. Run /remote-control to pair a phone again.";
+    case "evicted":
+      return `This terminal was disconnected to make room for another (your account allows ${typeof limit === "number" ? limit : "a few"} at once). Run /remote-control to reconnect.`;
+    case "account_deleted":
+      return "This YIMPIM Pro account was deleted, so remote control has ended.";
+    default:
+      return "The relay ended this session. Run /remote-control to pair again.";
+  }
+}
+
+/** One terminal's identity, sent sealed so a phone with several can tell them apart. */
+export interface SessionHello {
+  repoName: string;
+  branch?: string;
+  hostname?: string;
+  platform: string;
+  cliVersion?: string;
+  startedAt: string;
+}
+
 export interface RemoteOptions {
   brokerUrl: string;
   /** Verbs beyond the always-allowed set. */
@@ -38,6 +80,8 @@ export interface RemoteOptions {
    * configured relay.
    */
   leaseToken?: string;
+  /** Called once when the relay ends this session (the person has already been told why). */
+  onEnded?: (reason: string) => void;
 }
 
 export interface RemoteHandlers {
@@ -91,6 +135,8 @@ const NOT_PERSISTED_KINDS = new Set([
   "history.index",
   "command.refused",
   "session.end",
+  // Identity of THIS session, sent again at every pairing: an old copy replayed into a new session would name the wrong terminal.
+  "session.hello",
 ]);
 
 const POLL_BACKOFF_MS = [1000, 2000, 5000, 10_000, 20_000];
@@ -196,6 +242,12 @@ export class RemoteSession {
   private failures = 0;
   /** Consecutive 401s on the command poll - the relay no longer knows this session. */
   private unauthorizedPolls = 0;
+  /** Whether the relay last said a phone is paired, to notice the moment one pairs. */
+  private wasPaired = false;
+  private ending = false;
+  /** How many terminals the account may have, as the relay last said. */
+  private limit?: number;
+  private hello?: SessionHello;
   private pollTimer?: NodeJS.Timeout;
   private flushTimer?: NodeJS.Timeout;
   private handlers?: RemoteHandlers;
@@ -234,7 +286,7 @@ export class RemoteSession {
    * Register with the broker and return the pairing URL to render as a QR.
    * The session key is embedded in the URL fragment and never sent anywhere.
    */
-  async start(runId: string, repoName: string, handlers: RemoteHandlers): Promise<string> {
+  async start(runId: string, repoName: string, handlers: RemoteHandlers, hello?: Partial<SessionHello>): Promise<string> {
     this.handlers = handlers;
     this.status.runId = runId;
     this.status.repoName = repoName;
@@ -250,11 +302,25 @@ export class RemoteSession {
       }),
       signal: AbortSignal.timeout(15_000),
     });
-    if (!res.ok) throw new Error(`broker register failed: HTTP ${res.status} ${await res.text()}`);
+    if (!res.ok) {
+      const text = await res.text();
+      let refusal: any;
+      try {
+        refusal = JSON.parse(text);
+      } catch {
+        /* not JSON */
+      }
+      if (res.status === 409 && refusal?.code === "session_limit") {
+        throw new SessionLimitError(typeof refusal.limit === "number" ? refusal.limit : undefined);
+      }
+      throw new Error(`broker register failed: HTTP ${res.status} ${text}`);
+    }
 
     const body: any = await res.json();
     this.sessionId = body.sessionId;
     this.agentToken = body.agentToken;
+    if (typeof body.limit === "number") this.limit = body.limit;
+    this.hello = { repoName, platform: process.platform, startedAt: this.status.startedAt, ...(hello ?? {}) };
 
     // Without this, a phone pairing while yimpim is sitting idle at the prompt
     // (no phase running yet to trigger the next natural updateStatus() call)
@@ -263,6 +329,7 @@ export class RemoteSession {
     // itself was healthy (a Stop command still round-tripped fine, since
     // that path doesn't depend on a status event ever having arrived).
     this.updateStatus({});
+    this.pushHello();
 
     this.beginPolling();
     this.beginFlushing();
@@ -274,6 +341,28 @@ export class RemoteSession {
       pairing: pairingSecret,
       key: this.key.toString("base64url"),
     });
+  }
+
+  /** Sealed like everything else: the relay learns no project or host name. Sent at the start and again when a phone pairs. */
+  private pushHello(): void {
+    if (this.hello) this.push("session.hello", { ...this.hello });
+  }
+
+  /** The relay ended this session: say why, stop for good, and let the owner know. A repeat does nothing. */
+  private async handleEnded(reason: string): Promise<void> {
+    if (this.ending || this.stopped) return;
+    this.ending = true;
+    console.warn(`[REMOTE] ${endedMessage(reason, this.limit)}`);
+    await this.stop(`ended: ${reason}`);
+    this.opts.onEnded?.(reason);
+  }
+
+  /** The reason in a relay answer that says this session has ended, if it does. */
+  private async endedReasonOf(res: Response): Promise<string | undefined> {
+    if (!res.ok && res.status !== 401) return undefined;
+    const body: any = await res.json().catch(() => undefined);
+    if (body?.code === "session_ended") return String(body.ended ?? "");
+    return res.ok && body?.ended ? String(body.ended) : undefined;
   }
 
   private base(): string {
@@ -561,12 +650,17 @@ export class RemoteSession {
         }
         const metrics = this.telemetry.drain();
         try {
-          await fetch(`${this.base()}/v1/events`, {
+          const res = await fetch(`${this.base()}/v1/events`, {
             method: "POST",
             headers: { "content-type": "application/json", authorization: `Bearer ${this.agentToken}` },
             body: JSON.stringify({ sessionId: this.sessionId, events: batch, ...(metrics ? { metrics } : {}) }),
             signal: AbortSignal.timeout(15_000),
           });
+          const endedBy = await this.endedReasonOf(res);
+          if (endedBy !== undefined) {
+            await this.handleEnded(endedBy);
+            return;
+          }
         } catch {
           // Put them back; a dropped network must not lose events.
           this.outbox.unshift(...batch);
@@ -594,7 +688,15 @@ export class RemoteSession {
         );
         if (res.ok) {
           const body: any = await res.json();
+          if (body.ended) {
+            await this.handleEnded(String(body.ended));
+            return;
+          }
           for (const env of body.commands ?? []) this.handleEnvelope(env);
+          // A phone just paired: send this terminal's identity again, in case the first copy aged out of the relay's queue.
+          const paired = Boolean(body.paired);
+          if (paired && !this.wasPaired) this.pushHello();
+          this.wasPaired = paired;
           this.failures = 0;
           this.unauthorizedPolls = 0;
         } else {
@@ -604,6 +706,11 @@ export class RemoteSession {
           // long unbroken run of them means the relay lost this session
           // (wiped disk, rebuilt VM): say so instead of retrying silently.
           if (res.status === 401) {
+            const endedBy = await this.endedReasonOf(res);
+            if (endedBy !== undefined) {
+              await this.handleEnded(endedBy);
+              return;
+            }
             this.unauthorizedPolls++;
             if (this.unauthorizedPolls === UNAUTHORIZED_POLLS_BEFORE_WARNING) {
               console.warn(
