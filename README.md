@@ -132,6 +132,7 @@ Part of the paid YIMPIM Pro service. Link this machine once with `/link` (or `yi
 - **No inbound ports.** The desktop only makes outbound HTTPS requests to the hosted relay at `broker.yimpim.com`: it pushes events and long-polls for commands.
 - **The relay cannot read your data.** Events and commands are sealed with AES-256-GCM. The key is generated on your computer and reaches the phone only inside the QR code, in the URL fragment, which browsers never send to a server. Each message is bound to its session and sequence number, so it cannot be replayed elsewhere.
 - **Pairing:** a 256-bit single-use secret that expires in about two minutes. One device pairs per session, and attempts are rate-limited. A session ends when the run does, after 12 hours of inactivity, or 24 hours after it began.
+- **Several terminals:** one account can have up to 3 terminals (a project each) paired at once. A 4th is refused while the others are running, and a terminal that has been silent for 3 minutes makes room. Only one phone is active per account: pairing on a new phone disconnects the old one. Each terminal tells the phone its project name, branch and (unless `remote.shareHostname` is off) computer name, sealed so the relay cannot read it. If the relay ends a terminal, it tells you why and what to run next.
 - **`remote.redactLogs`** (off by default) drops free text from log events and from the echo of messages and answers you send.
 
 ## Security checks are tools, not a guarantee
