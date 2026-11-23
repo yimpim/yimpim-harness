@@ -16,6 +16,7 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { lifecycleScripts, npmrcScriptOverride } from "./commandPolicy.js";
 import { alwaysAsk, dangerIn, injectionIn, filesToRead, type ReviewRequest, type ReviewOutcome, type ReviewCall, type ActionReview } from "./commandReview.js";
 
 export interface Judge {
@@ -93,7 +94,16 @@ function scriptContext(req: ReviewRequest): { text: string; files: { rel: string
         // not a file here
       }
     }
-    return { text: `package.json script "${name}": ${body}`, files };
+    // What else the package manager runs with it, so "it may also run pre/post scripts" is answered with what is there, not guessed at.
+    const around = lifecycleScripts(pkg?.scripts, name);
+    const lifecycle = around.length
+      ? around.map((s) => `npm also runs package.json script "${s.name}": ${s.body}`).join("\n")
+      : `package.json has no "pre${name}" or "post${name}" script, so npm runs only this script.`;
+    const override = npmrcScriptOverride(req.cwd, req.repoRoot);
+    const npmrc = override
+      ? `A project .npmrc changes how scripts run: ${override}.`
+      : "No project .npmrc changes the shell scripts run in or the options given to node.";
+    return { text: `package.json script "${name}": ${body}\n${lifecycle}\n${npmrc}`, files };
   } catch {
     return undefined;
   }

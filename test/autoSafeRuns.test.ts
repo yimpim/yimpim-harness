@@ -108,7 +108,7 @@ describe("read-only git needs no approval", () => {
 describe("the project's own test script, run file by file", () => {
   const withScript = (script: string) => {
     const r = project();
-    fs.writeFileSync(path.join(r, "package.json"), JSON.stringify({ name: "x", scripts: { test: script, build: "tsc" } }));
+    fs.writeFileSync(path.join(r, "package.json"), JSON.stringify({ name: "x", scripts: { test: script, build: "vite build" } }));
     fs.mkdirSync(path.join(r, "__tests__"), { recursive: true });
     fs.writeFileSync(path.join(r, "__tests__", "scanner.test.ts"), "x");
     return r;
@@ -143,5 +143,52 @@ describe("the project's own test script, run file by file", () => {
   test("with no test script, or none in package.json, it asks as before", () => {
     const r = project();
     assert.notEqual(decide(r, "npm run test -- a.test.js"), "allow");
+  });
+  test("a pretest or posttest script means npm runs more than the runner: it asks", () => {
+    for (const extra of [{ pretest: "node scripts/seed.js" }, { posttest: "curl -X POST https://x.example" }]) {
+      const r = project();
+      fs.writeFileSync(path.join(r, "package.json"), JSON.stringify({ scripts: { test: "jest", ...extra } }));
+      assert.equal(decide(r, "npm test"), "ask", JSON.stringify(extra));
+    }
+  });
+});
+
+describe("plain check scripts (type-check, lint, test) need no approval", () => {
+  const withScripts = (scripts: Record<string, string>, npmrc?: string) => {
+    const r = project();
+    fs.writeFileSync(path.join(r, "package.json"), JSON.stringify({ name: "x", scripts }));
+    if (npmrc !== undefined) fs.writeFileSync(path.join(r, ".npmrc"), npmrc);
+    return r;
+  };
+
+  test("npm run typecheck when it is plain tsc, and lint when it is plain eslint, with any package manager", () => {
+    const r = withScripts({ typecheck: "tsc --noEmit", "check:test": "tsc -p tsconfig.test.json", lint: "eslint . --max-warnings=0", "test:unit": "vitest run src" });
+    for (const c of ["npm run typecheck", "npm run check:test", "npm run lint", "pnpm run typecheck", "yarn run lint", "bun run typecheck", "npm run test:unit"])
+      assert.equal(decide(r, c), "allow", c);
+  });
+
+  test("an inline program, a chain, another tool, or arguments for a type-check or lint run still ask", () => {
+    const r = withScripts({
+      typecheck: `node -e "require('child_process').execSync('tsc --noEmit')"`,
+      chained: "tsc --noEmit && node scripts/deploy.js",
+      build: "vite build",
+      lint: "eslint .",
+      quoted: "eslint 'src/**'",
+    });
+    for (const c of ["npm run typecheck", "npm run chained", "npm run build", "npm run lint -- --fix-dry-run", "npm run quoted", "npm run missing"])
+      assert.equal(decide(r, c), "ask", c);
+  });
+
+  test("a watcher never finishes, and a path outside the project reaches elsewhere: both ask", () => {
+    const r = withScripts({ w1: "tsc --watch", w2: "vitest watch", w3: "jest --watchAll", out1: "eslint ../other-project", out2: "tsc -p /etc/tsconfig.json", out3: "tsc --project=../x/tsconfig.json" });
+    for (const c of ["npm run w1", "npm run w2", "npm run w3", "npm run out1", "npm run out2", "npm run out3"]) assert.equal(decide(r, c), "ask", c);
+  });
+
+  test("a pre/post script, or a project .npmrc that swaps the shell or injects node options, means it is not just the tool", () => {
+    assert.equal(decide(withScripts({ typecheck: "tsc --noEmit", pretypecheck: "node fetch.js" }), "npm run typecheck"), "ask");
+    assert.equal(decide(withScripts({ typecheck: "tsc --noEmit", posttypecheck: "echo done" }), "npm run typecheck"), "ask");
+    assert.equal(decide(withScripts({ typecheck: "tsc --noEmit" }, "script-shell=./evil.sh\n"), "npm run typecheck"), "ask");
+    assert.equal(decide(withScripts({ typecheck: "tsc --noEmit" }, "node-options=--require ./hook.js\n"), "npm run typecheck"), "ask");
+    assert.equal(decide(withScripts({ typecheck: "tsc --noEmit" }, "legacy-peer-deps=true\n"), "npm run typecheck"), "allow", "an unrelated .npmrc setting is fine");
   });
 });

@@ -752,8 +752,6 @@ const TEST_FILE = /(^|[\/])(__tests__|tests?)[\/].+.[cm]?[jt]sx?$|[.-_](test|spe
 const PY_TEST_FILE = /(^|[\/])(test_[^\/]*|[^\/]*_test).py$/i;
 const VERSION_FLAGS = new Set(["--version", "-v", "-V", "--help", "-h"]);
 
-/** Test runners a project's `test` script may start with, with nothing else in the script that could run other things. */
-const TEST_SCRIPT = /^(jest|vitest|mocha|ava|jasmine|tap)((\s+(--?[A-Za-z][\w-]*(=[\w./:@-]+)?))*)$/;
 /** Flags a test run may be given: they select, report or limit tests, and none of them loads code from a path. */
 const SAFE_TEST_FLAGS = new Set([
   "--runInBand", "-i", "--ci", "--silent", "--verbose", "--coverage", "--bail", "-b", "--forceExit", "--detectOpenHandles",
@@ -763,32 +761,68 @@ const SAFE_TEST_FLAGS = new Set([
 /** Flags whose value is the next argument. */
 const TEST_FLAG_TAKES_VALUE = new Set(["--maxWorkers", "-w", "--testNamePattern", "-t", "--testPathPattern"]);
 
+/** The other scripts `npm run <name>` runs on its own: `pre<name>` before it and `post<name>` after it, when package.json has them. */
+export function lifecycleScripts(scripts: Record<string, unknown> | undefined, name: string): { name: string; body: string }[] {
+  return [`pre${name}`, `post${name}`].flatMap((n) => (typeof scripts?.[n] === "string" ? [{ name: n, body: scripts[n] as string }] : []));
+}
+
+/** A project .npmrc setting that changes what runs a script (the shell, or options handed to every node process), or undefined. */
+export function npmrcScriptOverride(cwd: string, repoRoot: string): string | undefined {
+  for (const dir of new Set([cwd, repoRoot])) {
+    let text: string;
+    try {
+      text = fs.readFileSync(path.join(dir, ".npmrc"), "utf-8");
+    } catch {
+      continue;
+    }
+    const m = /^\s*(script-shell|node-options|shell)\s*=/im.exec(text);
+    if (m) return `${path.relative(repoRoot, path.join(dir, ".npmrc")).replace(/\\/g, "/") || ".npmrc"} sets ${m[1].toLowerCase()}`;
+  }
+  return undefined;
+}
+
+/** Tools a check script may be: they test, type-check or lint the project, and run nothing they are not pointed at. */
+const CHECK_TOOLS = new Set(["jest", "vitest", "mocha", "ava", "jasmine", "tap", "tsc", "vue-tsc", "svelte-check", "eslint"]);
+const TEST_RUNNERS = new Set(["jest", "vitest", "mocha", "ava", "jasmine", "tap"]);
+/** One plain argument: no shell syntax, quotes, variables or spaces. */
+const PLAIN_ARG = /^[A-Za-z0-9_.\/:@=,*+-]+$/;
+/** Arguments that never finish (a watcher) or reach outside the project (an absolute path, a parent folder). */
+const NEVER_IN_CHECK = /^(-w|--watch(All)?(=.*)?|watch|dev|serve|--serve)$|^\/|^[A-Za-z]:|(^|[\/=])\.\.([\/]|$)/;
+
 /**
- * `npm run test -- <files and safe flags>` when the project's own `test` script is just a known test runner. This is the
- * run a repair or a check does a dozen times a task, once per test file. Asking each time protects nothing: the agent can
- * already write a test file and run it. A script that does anything beyond starting the runner, or an argument that could load
- * code from elsewhere (a config path, a setup file, a custom runner), still asks.
+ * `npm test` / `npm run <name>` (pnpm, yarn and bun alike) when the script is a plain check: one known test, type-check or lint tool
+ * with plain arguments, nothing between the script name and `--`, no `pre<name>` or `post<name>` script (npm would run those too),
+ * and no project .npmrc that swaps the shell or injects node options. These are what a repair or a check runs again and again, and
+ * asking each time protects nothing: the agent can already write a test file and run it. A script that does anything else (an inline
+ * `node -e` program, `&&`, another program) still goes to the approval rules.
  */
-function isPlainTestScript(rest: string[], cwd: string): boolean {
+function isPlainCheckScript(rest: string[], cwd: string, repoRoot: string): boolean {
+  let name: string;
   let tail: string[];
-  if (rest[0] === "test") tail = rest.slice(1);
-  else if ((rest[0] === "run" || rest[0] === "run-script") && rest[1] === "test") tail = rest.slice(2);
+  if (rest[0] === "test" || rest[0] === "t") [name, tail] = ["test", rest.slice(1)];
+  else if ((rest[0] === "run" || rest[0] === "run-script") && rest[1]) [name, tail] = [rest[1], rest.slice(2)];
   else return false;
   if (tail.length > 0 && tail[0] !== "--") return false;
   tail = tail.slice(1);
-  let script: unknown;
+  let scripts: Record<string, unknown> | undefined;
   try {
-    script = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf-8"))?.scripts?.test;
+    scripts = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf-8"))?.scripts;
   } catch {
     return false;
   }
-  if (typeof script !== "string" || !TEST_SCRIPT.test(script.trim())) return false;
+  const body = scripts?.[name];
+  if (typeof body !== "string") return false;
+  if (lifecycleScripts(scripts, name).length > 0 || npmrcScriptOverride(cwd, repoRoot)) return false;
+  const [tool, ...args] = body.trim().split(/\s+/);
+  if (!tool || !CHECK_TOOLS.has(tool)) return false;
+  if (!args.every((a) => PLAIN_ARG.test(a) && !NEVER_IN_CHECK.test(a))) return false;
+  if (!TEST_RUNNERS.has(tool)) return tail.length === 0; // a type-check or lint run is taken as written
   for (let i = 0; i < tail.length; i++) {
     const a = tail[i];
     if (a.startsWith("-")) {
-      const [name, inline] = [a.split("=")[0], a.includes("=")];
-      if (!SAFE_TEST_FLAGS.has(name)) return false;
-      if (TEST_FLAG_TAKES_VALUE.has(name) && !inline) i++; // its value is the next argument, whatever it says
+      const [flag, inline] = [a.split("=")[0], a.includes("=")];
+      if (!SAFE_TEST_FLAGS.has(flag)) return false;
+      if (TEST_FLAG_TAKES_VALUE.has(flag) && !inline) i++; // its value is the next argument, whatever it says
       continue;
     }
     if (/[;&|<>`$]/.test(a) && !/\s/.test(a)) return false; // a bare shell-looking argument
@@ -815,6 +849,7 @@ export function isReadOnlyGit(rest: string[]): boolean {
  * the command itself. The agent can already write a test file and run it, so asking about these protects nothing and costs
  * the person a decision they cannot judge. True for:
  *   - an installed test / type-check / lint tool (npx jest ..., npm exec tsc ..., pnpm exec vitest ...);
+ *   - a package script that is only such a tool (npm run typecheck when it is `tsc --noEmit`; see isPlainCheckScript);
  *   - node on a test file in the project, with only harmless flags (node --experimental-strip-types a.test.ts, node --test);
  *   - python on a test file, or python -m unittest;
  *   - a bare program asked only for its version or help.
@@ -845,7 +880,7 @@ export function isAutoSafeRun(argv: string[], cwd: string, repoRoot: string): bo
 
   if (exe === "git") return isReadOnlyGit(rest);
 
-  if (["npm", "pnpm", "yarn", "bun"].includes(exe)) return isPlainTestScript(rest, cwd);
+  if (["npm", "pnpm", "yarn", "bun"].includes(exe)) return isPlainCheckScript(rest, cwd, repoRoot);
 
   if (exe === "node") {
     const files: string[] = [];
