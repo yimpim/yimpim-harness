@@ -32,7 +32,6 @@ describe("the schema", () => {
   test("stateDirectory stays (and loads), and the live keys are untouched", () => {
     const c = cfg({ recovery: { stateDirectory: ".agent" }, verification: { androidDeviceSerial: "emu-1", skipProbes: ["web"] } });
     assert.equal(c.recovery.stateDirectory, ".agent");
-    assert.equal(c.recovery.keepBackups, true);
     assert.equal(c.verification.androidDeviceSerial, "emu-1");
     assert.deepEqual(c.verification.skipProbes, ["web"]);
   });
@@ -144,5 +143,32 @@ describe("a model with a fallback behind it gets two tries, the last model gets 
   });
   test("the first-byte wait is untouched at 300 s", () => {
     assert.match(src("src/openrouter.ts"), /const timeoutDurationMs = 300_000;/);
+  });
+});
+
+describe("keys nothing reads, and the second loader nobody used", () => {
+  test("execution.allowedCommands, recovery.keepBackups, recovery.dirtyTreePolicy and safety.allowedPaths are gone, and a config that still sets them loads with them dropped", () => {
+    const parsed = ConfigSchema.parse({
+      execution: { allowedCommands: ["git"] },
+      recovery: { stateDirectory: ".agent", keepBackups: false, dirtyTreePolicy: "refuse" },
+      safety: { allowedPaths: ["a"], blockedDirectories: ["x"] },
+    }) as any;
+    assert.equal("execution" in parsed, false);
+    assert.equal("keepBackups" in parsed.recovery || "dirtyTreePolicy" in parsed.recovery, false);
+    assert.equal("allowedPaths" in parsed.safety, false);
+    assert.equal(parsed.recovery.stateDirectory, ".agent", "the live key next to them still loads");
+    assert.ok(parsed.safety.blockedDirectories.includes("x"));
+  });
+  test("the settings list no longer offers recovery.dirtyTreePolicy, so neither `config list` nor `yimpim init` shows it", () => {
+    assert.equal(SETTINGS.some((s: { key: string }) => s.key === "recovery.dirtyTreePolicy"), false);
+    assert.equal(SETTINGS.some((s: { key: string }) => s.key === "recovery.stateDirectory"), true);
+  });
+  test("loadConfig() and the script that was its only caller are gone; resolveConfig is the one loader", () => {
+    assert.equal(fs.existsSync("src/testVerifier.ts"), false);
+    assert.doesNotMatch(src("src/config.ts"), /loadConfig/);
+    assert.match(src("src/settings.ts"), /export function resolveConfig/);
+  });
+  test("resolveConfig is what tells every file walker which directories to skip", () => {
+    assert.match(src("src/settings.ts"), /setBlockedDirectories\(parsed\.data\.safety\.blockedDirectories\)/);
   });
 });

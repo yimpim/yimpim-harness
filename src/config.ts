@@ -1,9 +1,6 @@
-import fs from "node:fs";
-import path from "node:path";
-import yaml from "yaml";
 import { z } from "zod";
 import { DEFAULT_BLOCKED_FILE_PATTERNS } from "./sensitivePaths.js";
-import { DEFAULT_BLOCKED_DIRECTORIES, setBlockedDirectories } from "./projectPaths.js";
+import { DEFAULT_BLOCKED_DIRECTORIES } from "./projectPaths.js";
 
 /**
  * Every section has defaults so the harness runs against an arbitrary repo with
@@ -198,16 +195,8 @@ export const ConfigSchema = z.object({
       questions: z.enum(["autonomous", "essential", "all"]).default("essential"),
     })
     .prefault({}),
-  execution: z
-    .object({
-      allowedCommands: z
-        .array(z.string())
-        .default(["git", "npm", "pnpm", "yarn", "npx", "node", "python", "pytest", "cargo", "go", "make"]),
-    })
-    .prefault({}),
   safety: z
     .object({
-      allowedPaths: z.array(z.string()).default([]),
       blockedDirectories: z
         .array(z.string())
         .default(DEFAULT_BLOCKED_DIRECTORIES),
@@ -220,8 +209,6 @@ export const ConfigSchema = z.object({
     .object({
       // Where per-project state lives is FIXED at .agent (about a hundred places read it by name); this key only moves .agent/push.json (gitRemote.ts) and is kept so a config that sets it still loads.
       stateDirectory: z.string().default(".agent"),
-      keepBackups: z.boolean().default(true),
-      dirtyTreePolicy: z.enum(["inspect", "refuse", "fail"]).default("inspect"),
     })
     .prefault({}),
   interaction: z
@@ -338,33 +325,3 @@ export const ConfigSchema = z.object({
 
 export type Config = z.infer<typeof ConfigSchema>;
 export type AgentConfig = Config;
-
-export function loadConfig(targetRepoRoot?: string, customConfigPath?: string): Config {
-  const possiblePaths = [
-    customConfigPath,
-    targetRepoRoot ? path.join(targetRepoRoot, "agent.config.yaml") : undefined,
-    targetRepoRoot ? path.join(targetRepoRoot, ".agent", "config.yaml") : undefined,
-    path.resolve(process.cwd(), "agent.config.yaml"),
-  ].filter(Boolean) as string[];
-
-  for (const p of possiblePaths) {
-    if (!fs.existsSync(p)) continue;
-    const raw = yaml.parse(fs.readFileSync(p, "utf-8")) ?? {};
-    const parsed = ConfigSchema.safeParse(raw);
-    if (!parsed.success) {
-      throw new Error(
-        `Invalid config at ${p}:\n` +
-          parsed.error.issues.map((i) => `  ${i.path.join(".") || "(root)"}: ${i.message}`).join("\n")
-      );
-    }
-    console.log(`[CONFIG] Loaded ${p}`);
-    // What every file walker skips follows the user's blocked directories (projectPaths.ts).
-    setBlockedDirectories(parsed.data.safety.blockedDirectories);
-    return parsed.data;
-  }
-
-  // No config anywhere: run on defaults rather than refusing to start.
-  console.log(`[CONFIG] No agent.config.yaml found; using built-in defaults.`);
-  setBlockedDirectories(undefined);
-  return ConfigSchema.parse({});
-}

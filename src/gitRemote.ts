@@ -1,9 +1,9 @@
 /**
  * Per-project, per-machine "does this checkout push to GitHub" preference.
  *
- * Deliberately kept OUT of agent.config.yaml / ConfigSchema: loadConfig()
- * (config.ts) resolves the FIRST config file that exists, in priority order
- * (agent.config.yaml, then .agent/config.yaml) — it does not merge them. A
+ * Deliberately kept OUT of agent.config.yaml / ConfigSchema: the project
+ * config is the FIRST file that exists, in priority order
+ * (agent.config.yaml, then .agent/config.yaml) — the two are not merged. A
  * team-shared, committed agent.config.yaml would therefore silently shadow
  * anything written to .agent/config.yaml, and this decision would never take
  * effect on the one repo shape (a project with real config) it matters most

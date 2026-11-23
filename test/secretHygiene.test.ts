@@ -13,7 +13,8 @@ import { redactMessages, scrubCredentials } from "../src/redact.js";
 import { isSensitiveName, SENSITIVE_PATHSPECS, DEFAULT_BLOCKED_FILE_PATTERNS } from "../src/sensitivePaths.js";
 import { SAFE, readRange, parseCodeRefs } from "../src/codeContext.js";
 import { AgentTools } from "../src/agentTools.js";
-import { ConfigSchema, loadConfig } from "../src/config.js";
+import { ConfigSchema } from "../src/config.js";
+import { resolveConfig } from "../src/settings.js";
 import { OpenRouterClient } from "../src/openrouter.js";
 import { ignoredDirs, setBlockedDirectories, DEFAULT_BLOCKED_DIRECTORIES, GENERATED_DIRS, NATIVE_TREES, TEST_OR_SPEC_DIR, inTestOrSpecDir } from "../src/projectPaths.js";
 import { isTestPath, isScopeExemptPath } from "../src/focusTests.js";
@@ -169,12 +170,19 @@ describe("one ignore list for every walker", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cfg-"));
     try {
       fs.writeFileSync(path.join(dir, "agent.config.yaml"), "safety:\n  blockedDirectories: [generated_stuff, node_modules]\n");
-      const log = console.log;
-      console.log = () => {};
+      // The real loader, with no personal global config underneath it.
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "home-"));
+      const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+      process.env.HOME = home;
+      process.env.USERPROFILE = home;
       try {
-        loadConfig(dir);
+        resolveConfig({ repoRoot: dir });
       } finally {
-        console.log = log;
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+        fs.rmSync(home, { recursive: true, force: true });
       }
       const s = ignoredDirs();
       assert.equal(s.has("generated_stuff"), true);

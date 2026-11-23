@@ -14,6 +14,7 @@ import path from "node:path";
 import yaml from "yaml";
 import { Config, ConfigSchema } from "./config.js";
 import { globalConfigPath, hasGlobalConfig, mergeConfig, readGlobalConfig } from "./globalConfig.js";
+import { setBlockedDirectories } from "./projectPaths.js";
 
 export type SettingType = "string" | "number" | "boolean" | "string[]" | "enum";
 
@@ -353,13 +354,6 @@ export const SETTINGS: SettingDef[] = [
     group: "Recovery",
     description: "Where run state, screenshots and memory are stored inside the target repo.",
   },
-  {
-    key: "recovery.dirtyTreePolicy",
-    type: "enum",
-    choices: ["inspect", "refuse", "fail"],
-    group: "Recovery",
-    description: "What to do when the target repo already has uncommitted changes.",
-  },
 ];
 
 export function findSetting(key: string): SettingDef | undefined {
@@ -511,6 +505,10 @@ export function resolveConfig(opts: ResolveOptions = {}): ResolvedConfig {
         parsed.error.issues.map((i) => `  ${i.path.join(".") || "(root)"}: ${i.message}`).join("\n")
     );
   }
+
+  // What every file walker skips follows the user's blocked directories (projectPaths.ts). This is the one place the config is
+  // finalised for a run, so it is set here (it used to be set only by a second loader that no run used).
+  setBlockedDirectories(parsed.data.safety.blockedDirectories);
 
   return { config: parsed.data, sourcePath, applied };
 }
