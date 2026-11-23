@@ -11,7 +11,9 @@ import {
 } from "../src/wizard/keyCheck.js";
 import {
   formatContext, formatPrice, modelLabel, matchesQuery, rankModels, currentFirst, vendorOf, VISIBLE_ROWS,
+  rowLayout, wrapText, visibleWidth, pickOne, RAIL_WIDTH, RADIO_WIDTH,
 } from "../src/wizard/modelPicker.js";
+import { PassThrough, Writable } from "node:stream";
 import { canRunWizard, holdRawMode, rawHoldCount } from "../src/wizard/prompts.js";
 import { chainsForOneModel, summaryLines, emptyChains, NON_INTERACTIVE_HELP } from "../src/setup.js";
 
@@ -125,14 +127,84 @@ describe("the model picker searches the whole catalog", () => {
     assert.equal(currentFirst(catalog, "anthropic/claude-sonnet")[0].id, "anthropic/claude-sonnet");
     assert.equal(currentFirst(catalog, "gone/model")[0].id, catalog[0].id);
   });
-  test("each row shows the id, price in and out per 1M tokens, and the context window", () => {
-    const row = modelLabel(m("google/gemini-pro", { promptCost: 1.25, completionCost: 10, contextLength: 1_048_576 }), 20, true);
-    assert.match(row, /^google\/gemini-pro\s+\$1\.25 \/ \$10\.0 per 1M\s+1M ctx  ● current$/);
+  test("each row shows the id, price in and out per 1M tokens, the context window, the current marker and the name", () => {
+    const row = modelLabel(m("google/gemini-pro", { name: "Gemini Pro", promptCost: 1.25, completionCost: 10, contextLength: 1_048_576 }), rowLayout(160, 20), true);
+    assert.match(row, /^google\/gemini-pro\s+\$1\.25 \/ \$10\.0 per 1M\s+1M ctx · ● current · Gemini Pro$/);
     assert.equal(formatPrice({ promptCost: 0, completionCost: 0 }), "free");
     assert.equal(formatPrice({ promptCost: null, completionCost: 2 }), "variable price");
     assert.equal(formatContext(200_000), "200k ctx");
     assert.equal(formatContext(2_000_000), "2M ctx");
     assert.equal(vendorOf("Google/x"), "google");
+  });
+});
+
+describe("a long third column wraps under itself, never under the id", () => {
+  const long = m("acme/very-capable-model-v2", {
+    name: "Acme: A Very Capable Model With An Unusually Long Display Name That Runs Past The Edge",
+    contextLength: 262_144,
+  });
+  // What clack puts on screen for an option: the rail, the radio on the first line only, then the label's lines.
+  const onScreen = (label: string) => label.split("\n").map((l, i) => (i === 0 ? "│  ● " : "│  ") + l);
+
+  test("at 80 columns every line fits, and continuation lines start exactly at the third column", () => {
+    const layout = rowLayout(80, long.id.length);
+    const lines = onScreen(modelLabel(long, layout, true));
+    assert.ok(lines.length > 1, "the long name had to wrap");
+    for (const l of lines) assert.ok(visibleWidth(l) <= 80, `${visibleWidth(l)} > 80: ${l}`);
+    const col3 = layout.detailsOffset;
+    assert.equal(lines[0].indexOf("262k ctx"), col3, "the first line's third column starts at the computed offset");
+    for (const l of lines.slice(1)) {
+      assert.equal(l.slice(RAIL_WIDTH, col3).trim(), "", `nothing between the rail and the third column: ${l}`);
+      assert.notEqual(l[col3], " ", `text starts right at the third column: ${l}`);
+      assert.equal(l.slice(0, RAIL_WIDTH), "│  ");
+    }
+    // Inside the label itself (before clack adds its rail), a continuation line is exactly that many spaces, then text.
+    for (const l of modelLabel(long, layout).split("\n").slice(1)) assert.match(l, new RegExp(`^ {${col3 - RAIL_WIDTH}}\\S`));
+  });
+
+  test("an id longer than its column wraps inside the first column and the other columns stay aligned", () => {
+    const longId = m("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning-extended-context:free", { name: "" });
+    const layout = rowLayout(80, longId.id.length);
+    const lines = onScreen(modelLabel(longId, layout));
+    for (const l of lines) assert.ok(visibleWidth(l) <= 80, l);
+    const priceAt = RAIL_WIDTH + RADIO_WIDTH + layout.idWidth + 2;
+    assert.equal(lines[0].indexOf("$1.00"), priceAt);
+    assert.equal(lines.map((l) => l.slice(RAIL_WIDTH + RADIO_WIDTH).trimEnd()).join("").replace(/\s/g, "").startsWith("nvidia/nemotron"), true);
+  });
+
+  test("words wrap, and a word longer than the width is broken hard", () => {
+    assert.deepEqual(wrapText("one two three", 7), ["one two", "three"]);
+    assert.deepEqual(wrapText("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+    assert.deepEqual(wrapText("", 5), [""]);
+    assert.equal(visibleWidth("\x1b[2mdim\x1b[22m"), 3);
+  });
+
+  test("drawn by clack itself at 80 columns: rows fit, the third column continues under itself, and the frame keeps its bottom border", async () => {
+    const input = new PassThrough() as any;
+    input.isTTY = true;
+    input.setRawMode = () => {};
+    let written = "";
+    const output = new Writable({ write(c, _e, cb) { written += c.toString(); cb(); } }) as any;
+    output.columns = 80;
+    output.rows = 24;
+    output.isTTY = true;
+    const models = [long, ...Array.from({ length: 30 }, (_, i) => m(`vendor/model-${i}`, { name: `Model ${i}` }))];
+    const pending = pickOne({ message: "Discovery", models, current: long.id, input, output });
+    await new Promise((r) => setTimeout(r, 50));
+    const frame = written.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split(/\r?\n/);
+    input.write("\x1b"); // Esc: cancel
+    await assert.rejects(pending);
+
+    for (const l of frame) assert.ok(visibleWidth(l) <= 80, `${visibleWidth(l)} > 80: ${l}`);
+    const first = frame.findIndex((l) => l.includes("acme/very-capable-model-v2"));
+    assert.ok(first >= 0);
+    const col3 = frame[first].indexOf("262k ctx");
+    assert.ok(col3 > 40, "the third column is to the right of id and price");
+    const cont = frame[first + 1];
+    assert.equal(cont.slice(3, col3).trim(), "", `continuation is blank up to the third column: ${cont}`);
+    assert.notEqual(cont[col3], " ", `and its text starts there: ${cont}`);
+    assert.ok(frame.length <= 24 + 2, "taller rows mean fewer of them, not a frame taller than the terminal");
+    assert.ok(frame.some((l) => l.includes("Enter: confirm")), "the footer is still drawn");
   });
 });
 

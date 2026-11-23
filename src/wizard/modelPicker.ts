@@ -31,9 +31,86 @@ export function formatPrice(m: Pick<CatalogModel, "promptCost" | "completionCost
   return `${d(m.promptCost)} / ${d(m.completionCost)} per 1M`;
 }
 
-/** One row of the list: id, then price in/out and context, aligned. */
-export function modelLabel(m: CatalogModel, idWidth: number, isCurrent = false): string {
-  return `${m.id.padEnd(idWidth)}  ${formatPrice(m).padEnd(24)} ${formatContext(m.contextLength)}${isCurrent ? "  ● current" : ""}`;
+// ---- the row layout ----------------------------------------------------------
+//
+// clack draws each option as "│  ● label": a 3-column rail, then the radio dot and a space, then the label. A label that holds
+// "\n" is split into lines and every line gets only the rail, so a continuation line starts 2 columns left of where the label
+// began. Rows are laid out as a 3-column table sized to the terminal, and continuation lines are indented to make up for that.
+
+/** "│  " in front of every line clack draws. */
+export const RAIL_WIDTH = 3;
+/** "● " in front of an option's first line only. */
+export const RADIO_WIDTH = 2;
+const GAP = 2;
+const PRICE_WIDTH = 22;
+const MIN_DETAILS_WIDTH = 16;
+const MIN_ID_WIDTH = 16;
+
+const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
+/** Visible width: ANSI escape codes take no columns. */
+export function visibleWidth(s: string): number {
+  return s.replace(ANSI, "").length;
+}
+
+/** Word-wraps to `width`, hard-breaking any single word longer than that. Never returns an empty list. */
+export function wrapText(text: string, width: number): string[] {
+  const w = Math.max(1, width);
+  const lines: string[] = [];
+  let line = "";
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    let rest = word;
+    while (visibleWidth(rest) > w) {
+      if (line) { lines.push(line); line = ""; }
+      lines.push(rest.slice(0, w));
+      rest = rest.slice(w);
+    }
+    if (!rest) continue;
+    if (!line) line = rest;
+    else if (visibleWidth(line) + 1 + visibleWidth(rest) <= w) line += " " + rest;
+    else { lines.push(line); line = rest; }
+  }
+  if (line || lines.length === 0) lines.push(line);
+  return lines;
+}
+
+export interface RowLayout {
+  idWidth: number;
+  priceWidth: number;
+  detailsWidth: number;
+  /** Screen column where the details column starts, counting clack's rail and radio. */
+  detailsOffset: number;
+}
+
+/** Column widths for a terminal `columns` wide, given the longest id in the list. */
+export function rowLayout(columns: number, longestId: number): RowLayout {
+  const labelWidth = Math.max(40, columns) - RAIL_WIDTH - RADIO_WIDTH;
+  const idWidth = Math.max(MIN_ID_WIDTH, Math.min(longestId, labelWidth - PRICE_WIDTH - MIN_DETAILS_WIDTH - 2 * GAP));
+  const detailsWidth = Math.max(MIN_DETAILS_WIDTH, labelWidth - idWidth - PRICE_WIDTH - 2 * GAP);
+  return { idWidth, priceWidth: PRICE_WIDTH, detailsWidth, detailsOffset: RAIL_WIDTH + RADIO_WIDTH + idWidth + GAP + PRICE_WIDTH + GAP };
+}
+
+/**
+ * One option's label: id, price in/out per 1M, then details (context, current marker, model name). Each column wraps inside its
+ * own width, so a long details column continues on lines that start exactly under it, never under the id.
+ */
+export function modelLabel(m: CatalogModel, layout: RowLayout, isCurrent = false): string {
+  const details = [formatContext(m.contextLength), isCurrent ? "● current" : "", m.name && m.name !== m.id ? m.name : ""].filter(Boolean).join(" · ");
+  const cells = [wrapText(m.id, layout.idWidth), wrapText(formatPrice(m), layout.priceWidth), wrapText(details, layout.detailsWidth)];
+  const widths = [layout.idWidth, layout.priceWidth, layout.detailsWidth];
+  const height = Math.max(...cells.map((c) => c.length));
+  const lines: string[] = [];
+  for (let i = 0; i < height; i++) {
+    const row = cells
+      .map((c, col) => {
+        const text = c[i] ?? "";
+        return col === cells.length - 1 ? text : text + " ".repeat(widths[col] - visibleWidth(text));
+      })
+      .join(" ".repeat(GAP))
+      .replace(/\s+$/, "");
+    // Lines after the first have no radio in front of them; indent by its width so the columns stay put.
+    lines.push(i === 0 ? row : " ".repeat(RADIO_WIDTH) + row);
+  }
+  return lines.join("\n");
 }
 
 function tokens(query: string): string[] {
@@ -102,26 +179,35 @@ export async function pickOne(o: {
   current?: string;
   extra?: ExtraChoice[];
   placeholder?: string;
+  /** Test seams; default to the process's own terminal. */
+  input?: NodeJS.ReadableStream;
+  output?: NodeJS.WritableStream & { columns?: number };
 }): Promise<string> {
   const models = currentFirst(o.models, o.current);
   const byId = new Map(models.map((m) => [m.id, m]));
   const extra = o.extra ?? [];
   const extraValues = new Set(extra.map((e) => e.value));
-  const idWidth = Math.min(44, Math.max(12, ...models.map((m) => m.id.length)));
-  const toOption = (m: CatalogModel) => ({ value: m.id, label: modelLabel(m, idWidth, m.id === o.current), hint: m.name });
+  const out = (o.output ?? process.stdout) as { columns?: number };
+  const longestId = Math.max(12, ...models.map((m) => m.id.length));
 
-  let lastQuery: string | null = null;
+  // Rebuilt when the search or the terminal width changes, so a resized window re-flows the columns.
+  let lastKey: string | null = null;
   let lastList: { value: string; label: string; hint?: string }[] = [];
   const options = function (this: { userInput?: string } | undefined) {
     const q = String(this?.userInput ?? "");
-    if (q !== lastQuery) {
-      lastQuery = q;
-      lastList = [...extra, ...rankModels(models, q).map(toOption)];
+    const columns = out.columns || 80;
+    const key = `${columns}\u0000${q}`;
+    if (key !== lastKey) {
+      lastKey = key;
+      const layout = rowLayout(columns, longestId);
+      lastList = [...extra, ...rankModels(models, q).map((m) => ({ value: m.id, label: modelLabel(m, layout, m.id === o.current) }))];
     }
     return lastList;
   };
 
   const value = await p.autocomplete<string>({
+    ...(o.input ? { input: o.input as any } : {}),
+    ...(o.output ? { output: o.output as any } : {}),
     message: `${o.message}  ${models.length} models`,
     options,
     filter: (search, opt) => (extraValues.has(opt.value) ? !search.trim() : matchesQuery(byId.get(opt.value)!, search)),
