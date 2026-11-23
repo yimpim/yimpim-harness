@@ -166,7 +166,7 @@ import { type SpecialistCommand, type SpecialistChoice, unsetRoles, shouldAsk, h
 import { PERSONAS, Persona, unsetLabel, candidatesFor, chainProblem, fetchCatalog, formatModel, roleInfoWire, type CatalogModel } from "./models.js";
 import { p as wizard, answered, canRunWizard, withExclusiveStdin, WizardCancelled, ESC_HINT } from "./wizard/prompts.js";
 import { checkKey, describeKey, looksLikeOpenRouterKey, maskKey, sanitize, spendLimitWarning } from "./wizard/keyCheck.js";
-import { pickChain } from "./wizard/modelPicker.js";
+import { pickChain, roleRow, roleColumnWidth } from "./wizard/modelPicker.js";
 import { storeApiKey } from "./secrets.js";
 import { RunLock, describeHeldLock } from "./runLock.js";
 import { events, formatTokens, UsageReport } from "./events.js";
@@ -1017,7 +1017,12 @@ async function changeModel(config: AgentConfig, repoRoot: string, preselect?: Pe
             maxItems: 14,
             options: PERSONAS.map((p) => ({
               value: p.key,
-              label: `${p.label.padEnd(20)} ${config.models[p.key]?.join("  →  ") || unsetLabel(p, (k) => PERSONAS.find((x) => x.key === k)?.label ?? k)}`,
+              // One column width for every role, and long chains wrap at a "→" under their own first model, not at the left margin.
+              label: roleRow(p.label, config.models[p.key], unsetLabel(p, (k) => PERSONAS.find((x) => x.key === k)?.label ?? k), {
+                columns: process.stdout.columns || 80,
+                labelWidth: roleColumnWidth(PERSONAS.map((x) => x.label)),
+                reserve: p.optional ? " (optional)".length : 0,
+              }),
               hint: p.optional ? "optional" : undefined,
             })),
           })

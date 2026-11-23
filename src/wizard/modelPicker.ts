@@ -113,6 +113,55 @@ export function modelLabel(m: CatalogModel, layout: RowLayout, isCurrent = false
   return lines.join("\n");
 }
 
+/** Between the models of a role's chain in /model's role list. */
+export const CHAIN_SEPARATOR = "  →  ";
+
+/** Width of the role column in /model's role list: the longest label plus a gap, so every chain starts in the same column. */
+export function roleColumnWidth(labels: string[]): number {
+  return Math.max(...labels.map(visibleWidth)) + GAP;
+}
+
+/**
+ * One row of /model's role list: the label padded to `labelWidth`, then the chain. A chain too long for the terminal breaks at a separator,
+ * and each continuation line starts with "→" exactly under the chain's first model (a hanging indent), never at the left margin as a
+ * terminal's own soft wrap would. `reserve` keeps room at the end for what clack adds after a label (the " (optional)" hint).
+ */
+export function roleRow(label: string, chain: string[] | undefined, unsetText: string, opts: { columns: number; labelWidth: number; reserve?: number }): string {
+  const head = label + " ".repeat(Math.max(1, opts.labelWidth - visibleWidth(label)));
+  if (!chain || chain.length === 0) return head + unsetText;
+  // One column spare: a line filling the last column makes some consoles wrap the cursor, leaving a blank line under the row.
+  const width = Math.max(12, opts.columns - RAIL_WIDTH - RADIO_WIDTH - opts.labelWidth - 1);
+  const reserve = opts.reserve ?? 0;
+  const arrow = CHAIN_SEPARATOR.trimStart(); // "→  " opens each continuation line
+  const lines: string[] = [];
+  let line = "";
+  for (const id of chain) {
+    if (!line) {
+      line = id;
+    } else if (visibleWidth(line) + visibleWidth(CHAIN_SEPARATOR) + visibleWidth(id) <= width) {
+      line += CHAIN_SEPARATOR + id;
+    } else {
+      lines.push(line);
+      line = arrow + id;
+    }
+    // One id wider than the whole column: hard-broken, never spilling past the edge.
+    while (visibleWidth(line) > width) {
+      lines.push(line.slice(0, width));
+      line = line.slice(width);
+    }
+  }
+  // The hint goes after the LAST line only: when it would not fit there, the last model moves to a line of its own.
+  const cut = line.lastIndexOf(CHAIN_SEPARATOR);
+  if (reserve > 0 && visibleWidth(line) + reserve > width && cut > 0) {
+    lines.push(line.slice(0, cut));
+    line = arrow + line.slice(cut + CHAIN_SEPARATOR.length);
+  }
+  lines.push(line);
+  // Continuation lines have no radio in front; indent by it and by the role column so they start under the first model.
+  const indent = " ".repeat(RADIO_WIDTH + opts.labelWidth);
+  return lines.map((l, i) => (i === 0 ? head + l : indent + l)).join("\n");
+}
+
 function tokens(query: string): string[] {
   return query.toLowerCase().split(/\s+/).filter(Boolean);
 }
