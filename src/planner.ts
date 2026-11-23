@@ -14,6 +14,7 @@ import { z } from "zod";
 import { normalizeVerificationIds, parseVerificationBullet } from "./verificationBullets.js";
 import { ManualStep } from "./agentTools.js";
 import { ProposedDependencySchema, ProposedToolSchema } from "./setupProposal.js";
+import { mergeRedTestPhases, type RedTestMerge } from "./redTestMerge.js";
 
 const stringListSchema = z
   .union([z.array(z.string()), z.string().transform((s) => [s])])
@@ -384,6 +385,8 @@ export interface PlanResult {
    * lost just because the plan overflowed the limit.
    */
   allPhases: PlannedPhase[];
+  /** Phases that only wrote a failing test, folded into the phase after them (see redTestMerge.ts). Empty when there were none. */
+  redTestMerges?: RedTestMerge[];
 }
 
 export interface DiscoveryTaskFindings {
@@ -571,7 +574,7 @@ export function parsePlan(raw: string, fallbackGoal: string): PlanResult {
   // allPhases so the orchestrator can send the overflow back to the planner
   // for consolidation instead of quietly losing phases 13+.
   const proposedCount = result.data.phases.length;
-  const allPhases = result.data.phases.map((p, i) => {
+  const shaped = result.data.phases.map((p, i) => {
     let contracts = p.contracts ?? p.contractSpecifications;
     if (!contracts && (p.signatures?.length || p.types?.length || p.constraints?.length)) {
       contracts = {
@@ -589,6 +592,8 @@ export function parsePlan(raw: string, fallbackGoal: string): PlanResult {
   // Every verification bullet gets a stable ID (A1, A2, ...) so later steps can
   // refer to one assertion exactly. Done on allPhases: phases is a slice of the
   // same objects, and IDs stay unique across the whole proposal.
+  // A phase that only writes a test meant to fail cannot pass on its own: it joins the phase with the fix, before the cap and the IDs.
+  const { phases: allPhases, merges: redTestMerges } = mergeRedTestPhases(shaped);
   normalizeVerificationIds({ phases: allPhases });
   const phases = allPhases.slice(0, MAX_PLAN_PHASES);
 
@@ -598,6 +603,7 @@ export function parsePlan(raw: string, fallbackGoal: string): PlanResult {
     raw,
     truncatedFromPhaseCount: proposedCount > MAX_PLAN_PHASES ? proposedCount : undefined,
     allPhases,
+    redTestMerges,
   };
 }
 

@@ -187,6 +187,7 @@ import { runControl, AbortedError, askAnywhere, askChoice, setQuestionExplainer,
 import { makeTimeoutResolver } from "./questionResolver.js";
 import { plainWordsFor } from "./plainWords.js";
 import { commitOnly } from "./gitCommit.js";
+import { mergeRedTestPhases, describeRedTestMerge } from "./redTestMerge.js";
 import { terminalView, isVerbose, setVerbose, setStatusAvailable, wrapForTerminal } from "./consoleView.js";
 import { composeStatus, enterStep, liveCallCount, resetStep, stepActive } from "./liveCalls.js";
 import { installPersistentInput, registerLiveCommands, printAbove, writeRawAbove, pauseInput, resumeInput, setStatusLine, setModelStrip, hasPinnedInput, openPanel, refreshPanel } from "./terminalInput.js";
@@ -5465,7 +5466,9 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
       planOutput = cachedState.planOutput;
 
       if (cachedState.plan) {
-        activePlan = cachedState.plan;
+        const resumed = mergeRedTestPhases(cachedState.plan.phases, new Set(cachedState.completedPhaseIds ?? []));
+        activePlan = { ...cachedState.plan, phases: resumed.phases };
+        for (const m of resumed.merges) console.log(describeRedTestMerge(m));
         completedPhaseIds.push(...(cachedState.completedPhaseIds ?? []));
         taskProgress = Array.isArray(cachedState.progress) ? cachedState.progress : [];
         const remaining = activePlan.phases.length - completedPhaseIds.length;
@@ -6486,6 +6489,7 @@ ${discoveryOutput ?? ""}`,
     } else {
       // No Planner ran for a diagnosed fix: the plan was built from the diagnosis, and the line must not say otherwise.
       console.log(direct ? `[FIX] The fix is ${activePlan.phases.length} phase(s), built from the diagnosis.` : `[PLANNER] Produced ${activePlan.phases.length} phase(s).`);
+      for (const m of parsed.redTestMerges ?? []) console.log(describeRedTestMerge(m));
       if (parsed.truncatedFromPhaseCount) {
         console.warn(
           `[PLANNER] ⚠️ The model actually proposed ${parsed.truncatedFromPhaseCount} phases — capped at 12; ` +
@@ -6683,6 +6687,7 @@ The user wants you to decide, not ask: ${d.choice}`);
         );
       }
       console.log(`[PLANNER] Produced ${activePlan.phases.length} phase(s) after clarification.`);
+      for (const m of parsed.redTestMerges ?? []) console.log(describeRedTestMerge(m));
       if (parsed.truncatedFromPhaseCount) {
         console.warn(
           `[PLANNER] ⚠️ The model actually proposed ${parsed.truncatedFromPhaseCount} phases — capped at 12; ` +

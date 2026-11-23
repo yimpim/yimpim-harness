@@ -264,6 +264,12 @@ STRICT ARCHITECTURAL & ATOMIC RULES:
      a rename touching 5 files that all reference the same renamed symbol is still ONE phase even in a plan
      with room to spare. Prose-only mentions (a comment, a log string, a README line) are NOT coupled this
      way — they never break compilation, so they may stay in their own single-file phases as normal.
+   - EXCEPTION — A TEST AND ITS FIX ARE ONE PHASE: a new or changed test and the production change that makes
+     it pass MUST be in the SAME phase. NEVER plan a phase that only writes a test meant to fail ("write a
+     failing test first", "fails on the unpatched code", a "red baseline") with the fix in a later phase: every
+     failing test blocks its phase, and the fix is out of that phase's reach, so the phase can never pass.
+     Writing the test first is fine as an order of work INSIDE the phase; its checks must expect the test to
+     PASS by the end of the phase. This is unconditional, like the rename exception above.
 
 2. EXPLICIT FILE TARGETS:
    - Every phase must name the exact file path. Do NOT tell the editor to explore or search.
