@@ -12,7 +12,7 @@ import {
 import {
   formatContext, formatPrice, modelLabel, matchesQuery, rankModels, currentFirst, vendorOf, VISIBLE_ROWS,
 } from "../src/wizard/modelPicker.js";
-import { canRunWizard } from "../src/wizard/prompts.js";
+import { canRunWizard, holdRawMode, rawHoldCount } from "../src/wizard/prompts.js";
 import { chainsForOneModel, summaryLines, emptyChains, NON_INTERACTIVE_HELP } from "../src/setup.js";
 
 const KEY = "sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
@@ -173,6 +173,45 @@ describe("setup", () => {
   });
 });
 
+describe("raw mode is held for the whole wizard (the Windows dead-keys bug)", () => {
+  const fakeStdin = () => {
+    const calls: boolean[] = [];
+    const s: any = { isTTY: true, setRawMode(m: boolean) { calls.push(m); return s; } };
+    return { s, calls };
+  };
+  test("while held, setRawMode(false) keeps raw mode on; released, it works again", () => {
+    const { s, calls } = fakeStdin();
+    const release = holdRawMode(s);
+    assert.deepEqual(calls, [true], "holding turns raw mode on at once");
+    s.setRawMode(false);
+    assert.deepEqual(calls, [true, true], "a prompt ending (or a readline closing) cannot drop raw mode");
+    release();
+    s.setRawMode(false);
+    assert.deepEqual(calls, [true, true, false], "the real setRawMode is back");
+    assert.equal(rawHoldCount(), 0);
+  });
+  test("holds nest: only the outermost release gives setRawMode back, and releasing twice is harmless", () => {
+    const { s, calls } = fakeStdin();
+    const outer = holdRawMode(s);
+    const inner = holdRawMode(s);
+    inner();
+    inner();
+    s.setRawMode(false);
+    assert.equal(calls.at(-1), true, "still held by the outer hold");
+    outer();
+    s.setRawMode(false);
+    assert.equal(calls.at(-1), false);
+  });
+  test("no terminal: nothing is touched", () => {
+    const s: any = { isTTY: false, setRawMode: () => { throw new Error("must not be called"); } };
+    holdRawMode(s)();
+  });
+  test("setup and every session menu run inside the hold", () => {
+    assert.match(src("setup.ts"), /return withExclusiveStdin\(\(\) => runSetupSteps\(force\)\)/);
+    assert.match(src("wizard/prompts.ts"), /const release = holdRawMode\(stdin\);/);
+  });
+});
+
 describe("wizard screens keep stdin to themselves and stay off the phone", () => {
   test("a wizard runs only where both stdin and stdout are terminals", () => {
     assert.equal(canRunWizard({ isTTY: true }, { isTTY: true }), true);
@@ -187,10 +226,10 @@ describe("wizard screens keep stdin to themselves and stay off the phone", () =>
       assert.match(body, /await withExclusiveStdin\(/, fn);
     }
   });
-  test("withExclusiveStdin pauses only a live input line, and restores raw mode and the line in finally", () => {
+  test("withExclusiveStdin pauses only a live input line, and restores the line; raw mode goes back only outside a session", () => {
     const ui = src("wizard/prompts.ts");
     assert.match(ui, /const owned = inputActive\(\);\s*if \(owned\) pauseInput\(\);/);
-    assert.match(ui, /finally \{\s*try \{ stdin\.setRawMode\?\.\(wasRaw\); \} catch[^}]*\}\s*if \(owned\) resumeInput\(\);/);
+    assert.match(ui, /finally \{\s*release\(\);\s*if \(owned\) resumeInput\(\);\s*else if \(!inputInstalled\(\) && rawHolds === 0\) \{\s*try \{ stdin\.setRawMode\?\.\(wasRaw\); \}/);
   });
   test("the old hand-written readline prompts are gone", () => {
     const all = src("index.ts") + src("setup.ts");

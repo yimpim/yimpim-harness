@@ -12,7 +12,7 @@ import { CatalogModel, PERSONAS, Persona, candidatesFor, fetchCatalog } from "./
 import { describeBackend, loadStoredKey, storeApiKey, type SecretBackend } from "./secrets.js";
 import { hasGlobalConfig, readGlobalConfig, writeGlobalConfig } from "./globalConfig.js";
 import { which } from "./capabilities.js";
-import { p, answered, canRunWizard, WizardCancelled } from "./wizard/prompts.js";
+import { p, answered, canRunWizard, withExclusiveStdin, WizardCancelled } from "./wizard/prompts.js";
 import { checkKey, describeKey, looksLikeOpenRouterKey, maskKey, sanitize, spendLimitWarning } from "./wizard/keyCheck.js";
 import { pickChain, pickOne, vendorOf, NO_BACKUP } from "./wizard/modelPicker.js";
 
@@ -66,7 +66,11 @@ export async function runSetup(force = false): Promise<number> {
     for (const l of NON_INTERACTIVE_HELP) console.error(l);
     return 1;
   }
+  // One stdin hold for the whole wizard: raw mode stays on between its prompts (see withExclusiveStdin / holdRawMode).
+  return withExclusiveStdin(() => runSetupSteps(force));
+}
 
+async function runSetupSteps(force: boolean): Promise<number> {
   let keySaved = false;
   try {
     p.intro("YIMPIM setup");

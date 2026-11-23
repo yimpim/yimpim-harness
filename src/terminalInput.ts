@@ -718,6 +718,11 @@ function teardown(): void {
  * part of its own contract, which would silently re-enable flow to this
  * interface's still-attached listeners too if they weren't fully torn down.
  */
+/** True once the persistent input line is installed for this session, whether or not it is paused right now. */
+export function inputInstalled(): boolean {
+  return installed;
+}
+
 /** True while the persistent input line is installed and listening (not paused). */
 export function inputActive(): boolean {
   return installed && Boolean(rl);
