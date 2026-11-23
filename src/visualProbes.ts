@@ -812,7 +812,7 @@ export async function probeIOS(
 
 const URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?:\/\S*)?/i;
 
-interface ServerHandle {
+export interface ServerHandle {
   proc: ChildProcess | null;
   url: string | null;
   log: string;
@@ -823,7 +823,7 @@ interface ServerHandle {
  * reliable across frameworks than guessing ports. Falls back to probing
  * candidate URLs when the server prints nothing useful.
  */
-async function startServer(
+export async function startServer(
   bin: string,
   args: string[],
   cwd: string,
@@ -903,7 +903,7 @@ function isReachable(urlStr: string): Promise<boolean> {
   });
 }
 
-function stopServer(handle: ServerHandle): void {
+export function stopServer(handle: ServerHandle): void {
   const proc = handle.proc;
   if (!proc?.pid) return;
   try {
