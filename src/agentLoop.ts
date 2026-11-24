@@ -313,6 +313,8 @@ export interface LabeledCompletionOptions {
   retryOf?: string;
   attempt?: number;
   reason?: string;
+  /** A background check with no visible result: its worker is not shown on a phone (see events.ts's background). */
+  background?: boolean;
 }
 
 /**
@@ -329,10 +331,12 @@ export interface LabeledCompletionOptions {
  */
 export async function runLabeledCompletion(options: LabeledCompletionOptions): Promise<string> {
   const { client, models, messages, agentName } = options;
+  const background = options.background ? { background: true } : {};
   events.emit({
     type: "agent.start",
     agent: agentName,
     models,
+    ...background,
     ...(options.retryOf ? { retryOf: options.retryOf, attempt: options.attempt, reason: options.reason } : options.reason ? { reason: options.reason } : {}),
   });
   try {
@@ -346,10 +350,10 @@ export async function runLabeledCompletion(options: LabeledCompletionOptions): P
       typeof response === "string"
         ? response
         : response?.content ?? response?.choices?.[0]?.message?.content ?? response?.message?.content ?? "";
-    events.emit({ type: "agent.end", agent: agentName, rounds: 1, outcome: "completed" });
+    events.emit({ type: "agent.end", agent: agentName, rounds: 1, outcome: "completed", ...background });
     return typeof text === "string" ? text : "";
   } catch (err: any) {
-    events.emit({ type: "agent.end", agent: agentName, rounds: 1, outcome: "error" });
+    events.emit({ type: "agent.end", agent: agentName, rounds: 1, outcome: "error", ...background });
     throw err;
   }
 }

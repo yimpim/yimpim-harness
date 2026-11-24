@@ -109,6 +109,8 @@ export function translateForRemote(
         },
       };
     case "agent.start": {
+      // A background check with no visible result is not a worker card (see events.ts's background).
+      if (event.background) return undefined;
       // ADVISOR is the one agent that can run OUTSIDE a task (an /ask asked
       // while idle) — every other agent only ever runs between this task's
       // own taskId mint and its task.end, so `taskId` is never stale for
@@ -127,6 +129,9 @@ export function translateForRemote(
           agent: event.agent,
           phaseId: currentPhase?.id,
           phaseName: currentPhase?.name,
+          // A security check (a command's review, the post-phase review) belongs to the phase it runs in, or the one just finished
+          // when it runs between phases: a phone nests it inside that phase's card instead of opening a card of its own.
+          ...(event.agent === "SECURITY" && currentPhase?.id ? { parentPhaseId: currentPhase.id } : {}),
           acceptanceCriteria: currentPhase?.verification,
           retryOf: event.retryOf,
           attempt: event.attempt,
@@ -136,6 +141,7 @@ export function translateForRemote(
       };
     }
     case "agent.end": {
+      if (event.background) return undefined;
       const workerTaskId = event.agent === "ADVISOR" ? (taskRunning ? taskId : undefined) : taskId;
       return {
         kind: "worker.end",

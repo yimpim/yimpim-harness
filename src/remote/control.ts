@@ -14,6 +14,7 @@ import { PendingQuestion } from "./protocol.js";
 import { startPrompt } from "../terminalPrompt.js";
 import { withPlainWords, type PlainExplanation } from "../plainWords.js";
 import { events } from "../events.js";
+import { logLocal } from "../localLog.js";
 import fs from "fs";
 import path from "path";
 
@@ -23,6 +24,9 @@ export class AbortedError extends Error {
     this.name = "AbortedError";
   }
 }
+
+/** Where an answer came from. A timeout's answer is reported once it is final (see reportTimedOutAnswer), not when the wait ends. */
+export type AnswerSource = "terminal" | "phone" | "timeout" | "model";
 
 interface Waiter {
   question: PendingQuestion;
@@ -36,6 +40,8 @@ class RunControl {
   private waiters = new Map<string, Waiter>();
   private listeners: ((q: PendingQuestion) => void)[] = [];
   private resolvedListeners: ((id: string) => void)[] = [];
+  // Told the answer itself, not just that a question went away, so a phone can show "Q: … A: …" (question.answered).
+  private answeredListeners: ((q: PendingQuestion, answer: string, by: AnswerSource) => void)[] = [];
   // A phone message with nowhere to land right now (nothing is pending) — see
   // provideForNextQuestion. Carries when it was queued so ask() can tell a
   // genuine "typed a task while the desktop was still finishing up" race
@@ -122,6 +128,28 @@ class RunControl {
     this.resolvedListeners.push(fn);
   }
 
+  /** Every answered question, with its answer and where it came from. Not called when a stop settles questions with their defaults. */
+  onQuestionAnswered(fn: (q: PendingQuestion, answer: string, by: AnswerSource) => void): void {
+    this.answeredListeners.push(fn);
+  }
+
+  offQuestionAnswered(fn: (q: PendingQuestion, answer: string, by: AnswerSource) => void): void {
+    this.answeredListeners = this.answeredListeners.filter((f) => f !== fn);
+  }
+
+  private tellAnswered(q: PendingQuestion, answer: string, by: AnswerSource): void {
+    for (const fn of this.answeredListeners) {
+      try {
+        fn(q, answer, by);
+      } catch {}
+    }
+  }
+
+  /** A question nobody answered in time: what was finally taken (the default, or a model's decision). */
+  reportTimedOutAnswer(q: PendingQuestion, answer: string, byModel: boolean): void {
+    this.tellAnswered(q, answer, byModel ? "model" : "timeout");
+  }
+
   offQuestionResolved(fn: (id: string) => void): void {
     this.resolvedListeners = this.resolvedListeners.filter((f) => f !== fn);
   }
@@ -198,13 +226,13 @@ class RunControl {
    */
   provideForNextQuestion(text: string): boolean {
     const oldest = [...this.waiters.keys()][0];
-    if (oldest) return this.answer(oldest, text);
+    if (oldest) return this.answer(oldest, text, "phone");
     this.queuedAnswer = { text, queuedAt: Date.now() };
     return false;
   }
 
   /** Answer from any surface. First responder wins; later ones are ignored. */
-  answer(id: string, answer: string): boolean {
+  answer(id: string, answer: string, by: AnswerSource = "phone"): boolean {
     const w = this.waiters.get(id);
     if (!w || w.settled) return false;
     w.settled = true;
@@ -215,6 +243,8 @@ class RunControl {
         fn(id);
       } catch {}
     }
+    // A timeout's answer may still be replaced by a model's decision: it is reported once final (reportTimedOutAnswer).
+    if (by !== "timeout") this.tellAnswered(w.question, answer, by);
     return true;
   }
 
@@ -382,12 +412,13 @@ ${promptText}`;
       `   ↳ ⏱ No answer in ${mins} min: ${byModel !== undefined ? "a model decided" : "took"} ${answered === "" ? "the default" : `"${answered.replace(/\s+/g, " ").slice(0, 80)}"`}${assumptionRoot ? " (written to .agent/assumptions.md)" : ""}: ${(question.prompt.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)[0] ?? "").slice(0, 110)}`
     );
     events.emit({ type: "question.timedOut", id: question.id, answer: answered, kind: question.kind, ...(byModel !== undefined ? { byModel: true } : {}) });
+    runControl.reportTimedOutAnswer(question, answered, byModel !== undefined);
     return answered;
   }
   const answer = back.get(raw.answer.trim().toLowerCase()) ?? raw.answer;
   // A question left on screen with nothing under it reads as still waiting, hours later, in the scrollback. Say what was answered and where
   // it came from. A stop is not an answer, so nothing is claimed then.
-  if (!runControl.isAborted) console.log(answeredLine(question.prompt, answer, raw.by));
+  if (!runControl.isAborted) logLocal(answeredLine(question.prompt, answer, raw.by));
   return answer;
 }
 
@@ -411,7 +442,7 @@ async function askRaw(question: PendingQuestion, promptText: string, interactive
     deadlineMs > 0 ? new Promise((resolve) => void (timer = setTimeout(() => resolve(TIMED_OUT), deadlineMs))) : new Promise<typeof TIMED_OUT>(() => {});
   const timedOut = (): { answer: string; by: "timeout" } => {
     const answer = timeoutAnswer(question).answer;
-    runControl.answer(question.id, answer); // the phone's card goes away
+    runControl.answer(question.id, answer, "timeout"); // the phone's card goes away; the final answer is reported by askAnywhere
     return { answer, by: "timeout" };
   };
   if (!interactive) {
@@ -419,7 +450,7 @@ async function askRaw(question: PendingQuestion, promptText: string, interactive
     try {
       const got = await Promise.race([remote, deadline]);
       if (got === TIMED_OUT) return timedOut();
-      runControl.answer(question.id, got);
+      runControl.answer(question.id, got, "phone");
       return { answer: got, by: "phone" };
     } finally {
       if (timer) clearTimeout(timer);
@@ -436,7 +467,7 @@ async function askRaw(question: PendingQuestion, promptText: string, interactive
       by ??= "terminal";
       // Feed the terminal answer through the same path so remote surfaces see
       // the question disappear.
-      runControl.answer(question.id, a.trim());
+      runControl.answer(question.id, a.trim(), "terminal");
       return a.trim();
     })
     .catch(() => question.fallback);

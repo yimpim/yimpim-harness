@@ -341,7 +341,11 @@ export type RemoteEvent =
    *  `retryOf` to the earlier worker's id, plus a 1-based `attempt` and a
    *  short `reason` — e.g. the corrective Planner pass after a plan fails
    *  validation, or a re-plan after clarifying-question answers. */
-  | { kind: "worker.start"; taskId: string; workerId: string; agent: string; phaseId?: string; phaseName?: string; acceptanceCriteria?: string[]; retryOf?: string; attempt?: number; reason?: string; exchangeId?: string }
+  | { kind: "worker.start"; taskId: string; workerId: string; agent: string; phaseId?: string; phaseName?: string;
+      /** For a SECURITY worker: the phase it belongs to (the one it runs in, or the one just finished when it runs between phases), so a
+       *  client nests it inside that phase's card. A background check with no visible result sends no worker.start/worker.end at all. */
+      parentPhaseId?: string;
+      acceptanceCriteria?: string[]; retryOf?: string; attempt?: number; reason?: string; exchangeId?: string }
   /** A worker finished its pass — `outcome` is a free-form label (e.g.
    *  "completed", "passed", "failed"). `tokensUsed`/`costUsd` are this
    *  worker's OWN usage (every model call between its worker.start and this,
@@ -406,6 +410,19 @@ export type RemoteEvent =
   | { kind: "advisor.start"; exchangeId: string; question: string; taskId?: string }
   /** The read-only advisor's final answer to an /ask, so a phone can show it as a readable block. `exchangeId` links it back to the matching advisor.start; `taskId` follows the same rule as advisor.start's. */
   | { kind: "advisor.answer"; text: string; question?: string; exchangeId?: string; taskId?: string }
+  /**
+   * The agent asked a question (not the idle "what should I do next" prompt, whose answer arrives as task.start's prompt). Sent once,
+   * when it is asked, so a client can open the Q of a Q&A pair; it also stays in status.pendingQuestions until answered.
+   * `question` is never empty; `options` are the suggested answers (empty when free text is the only way to answer).
+   * `phaseId`/`worker`/`workerId` say who asked, when a phase or worker was running.
+   */
+  | { kind: "question.ask"; questionId: string; question: string; options: string[]; questionKind: "blocking" | "deferred" | "approval"; allowCustom?: boolean; taskId?: string; phaseId?: string; worker?: string; workerId?: string; askedAt: string }
+  /**
+   * A question was answered: sent the moment it is answered, with the answer that was taken, so a client fills the A of the pair.
+   * `by` is where it came from: "terminal", "phone", "timeout" (nobody answered, the default was taken) or "model" (nobody answered,
+   * a model decided from the project). Not sent when a stop settles questions with their defaults.
+   */
+  | { kind: "question.answered"; questionId: string; question: string; answer: string; by: "terminal" | "phone" | "timeout" | "model"; taskId?: string; phaseId?: string; worker?: string; workerId?: string }
   /** "Before this is actually live, you need to..." — manual steps flagged this task, only sent when non-empty. */
   | { kind: "manual.steps"; taskId: string; steps: { step: string; reason: string; phase?: string }[] }
   /** The Planner's finished plan — goal plus every phase's own goal, so a phone can show the full plan, not just phase names as they start.

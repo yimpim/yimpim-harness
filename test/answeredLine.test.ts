@@ -78,7 +78,8 @@ describe("asking and answering", () => {
 describe("the wiring", () => {
   const src = fs.readFileSync(new URL("../src/remote/control.ts", import.meta.url), "utf-8").replace(/\r\n/g, "\n");
   test("every question asked through askAnywhere is closed in the log, with where the answer came from", () => {
-    assert.ok(src.includes("if (!runControl.isAborted) console.log(answeredLine(question.prompt, answer, raw.by));"));
+    // On the terminal only: a phone gets the answer as question.answered, and an idle prompt's answer as task.start.
+    assert.ok(src.includes("if (!runControl.isAborted) logLocal(answeredLine(question.prompt, answer, raw.by));"));
     assert.ok(src.includes('by ??= "terminal";'));
     assert.ok(src.includes('(by ??= "phone")'));
   });

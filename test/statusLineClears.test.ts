@@ -6,7 +6,8 @@ import fs from "node:fs";
 const t = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
 
 test("an ending agent removes its line, or shows the one still running", () => {
-  assert.match(t, /if \(event\.type === "agent\.end"\) \{\s*const ended = runningAgentLabels\.findIndex/);
+  // The worker stack is looked up first (which worker ended), then the status line drops that agent.
+  assert.match(t, /if \(event\.type === "agent\.end"\) \{[\s\S]{0,400}?const ended = runningAgentLabels\.findIndex/);
   // The line is composed from the agent still running, the step's totals and the model calls in flight (liveCalls.ts): with none it is cleared.
   assert.match(t, /const base = runningAgentLabels\[runningAgentLabels\.length - 1\];/);
   assert.match(t, /setStatusLine\(composeStatus\(base, Date\.now\(\), /);

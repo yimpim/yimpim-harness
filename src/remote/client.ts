@@ -17,6 +17,7 @@ import {
   encodePairing, generatePairingSecret, generateSessionKey, hashToken, open, seal,
 } from "./protocol.js";
 import { RemoteTelemetry } from "./telemetry.js";
+import { logLocal } from "../localLog.js";
 import { UploadCollector } from "./uploads.js";
 import { Persona, type RoleInfoWire } from "../models.js";
 import { appendHistoryEntry, HistoryEntry } from "./historyLog.js";
@@ -796,8 +797,10 @@ export class RemoteSession {
     // the whole file lands, so pushing "command.accepted" per chunk too
     // means 50+ near-duplicate lines in the phone's activity feed for one
     // image instead of one.
+    // The echo is for the terminal only: the phone knows what it just did (and gets command.accepted). Mirrored, it put the phone's
+    // own prompt back into whatever worker was running, and filled worker consoles with passive views (browsing History, a diff).
     if (p.verb !== "attach") {
-      console.log(`[REMOTE] 📱 ${describePhoneCommand(p)}`);
+      logLocal(`[REMOTE] 📱 ${describePhoneCommand(p)}`);
       this.push("command.accepted", phoneCommandEcho(p, this.opts.redactLogs, this.status.taskId));
     }
 

@@ -176,6 +176,7 @@ import { RemoteSession, SessionLimitError } from "./remote/client.js";
 import { buildSessionHello } from "./remote/hello.js";
 import { PendingQuestion, RemoteStatus } from "./remote/protocol.js";
 import { translateForRemote } from "./remoteEventTranslator.js";
+import { logLocal, isLocalOnly } from "./localLog.js";
 import {
   readHistoryBacklogForReplay,
   readHistoryBacklogSince,
@@ -1767,6 +1768,9 @@ let activeRelay: ProvisionedRelay | undefined;
 // no-ops because it's already stopped, but still very much still running.
 let activeQuestionListener: ((q: PendingQuestion) => void) | undefined;
 let activeResolvedListener: ((id: string) => void) | undefined;
+let activeAnsweredListener: ((q: PendingQuestion, answer: string, by: import("./remote/control.js").AnswerSource) => void) | undefined;
+/** Who is asking right now, for question.ask (set by the main loop: the running phase and the innermost shown worker). */
+let questionContext: () => { taskId?: string; phaseId?: string; worker?: string; workerId?: string } = () => ({});
 
 /**
  * Pair a phone to this session. Used by both `--remote` and `/remote-control`.
@@ -1809,6 +1813,7 @@ async function connectRemote(
     activeRelay = undefined;
     if (activeQuestionListener) runControl.offQuestion(activeQuestionListener);
     if (activeResolvedListener) runControl.offQuestionResolved(activeResolvedListener);
+    if (activeAnsweredListener) runControl.offQuestionAnswered(activeAnsweredListener);
     activeQuestionListener = undefined;
     activeResolvedListener = undefined;
   }
@@ -1885,8 +1890,8 @@ async function connectRemote(
       onAbort: (reason) => runControl.requestAbort(reason || "phone"),
       onAnswer: (questionId, answer) => {
         const noted = withAttachmentNote(answer);
-        if (!runControl.answer(questionId, noted)) {
-          console.log(`[REMOTE] (answer for ${questionId} arrived too late — already resolved)`);
+        if (!runControl.answer(questionId, noted, "phone")) {
+          logLocal(`[REMOTE] (answer for ${questionId} arrived too late — already resolved)`);
           // Structured, not just the log line above — lets the phone that
           // sent this specific answer detect it was never actually used (the
           // question resolved from elsewhere first — the terminal, or a
@@ -1898,7 +1903,7 @@ async function connectRemote(
       onMessage: (text) => {
         const noted = withAttachmentNote(text);
         const usedImmediately = runControl.provideForNextQuestion(noted);
-        console.log(
+        logLocal(
           usedImmediately
             ? `[REMOTE] 📱 message answered the current question.`
             : `[REMOTE] 📱 message queued — will be used as soon as I ask anything next.`
@@ -1984,8 +1989,25 @@ async function connectRemote(
     }, buildSessionHello({ repoRoot, shareHostname: config.remote.shareHostname }));
 
     await printPairingQr(pairingUrl, relay.source, provisioningLog, keepScreen);
+    // Who asked each question, remembered from when it was asked, for its answer.
+    const askedBy = new Map<string, ReturnType<typeof questionContext>>();
     activeQuestionListener = (q: PendingQuestion) => {
       session.askQuestion(q);
+      // The idle "what should I do next" prompt is not a question in a Q&A: its answer is the next task's prompt (task.start).
+      if (!q.idle) {
+        const who = questionContext();
+        askedBy.set(q.id, who);
+        const firstLine = q.prompt.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "";
+        session.push("question.ask", {
+          questionId: q.id,
+          question: q.prompt.trim() || firstLine || (q.kind === "approval" ? "Approve this?" : "Your answer is needed."),
+          options: q.choices ?? [],
+          questionKind: q.kind,
+          ...(q.allowCustom ? { allowCustom: true } : {}),
+          ...who,
+          askedAt: q.askedAt,
+        });
+      }
       // The idle "what should I do next" prompt is not a push-worthy event —
       // it fires every time the loop simply has nothing to do, not because
       // the agent needs an answer to keep working. See PendingQuestion.idle.
@@ -1994,6 +2016,13 @@ async function connectRemote(
     activeResolvedListener = (id: string) => session.resolveQuestion(id);
     runControl.onQuestion(activeQuestionListener);
     runControl.onQuestionResolved(activeResolvedListener);
+    activeAnsweredListener = (q, answer, by) => {
+      if (q.idle) return;
+      const who = askedBy.get(q.id) ?? questionContext();
+      askedBy.delete(q.id);
+      session.push("question.answered", { questionId: q.id, question: q.prompt.trim(), answer, by, ...who });
+    };
+    runControl.onQuestionAnswered(activeAnsweredListener);
 
     // onQuestion above only ever fires for questions asked AFTER this listener
     // is registered — a question already outstanding when this phone (re)pairs
@@ -4326,6 +4355,19 @@ async function main(): Promise<void> {
   // to track "which gate.result/verdict/file.write belongs to which worker"
   // itself (see remoteEventTranslator.ts's own comment).
   let currentWorkerId: string | undefined;
+  // The workers running now, innermost last. currentWorkerId is the innermost one a phone is shown (a background check is not
+  // shown); each worker.end carries its own id, even when another worker ended inside it.
+  const workerFrames: { id: string; agent: string; background: boolean }[] = [];
+  const shownWorker = () => [...workerFrames].reverse().find((w) => !w.background);
+  // Who is asking, for question.ask / question.answered: the task, the running phase, and the innermost worker a phone is shown.
+  questionContext = () => {
+    const w = shownWorker();
+    return {
+      ...(taskRunning && currentTaskId ? { taskId: currentTaskId } : {}),
+      ...(currentPhaseForEvents?.id ? { phaseId: currentPhaseForEvents.id } : {}),
+      ...(w ? { worker: w.agent, workerId: w.id } : {}),
+    };
+  };
   // Unlike currentWorkerId, NOT cleared on agent.end — callers that need to
   // build a `retryOf` for the NEXT invocation of the same step (the
   // corrective Planner pass, the post-clarifying-questions re-plan) read this
@@ -4389,7 +4431,7 @@ async function main(): Promise<void> {
           ),
         );
       });
-      if (remote?.connected) {
+      if (remote?.connected && !isLocalOnly()) {
         const message = stripAnsi(
           consoleArgs
             .map((a) => (typeof a === "string" ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })()))
@@ -4550,11 +4592,19 @@ async function main(): Promise<void> {
     // has nothing to do with whether a phone is paired, unlike everything
     // else in this listener, so it runs unconditionally rather than behind
     // the remote?.connected guard below.
+    // The id this event's own worker carries: a new one for its start, its own for its end, the innermost shown one otherwise.
+    let eventWorkerId = currentWorkerId;
+    let endingFrame = -1;
     if (event.type === "agent.start") {
       // Opaque and unique for this process's lifetime — no need to survive
       // a restart (a worker never outlives one), unlike eventId.
-      currentWorkerId = `w-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      lastWorkerId = currentWorkerId;
+      const id = `w-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      workerFrames.push({ id, agent: event.agent, background: Boolean(event.background) });
+      eventWorkerId = id;
+      if (!event.background) {
+        currentWorkerId = id;
+        lastWorkerId = id;
+      }
       const phase = currentPhaseForEvents ? `${currentPhaseForEvents.name} · ` : "";
       runningAgentLabels.push(`${phase}${event.agent}`);
       refreshStatus();
@@ -4562,6 +4612,13 @@ async function main(): Promise<void> {
     // The line says what is running NOW. When an agent ends it goes, or shows the one still running; it used to stay until the
     // whole task finished, so "DISCOVERY running…" sat there through the planner, the editor and the idle prompt.
     if (event.type === "agent.end") {
+      for (let i = workerFrames.length - 1; i >= 0; i--) {
+        if (workerFrames[i].agent === event.agent) {
+          endingFrame = i;
+          break;
+        }
+      }
+      if (endingFrame >= 0) eventWorkerId = workerFrames[endingFrame].id;
       const ended = runningAgentLabels.findIndex((l) => l.endsWith(`${event.agent}`));
       if (ended >= 0) runningAgentLabels.splice(ended, 1);
       refreshStatus();
@@ -4580,7 +4637,7 @@ async function main(): Promise<void> {
       // advisor.answer kinds (which never shipped before, so have no such
       // back-compat constraint) can correctly omit taskId while idle — see
       // translateForRemote's own comment.
-      const translated = translateForRemote(event, currentPhaseForEvents, currentTaskId, currentWorkerId, taskRunning);
+      const translated = translateForRemote(event, currentPhaseForEvents, currentTaskId, eventWorkerId, taskRunning);
       if (translated) remote.push(translated.kind, translated.payload);
       // Usage refreshed after every agent — not just at the handful of
       // phase/task boundaries that already call updateStatus. The RAW event
@@ -4595,7 +4652,10 @@ async function main(): Promise<void> {
     // Cleared after translation above (which still needed the worker's own
     // id for its worker.end payload) so nothing printed between this worker
     // finishing and the next one starting is mistagged as worker-time.
-    if (event.type === "agent.end") currentWorkerId = undefined;
+    if (event.type === "agent.end") {
+      if (endingFrame >= 0) workerFrames.splice(endingFrame, 1);
+      currentWorkerId = shownWorker()?.id;
+    }
   });
 
   if (args.remote) {
@@ -6275,7 +6335,16 @@ You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DI
       try {
         const made = await ensureDesignSystem({
           call: (ms, messages, label, json) =>
-            runLabeledCompletion({ client, models: ms, messages: messages as any, agentName: "DESIGNER", jsonMode: json, reason: "Design: " + label }),
+            runLabeledCompletion({
+              client,
+              models: ms,
+              messages: messages as any,
+              agentName: "DESIGNER",
+              jsonMode: json,
+              reason: "Design: " + label,
+              // The yes/no "does this need a design system" call: no visible result, so no top-level "Run" card on a phone.
+              ...(label === "design decision" ? { background: true } : {}),
+            }),
           models: config.models.designer ?? config.models.planner,
           repoRoot,
           request: instructions.trim(),

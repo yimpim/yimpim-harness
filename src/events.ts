@@ -54,6 +54,9 @@ export type YimpimEvent =
        *  an old phone build (which only ever knew worker.start/end for
        *  ADVISOR) still gets a correlation id without needing the new kinds. */
       exchangeId?: string;
+      /** A background check with no visible result (the "does this need a design system" decision): counted, but never shown as a
+       *  worker card on a phone, which would otherwise open an empty top-level "Run" card for it. */
+      background?: boolean;
     }
   | {
       type: "agent.end";
@@ -61,6 +64,10 @@ export type YimpimEvent =
       rounds: number;
       outcome: string;
       exchangeId?: string;
+      /** A background check with no visible result (the "does this need a design system" decision): counted, but never shown as a
+       *  worker card on a phone, which would otherwise open an empty top-level "Run" card for it. */
+      background?: boolean;
+
       /**
        * This worker's OWN usage — every model.call recorded between the
        * matching agent.start and this agent.end, regardless of what "agent"
