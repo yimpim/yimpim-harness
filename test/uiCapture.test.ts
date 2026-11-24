@@ -205,6 +205,20 @@ describe("capturing", () => {
     assert.equal(why["/admin"], "answered 500");
   });
 
+  test("a screen that throws while loading is reported as crashed, not judged as a design", async () => {
+    const root = repo({});
+    const r = await captureScreens({
+      repoRoot: root,
+      baseUrl: "http://localhost:1",
+      screens: [{ route: "/", name: "Home", from: "x" }, { route: "/dash", name: "Dash", from: "x" }],
+      viewports: [PHONE],
+      outDir: path.join(root, "out"),
+      open: async (url) => (url.endsWith("/dash") ? { finalUrl: url, status: 200, png: Buffer.from("overlay"), errors: ["styles is not defined"] } : { finalUrl: url, status: 200, png: Buffer.from("home") }),
+    });
+    assert.deepEqual(r.screens.map((s) => s.name), ["Home"]);
+    assert.deepEqual(r.skipped, [{ route: "/dash", name: "Dash", reason: "it crashed while loading (styles is not defined): fix that before judging its design" }]);
+  });
+
   test("routes become URLs on the app's server", () => {
     assert.equal(routeUrl("http://localhost:3000", "/pricing?x=1"), "http://localhost:3000/pricing?x=1");
     assert.equal(routeUrl("http://127.0.0.1:5000/", "/"), "http://127.0.0.1:5000/");
@@ -288,11 +302,14 @@ describe("the whole step", () => {
 
 /** The modules that start a browser or a dev server for design work, and the only files allowed to import them. */
 const USER_INITIATED: Record<string, string[]> = {
-  "uiCapture.ts": [],
+  // The critique (/design critique ui) is the only command that captures screens.
+  "uiCapture.ts": ["uiCritique.ts"],
   // The read describes the captured cues; it opens no browser itself.
-  "uiReference.ts": ["referenceRead.ts"],
+  "uiReference.ts": ["referenceRead.ts", "uiCritique.ts"],
   // Spends a vision-model call per reference.
-  "referenceRead.ts": [],
+  "referenceRead.ts": ["uiCritique.ts"],
+  // Loaded by index.ts only with a dynamic import inside the explicit command (see uiCritique.test.ts), never statically.
+  "uiCritique.ts": [],
 };
 
 test("nothing a routine run executes can start a capture or open a reference: only the explicit commands may import them", () => {

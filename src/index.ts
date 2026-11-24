@@ -375,6 +375,10 @@ Press Tab after typing a command's start (e.g. "/mo") to complete it.
                     and draw concepts, the best are shown, you pick one
                     (or just say "I need a logo"); also critiques or refreshes
                     a logo you already have
+  /design critique ui [references…] [--screens images…]
+                    Look at this app's screens (and any references you like:
+                    image paths, URLs, product names) and write
+                    design-system/CRITIQUE.md. Changes no code.
   /roadmap          A big job split into units, tracked until it is done:
                     /roadmap new <idea>, /roadmap port <folder> <goal>,
                     /roadmap run, /roadmap add <more>, /roadmap drop|reopen|done
@@ -5248,6 +5252,29 @@ async function main(): Promise<void> {
     if (!(await ensureSpecialistModel("design", config, repoRoot))) return;
     await runDesignJobNow(request);
   };
+  // `/design critique ui [references…] [--screens images…]`: see uiCritique.ts. Writes design-system/CRITIQUE.md, changes no app code.
+  const runUiCritiqueCommand = async (request: string): Promise<void> => {
+    if (!(await ensureSpecialistModel("design", config, repoRoot))) return;
+    const { isUiCritiqueRequest, parseCritiqueArgs, runUiCritique } = await import("./uiCritique.js");
+    const args = parseCritiqueArgs(isUiCritiqueRequest(request)?.rest ?? "");
+    const visionModels = config.models.designerVision ?? config.models.verifierVision ?? config.models.editorVision ?? config.models.verifier;
+    await asOwnTask(("/design " + request).trim(), async () => {
+      try {
+        const result = await runUiCritique(args, {
+          repoRoot,
+          visionModels,
+          call: (ms, messages, label, json) =>
+            runLabeledCompletion({ client, models: ms, messages: messages as any, agentName: "DESIGNER", jsonMode: json, reason: `UI critique: ${label}` }),
+          log: (line) => console.log(line),
+        });
+        console.log(`\n${result.ok ? "🎨" : "⚠️"} [CRITIQUE] ${result.text}`);
+        return result.ok;
+      } catch (err: any) {
+        console.error(`[CRITIQUE] That did not complete: ${err.message}`);
+        return false;
+      }
+    });
+  };
   const runDesignJobNow = (request: string): Promise<void> => asOwnTask(("/design " + request).trim(), async () => {
     const models = config.models.designer ?? config.models.planner;
     const visionModels = config.models.designerVision ?? config.models.verifierVision ?? config.models.editorVision ?? config.models.verifier;
@@ -5797,7 +5824,11 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
           await runPentestJob(trimmed.slice("/pentest".length).trim());
         } else if (trimmed === "/design" || trimmed.startsWith("/design ")) {
           const what = trimmed.slice("/design".length).trim();
+          // The UI critique is its own explicit command: it starts the app's dev server, a browser and vision calls, so it is loaded
+          // only here, when a person typed it, and never by a routine run.
+          const uiCritique = /^\s*(?:critique|review|audit)\s+(?:my\s+|the\s+)?(?:ui|app|screens?|interface)\b/i.test(what);
           if (!what) console.log('Say what to design, for example: /design a logo for my budgeting app (or just say "I need a logo").');
+          else if (uiCritique) await runUiCritiqueCommand(what);
           else await runDesignJob(what);
         } else if (trimmed === "/roadmap" || trimmed.startsWith("/roadmap ")) {
           if ((await runRoadmapCommand(parseRoadmapCommand(trimmed.slice("/roadmap".length)))) === "started") continue taskLoop;

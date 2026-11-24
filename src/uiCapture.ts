@@ -362,6 +362,8 @@ export interface PageShot {
   finalUrl: string;
   status: number | null;
   png: Buffer;
+  /** Uncaught errors the page threw while loading: a crashed screen shows an error overlay, not its design. */
+  errors?: string[];
 }
 /** Opens one URL at one size and screenshots it. Injected, so discovery and the gating rules are tested without a browser. */
 export type OpenPage = (url: string, viewport: Viewport) => Promise<PageShot>;
@@ -445,6 +447,10 @@ export async function captureScreens(o: {
       }
       if (shot.status !== null && shot.status >= 400) {
         skipped.push({ route: s.route, name: s.name, reason: `answered ${shot.status}` });
+        break;
+      }
+      if (shot.errors?.length) {
+        skipped.push({ route: s.route, name: s.name, reason: `it crashed while loading (${shot.errors[0]}): fix that before judging its design` });
         break;
       }
       if (where(shot.finalUrl) !== where(url)) {
@@ -684,6 +690,8 @@ export async function browserOpener(repoRoot: string): Promise<{ open: OpenPage;
         }, storage);
       }
       const page = await context.newPage();
+      const errors: string[] = [];
+      page.on("pageerror", (e: any) => errors.push(String(e?.message ?? e).split("\n")[0].slice(0, 160)));
       let status: number | null = null;
       try {
         const res = await page.goto(url, { waitUntil: "networkidle", timeout: 20000 });
@@ -704,7 +712,7 @@ export async function browserOpener(repoRoot: string): Promise<{ open: OpenPage;
       const full = await page.evaluate(() => (globalThis as any).document.documentElement.scrollHeight).catch(() => vp.height);
       const height = Math.min(Math.max(vp.height, Number(full) || vp.height), vp.height * MAX_PAGE_HEIGHTS);
       const png: Buffer = await page.screenshot({ type: "png", fullPage: true, clip: { x: 0, y: 0, width: vp.width, height } });
-      return { finalUrl: page.url(), status, png };
+      return { finalUrl: page.url(), status, png, ...(errors.length ? { errors } : {}) };
     } finally {
       await context.close();
     }
