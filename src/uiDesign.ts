@@ -658,13 +658,26 @@ export async function ensureDesignSystem(ctx: EnsureContext): Promise<EnsureResu
       ctx.log("[DESIGN] Asking about the look did not complete (" + String(err?.message ?? err).slice(0, 120) + "); the recommended direction is used.");
     }
   }
-  void look;
   const playbook = findPlaybook(decision.playbook) ?? PLAYBOOKS.find((p) => p.id === "saas")!;
   const platform: "web" | "native" | "both" = decision.platform === "unknown" ? (playbook.kind === "native" ? "native" : "web") : decision.platform;
   const product = findProduct(decision.product);
   const brand = findBrandKit(ctx.repoRoot);
   let direction: Direction | null = null;
-  try {
+  // Asked to choose: three clearly different directions, each drawn in its own tokens, and the person picks one.
+  let chosenNote = "";
+  if (look.mode === "directions" && ctx.visual) {
+    try {
+      const { chooseFromDirections } = await import("./uiDirections.js");
+      const picked = await chooseFromDirections(ctx.visual, { call: ctx.call, models: ctx.models, repoRoot: ctx.repoRoot, log: ctx.log, playbook, stack, platform, product, brand, userText: `The request:\n${request}` });
+      if (picked) {
+        direction = picked.direction;
+        chosenNote = picked.note;
+      }
+    } catch (err: any) {
+      ctx.log("[DESIGN] The three directions could not be shown (" + String(err?.message ?? err).slice(0, 120) + "); the recommended one is used.");
+    }
+  }
+  if (!direction) try {
     direction = parseDirection(
       await ctx.call(
         ctx.models,
@@ -719,7 +732,7 @@ export async function ensureDesignSystem(ctx: EnsureContext): Promise<EnsureResu
     files.push(rel(name));
   };
   const refs = [...referenceDocs(system, stack), ...(await iconDocs(system, stack, ctx.fetchIcon ?? readIcon))];
-  put("MASTER.md", masterDoc(system, stack, ctx.request, refs, brand));
+  put("MASTER.md", masterDoc(system, stack, ctx.request, refs, brand) + (chosenNote ? `\n## How this direction was chosen\n${chosenNote}\n` : ""));
   // The machine-readable identity: the logo designer reads this so a logo made later matches the UI.
   writeUiTheme(outDir, {
     name: direction.name,
