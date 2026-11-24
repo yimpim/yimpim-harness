@@ -413,9 +413,9 @@ export type RemoteEvent =
    *  not a new plan) should update its existing plan card rather than add another one. `runId` is also included but is NOT the reconciliation
    *  key — it's fixed for the whole desktop process, and one process can run several unrelated tasks (each its own taskId) back to back. */
   | { kind: "plan.ready"; taskId: string; runId: string; goal: string; degraded: boolean; phases: { id: string; name: string; goal: string; executor?: string }[] }
-  /** The current [primary, backup?] chain for every configured role, in response to `get_model_config` or right after a `set_model` that was accepted — always the complete set, never a partial update. */
   /** The whole current roadmap (never a partial update), or null when there is none. Sent on every change, when a phone connects, and for `get_roadmap`. Current state, not history: never persisted. */
   | { kind: "roadmap.state"; roadmap: import("../roadmap.js").RoadmapWire | null }
+  /** The current [primary, backup?] chain for every configured role, in response to `get_model_config` or right after a `set_model` that was accepted — always the complete set, never a partial update. */
   | { kind: "model.config"; roles: { role: Persona; chain: string[] }[]; scope: "project" | "global";
       /** What each role is (label, optional, multi-select, needs), so a client can build its picker from this instead of a hard-coded list. Absent from an older desktop. */
       roleInfo?: RoleInfoWire[] }
