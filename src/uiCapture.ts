@@ -541,11 +541,15 @@ export async function captureAppScreens(o: {
   cap?: number;
   server: AppServer;
   open: OpenPage | null;
+  /** "before" for a critique; "after" for the same screens once a polish has run. */
+  stage?: "before" | "after";
+  /** Capture exactly these screens (the ones a critique looked at) instead of discovering them again. */
+  routes?: ScreenCandidate[];
 }): Promise<CaptureReport> {
-  const outDir = path.join(o.repoRoot, CRITIQUE_DIR, "before");
+  const outDir = path.join(o.repoRoot, CRITIQUE_DIR, o.stage ?? "before");
   const found = discoverScreens(o.repoRoot);
   const cap = o.cap ?? MAX_SCREENS;
-  const { chosen, spares, skipped } = pickScreens(found.candidates, cap);
+  const { chosen, spares, skipped } = o.routes ? { chosen: o.routes, spares: [], skipped: [] } : pickScreens(found.candidates, cap);
   const setup = loadQaSetup(o.repoRoot);
   const setupNotes = [setup.notes, setup.mockNotes].filter(Boolean).join("\n").slice(0, 2000);
   const report: CaptureReport = { router: found.router, screens: [], skipped, nameOnly: found.nameOnly, ...(setupNotes ? { setupNotes } : {}) };
@@ -709,9 +713,15 @@ export async function browserOpener(repoRoot: string): Promise<{ open: OpenPage;
         if (prev && now.equals(prev)) break;
         prev = now;
       }
+      // A page with no mobile viewport tag is laid out wider than a phone and zoomed out to fit, as a real phone shows it: take
+      // that view, never a phone-wide strip cut from the wide layout.
+      const layout = Number(await page.evaluate(() => (globalThis as any).document.documentElement.clientWidth).catch(() => vp.width)) || vp.width;
       const full = await page.evaluate(() => (globalThis as any).document.documentElement.scrollHeight).catch(() => vp.height);
       const height = Math.min(Math.max(vp.height, Number(full) || vp.height), vp.height * MAX_PAGE_HEIGHTS);
-      const png: Buffer = await page.screenshot({ type: "png", fullPage: true, clip: { x: 0, y: 0, width: vp.width, height } });
+      const png: Buffer =
+        layout > vp.width + 1
+          ? await page.screenshot({ type: "png" })
+          : await page.screenshot({ type: "png", fullPage: true, clip: { x: 0, y: 0, width: vp.width, height } });
       return { finalUrl: page.url(), status, png, ...(errors.length ? { errors } : {}) };
     } finally {
       await context.close();

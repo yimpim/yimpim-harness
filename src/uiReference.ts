@@ -452,6 +452,9 @@ export async function referenceBrowser(): Promise<ReferenceBrowser | null> {
     return { context, page, status };
   };
   const shot = async (page: any, vp: { width: number; height: number }) => {
+    // No mobile viewport tag: the page is laid out wide and zoomed out on a phone; take that view, not a strip of the wide layout.
+    const layout = Number(await page.evaluate("document.documentElement.clientWidth").catch(() => vp.width)) || vp.width;
+    if (layout > vp.width + 1) return (await page.screenshot({ type: "png" })) as Buffer;
     const full = Number(await page.evaluate("document.documentElement.scrollHeight").catch(() => vp.height)) || vp.height;
     const height = Math.min(Math.max(vp.height, full), vp.height * MAX_PAGE_HEIGHTS);
     return (await page.screenshot({ type: "png", fullPage: true, clip: { x: 0, y: 0, width: vp.width, height } })) as Buffer;

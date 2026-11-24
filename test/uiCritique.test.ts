@@ -227,6 +227,7 @@ describe("the whole step", () => {
 test("the command is wired only to `/design critique ui …`, loading the module there and nowhere else", () => {
   const idx = fs.readFileSync("src/index.ts", "utf8").replace(/\r\n/g, "\n");
   assert.equal(idx.split('await import("./uiCritique.js")').length - 1, 1, "one dynamic import, inside the command");
-  assert.match(idx, /else if \(uiCritique\) await runUiCritiqueCommand\(what\);\n\s+else await runDesignJob\(what\);/);
+  assert.match(idx, /else if \(uiCritique\) await runUiCritiqueCommand\(what\);\n\s+else if \(uiPolish\) \{/);
+  assert.match(idx, /\} else await runDesignJob\(what\);/, "anything else is still the logo designer");
   assert.doesNotMatch(idx, /from "\.\/uiCritique\.js"/, "never a static import a routine run would load");
 });

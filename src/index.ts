@@ -379,6 +379,9 @@ Press Tab after typing a command's start (e.g. "/mo") to complete it.
                     Look at this app's screens (and any references you like:
                     image paths, URLs, product names) and write
                     design-system/CRITIQUE.md. Changes no code.
+  /design polish ui [all | 1,3,5] [--include-conflicts]
+                    Make the critique's changes as a normal task, then compare
+                    the screens before and after (critique/POLISH.md)
   /roadmap          A big job split into units, tracked until it is done:
                     /roadmap new <idea>, /roadmap port <folder> <goal>,
                     /roadmap run, /roadmap add <more>, /roadmap drop|reopen|done
@@ -4830,6 +4833,9 @@ async function main(): Promise<void> {
   // site below) — consumed once at the top of the very next loop iteration,
   // same handoff shape as continueRequested above.
   let queuedInstructions: string | undefined;
+  // A /design polish ui task waiting to finish: once that exact task passes, the same screens are captured again and compared
+  // (uiPolish.ts). Cleared by any other task's finish, so it never fires for unrelated work.
+  let pendingPolish: { task: string; chosen: any[]; left: { n: number; why: string }[]; last: any } | undefined;
 
   // True once the user has said "yes" to auto-continuing THIS backlog — a
   // single "yes" must run through every remaining queued task without
@@ -5827,9 +5833,30 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
           // The UI critique is its own explicit command: it starts the app's dev server, a browser and vision calls, so it is loaded
           // only here, when a person typed it, and never by a routine run.
           const uiCritique = /^\s*(?:critique|review|audit)\s+(?:my\s+|the\s+)?(?:ui|app|screens?|interface)\b/i.test(what);
+          const uiPolish = /^\s*polish\s+(?:my\s+|the\s+)?(?:ui|app|screens?|interface)\b/i.test(what);
           if (!what) console.log('Say what to design, for example: /design a logo for my budgeting app (or just say "I need a logo").');
           else if (uiCritique) await runUiCritiqueCommand(what);
-          else await runDesignJob(what);
+          else if (uiPolish) {
+            // The critique's changes become an ordinary task (planned, built and checked like any other); when it passes, the
+            // screens are compared before and after (see the success path below). Loaded only here, when a person typed it.
+            if (await ensureSpecialistModel("design", config, repoRoot)) {
+              const { isUiPolishRequest, parsePolishArgs, loadLastCritique, chooseChanges, polishTask } = await import("./uiPolish.js");
+              const last = loadLastCritique(repoRoot);
+              if (!last) console.log("[POLISH] There is no critique to act on yet. Run /design critique ui first.");
+              else {
+                const { chosen, left } = chooseChanges(last.critique, parsePolishArgs(isUiPolishRequest(what)?.rest ?? ""));
+                for (const l of left) console.log(`[POLISH] Leaving out change ${l.n}: ${l.why}.`);
+                if (chosen.length === 0) console.log("[POLISH] No change was chosen, so there is nothing to do.");
+                else {
+                  const task = polishTask(last.critique, chosen);
+                  console.log(`🎨 [POLISH] Making ${chosen.length} change(s) from design-system/CRITIQUE.md as a normal task; the screens are compared when it passes.`);
+                  pendingPolish = { task, chosen, left, last };
+                  queuedInstructions = task;
+                  continue taskLoop;
+                }
+              }
+            }
+          } else await runDesignJob(what);
         } else if (trimmed === "/roadmap" || trimmed.startsWith("/roadmap ")) {
           if ((await runRoadmapCommand(parseRoadmapCommand(trimmed.slice("/roadmap".length)))) === "started") continue taskLoop;
         } else if (trimmed === "/exit") {
@@ -7254,6 +7281,31 @@ The user wants you to decide, not ask: ${d.choice}`);
   endTask("done", events.usageDelta(currentTaskUsageStart));
 
   await confirmStagedDeletions(agentTools, repoRoot, runId, remote);
+
+  // A polish task that just passed: look at the same screens again and compare (uiPolish.ts). Any other task clears it.
+  if (pendingPolish) {
+    const p = pendingPolish;
+    pendingPolish = undefined;
+    if (instructions.trim() === p.task.trim()) {
+      const renderer = await openRenderer();
+      try {
+        const { polishAfter } = await import("./uiPolish.js");
+        const result = await polishAfter(p.last, p.chosen, p.left, {
+          repoRoot,
+          visionModels: config.models.designerVision ?? config.models.verifierVision ?? config.models.editorVision ?? config.models.verifier,
+          call: (ms, messages, label, json) =>
+            runLabeledCompletion({ client, models: ms, messages: messages as any, agentName: "DESIGNER", jsonMode: json, reason: `UI polish: ${label}` }),
+          log: (line) => console.log(line),
+          renderer,
+        });
+        console.log(`\n🎨 [POLISH] ${result.text}`);
+      } catch (err: any) {
+        console.error(`[POLISH] The before/after comparison did not complete: ${err.message}`);
+      } finally {
+        await renderer?.close();
+      }
+    }
+  }
 
     if (loopsBackToPrompt) {
       // Consumed by this task already (or never populated) — starting the

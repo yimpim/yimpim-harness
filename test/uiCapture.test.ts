@@ -302,14 +302,16 @@ describe("the whole step", () => {
 
 /** The modules that start a browser or a dev server for design work, and the only files allowed to import them. */
 const USER_INITIATED: Record<string, string[]> = {
-  // The critique (/design critique ui) is the only command that captures screens.
-  "uiCapture.ts": ["uiCritique.ts"],
+  // The critique and the polish (/design critique ui, /design polish ui) are the only commands that capture screens.
+  "uiCapture.ts": ["uiCritique.ts", "uiPolish.ts"],
   // The read describes the captured cues; it opens no browser itself.
   "uiReference.ts": ["referenceRead.ts", "uiCritique.ts"],
   // Spends a vision-model call per reference.
-  "referenceRead.ts": ["uiCritique.ts"],
+  "referenceRead.ts": ["uiCritique.ts", "uiPolish.ts"],
   // Loaded by index.ts only with a dynamic import inside the explicit command (see uiCritique.test.ts), never statically.
-  "uiCritique.ts": [],
+  "uiCritique.ts": ["uiPolish.ts"],
+  // Likewise (see uiPolish.test.ts).
+  "uiPolish.ts": [],
 };
 
 test("nothing a routine run executes can start a capture or open a reference: only the explicit commands may import them", () => {
