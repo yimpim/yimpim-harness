@@ -32,8 +32,14 @@ import path from "node:path";
 
 export const BROKER_BASE = "https://broker.yimpim.com";
 
-/** How long executeLinkFlow waits for a phone to claim the code. */
-export const LINK_FLOW_TIMEOUT_MS = 5 * 60 * 1000;
+/**
+ * How long executeLinkFlow waits for a phone to claim the code when the broker does not say. The broker normally does
+ * (`expiresInMs`, 10 minutes): the desktop then watches the code for exactly as long as a phone can claim it, so a late scan
+ * never lands on a code nobody is collecting.
+ */
+export const LINK_FLOW_TIMEOUT_MS = 10 * 60 * 1000;
+/** After this many failed polls in a row, the broker's actual answer is shown instead of waiting in silence. */
+export const LINK_POLL_FAILURES_BEFORE_NOTICE = 5;
 export const LINK_POLL_INTERVAL_MS = 2_000;
 
 /** What lands in ~/.yimpim/auth.json. */
@@ -245,13 +251,65 @@ export interface LinkFlowOptions {
   log?: (msg: string) => void;
   /** Poll cadence for the claim endpoint; defaults to 2s. */
   pollIntervalMs?: number;
-  /** Total budget for waiting on the phone; defaults to 5 minutes. */
+  /** Total budget for waiting on the phone; defaults to the broker's own expiry for the code (expiresInMs). */
   timeoutMs?: number;
   requestTimeoutMs?: number;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+/** Resolves after `ms`, or at once when `signal` aborts. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+// ---- one /link at a time ---------------------------------------------------------------------------------------------
+// Two link runs watching two QR codes is how a scan lands on a code nobody collects: the newest run always wins. Inside this
+// process the previous run's AbortController is aborted; across windows (another terminal, another repo, the same lease
+// file) a marker beside the lease names the newest run, and an older run that sees another run's id there stops.
+
+let activeLink: AbortController | null = null;
+
+function activeLinkFile(): string {
+  return path.join(path.dirname(authFilePath()), "link-active.json");
+}
+
+function claimActiveLink(runId: string, code: string): void {
+  try {
+    fs.mkdirSync(path.dirname(activeLinkFile()), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(activeLinkFile(), JSON.stringify({ runId, pid: process.pid, code, startedAt: new Date().toISOString() }), { mode: 0o600 });
+  } catch {
+    // the in-process guard still works; another window just will not be told
+  }
+}
+
+function activeLinkRunId(): string | undefined {
+  try {
+    const v = JSON.parse(fs.readFileSync(activeLinkFile(), "utf8"));
+    return typeof v?.runId === "string" ? v.runId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function releaseActiveLink(runId: string): void {
+  try {
+    if (activeLinkRunId() === runId) fs.rmSync(activeLinkFile(), { force: true });
+  } catch {
+    // nothing to tidy
+  }
+}
+
+/** Shown whenever a link run stops without linking, so an older QR in the scrollback is never taken for a live one. */
+export function linkEndedNotice(why: string): string {
+  return `[PRO] Link session ended — this QR code is no longer being watched (${why}). Run /link for a new one.`;
 }
 
 /**
@@ -288,112 +346,163 @@ function claimedTokenFrom(body: any): string | undefined {
 }
 
 /**
- * The no-lease-on-this-machine path: POST /api/device/request-link for a
- * short code, show it with its claim URL (QR + plain-text fallback), then
- * poll GET /api/device/poll/:code every 2s until the phone claims it and the
- * broker returns a lease, or the 5-minute budget runs out.
+ * The no-lease-on-this-machine path: POST /api/device/request-link for a short code, show it with its claim URL (QR +
+ * plain-text fallback), then poll GET /api/device/poll/:code every 2s until the phone claims it and the broker returns a
+ * lease, or the code expires (the broker's expiresInMs).
  *
- * Returns the saved lease on success, null on timeout/expiry. The code is
- * rendered as text regardless of QR availability.
+ * Only one run watches a QR at a time: a new run cancels the previous one, in this process or in another window. Every way
+ * a run ends without linking prints linkEndedNotice. A broker that keeps answering with an error is reported, not waited on
+ * in silence. Returns the saved lease on success, null otherwise.
  */
 export async function executeLinkFlow(opts: LinkFlowOptions = {}): Promise<string | null> {
   const base = (opts.brokerBase ?? BROKER_BASE).replace(/\/+$/, "");
   const log = opts.log ?? ((m: string) => console.log(`[PRO] ${m}`));
   const pollInterval = opts.pollIntervalMs ?? LINK_POLL_INTERVAL_MS;
-  const timeoutMs = opts.timeoutMs ?? LINK_FLOW_TIMEOUT_MS;
   const requestTimeoutMs = opts.requestTimeoutMs ?? 10_000;
-  const deadline = Date.now() + timeoutMs;
 
-  // ---- 1. request the link code -------------------------------------------
-  let res: Response;
+  // ---- 0. the newest /link wins ---------------------------------------------
+  if (activeLink && !activeLink.signal.aborted) {
+    activeLink.abort();
+    console.log(`[PRO] The previous /link was cancelled: its QR code is no longer being watched.`);
+  }
+  const controller = new AbortController();
+  activeLink = controller;
+  const runId = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
   try {
-    res = await fetch(`${base}/api/device/request-link`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({}),
-      signal: AbortSignal.timeout(requestTimeoutMs),
-    });
-  } catch (err: any) {
-    throw new Error(`Could not reach the link service: ${err?.message ?? err}`);
-  }
-  if (!res.ok) {
-    let detail = "";
+    // ---- 1. request the link code -------------------------------------------
+    let res: Response;
     try {
-      const errBody: unknown = await res.json();
-      if (errBody && typeof errBody === "object" && "error" in errBody) {
-        const err = (errBody as { error?: unknown }).error;
-        if (typeof err === "string") detail = err.trim();
-      }
-    } catch {
-      // Non-JSON error body — fall back to the bare status line below.
-    }
-    throw new Error(`Link request failed: HTTP ${res.status}${detail ? ` — ${detail}` : ""}`);
-  }
-  let body: any;
-  try {
-    body = await res.json();
-  } catch {
-    body = {};
-  }
-  const code = typeof body?.code === "string" && body.code.trim() ? body.code.trim() : "";
-  if (!code) throw new Error("Link service returned no pairing code.");
-  const claimUrl =
-    typeof body?.claimUrl === "string" && body.claimUrl.trim() ? body.claimUrl.trim() : `${base}/link#${code}`;
-  // Only this desktop holds the poll secret, and the broker hands the claimed lease only to its holder: the code shown on
-  // screen identifies the link, it is not enough to collect it. An older broker sends none, and polling works as before.
-  const pollSecret = typeof body?.pollSecret === "string" && body.pollSecret.trim() ? body.pollSecret.trim() : "";
-
-  // ---- 2. print the code and the claim URL (QR is a bonus, never required) -
-  console.log();
-  console.log("=".repeat(58));
-  console.log("🔗 LINK THIS DEVICE TO YIMPIM PRO");
-  console.log("=".repeat(58));
-  console.log(`\nPairing code:  ${code}\n`);
-  await renderClaimQr(claimUrl, log);
-  console.log(`Claim on your phone:\n  ${claimUrl}\n`);
-  console.log(`Waiting for you to claim the link (up to ${Math.round(timeoutMs / 60000)} min)…`);
-  log(`claimUrl=${claimUrl}`);
-
-  // ---- 3. poll until claimed or the budget runs out ------------------------
-  let lastProgressLog = 0;
-  while (Date.now() < deadline) {
-    await sleep(pollInterval);
-
-    let pollRes: Response;
-    try {
-      pollRes = await fetch(`${base}/api/device/poll/${encodeURIComponent(code)}`, {
-        ...(pollSecret ? { headers: { authorization: `Bearer ${pollSecret}` } } : {}),
+      res = await fetch(`${base}/api/device/request-link`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
         signal: AbortSignal.timeout(requestTimeoutMs),
       });
-    } catch {
-      continue; // transient network blip — the lease still has time
+    } catch (err: any) {
+      throw new Error(`Could not reach the link service: ${err?.message ?? err}`);
     }
-
-    if (pollRes.status === 404) {
-      console.log(`\n[PRO] That link is no longer valid (expired or already used). Run /link to start a fresh one.`);
-      return null;
+    if (!res.ok) {
+      let detail = "";
+      try {
+        const errBody: unknown = await res.json();
+        if (errBody && typeof errBody === "object" && "error" in errBody) {
+          const err = (errBody as { error?: unknown }).error;
+          if (typeof err === "string") detail = err.trim();
+        }
+      } catch {
+        // Non-JSON error body — fall back to the bare status line below.
+      }
+      throw new Error(`Link request failed: HTTP ${res.status}${detail ? ` — ${detail}` : ""}`);
     }
-    if (!pollRes.ok) continue;
-
-    let pollBody: any;
+    let body: any;
     try {
-      pollBody = await pollRes.json();
+      body = await res.json();
     } catch {
-      continue;
+      body = {};
     }
-    const lease = claimedTokenFrom(pollBody);
-    if (lease) {
-      saveProToken(lease);
-      console.log(`\n✅ Device linked — Pro lease saved.`);
-      return lease;
+    const code = typeof body?.code === "string" && body.code.trim() ? body.code.trim() : "";
+    if (!code) throw new Error("Link service returned no pairing code.");
+    const claimUrl =
+      typeof body?.claimUrl === "string" && body.claimUrl.trim() ? body.claimUrl.trim() : `${base}/link#${code}`;
+    // Only this desktop holds the poll secret, and the broker hands the claimed lease only to its holder: the code shown on
+    // screen identifies the link, it is not enough to collect it. An older broker sends none, and polling works as before.
+    const pollSecret = typeof body?.pollSecret === "string" && body.pollSecret.trim() ? body.pollSecret.trim() : "";
+    // Watch the code for as long as the broker lets a phone claim it.
+    const brokerTtl = typeof body?.expiresInMs === "number" && body.expiresInMs > 0 ? body.expiresInMs : undefined;
+    const timeoutMs = opts.timeoutMs ?? brokerTtl ?? LINK_FLOW_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
+    const minutes = Math.max(1, Math.round(timeoutMs / 60000));
+    claimActiveLink(runId, code);
+
+    // ---- 2. print the code and the claim URL (QR is a bonus, never required) -
+    console.log();
+    console.log("=".repeat(58));
+    console.log("🔗 LINK THIS DEVICE TO YIMPIM PRO");
+    console.log("=".repeat(58));
+    console.log(`\nPairing code:  ${code}\n`);
+    await renderClaimQr(claimUrl, log);
+    console.log(`Claim on your phone:\n  ${claimUrl}\n`);
+    console.log(`Waiting for you to claim the link (up to ${minutes} min)…`);
+    log(`claimUrl=${claimUrl}`);
+
+    // ---- 3. poll until claimed, cancelled, or the code expires ---------------
+    let lastProgressLog = Date.now();
+    let failures = 0;
+    let lastProblem = "";
+    let lastProblemLog = 0;
+    const noteFailure = (problem: string) => {
+      failures++;
+      lastProblem = problem;
+      if (failures >= LINK_POLL_FAILURES_BEFORE_NOTICE && Date.now() - lastProblemLog >= 30_000) {
+        lastProblemLog = Date.now();
+        console.log(`[PRO] The link service is not answering normally (${problem}, ${failures} times in a row); still trying…`);
+      }
+    };
+    while (Date.now() < deadline) {
+      await sleep(pollInterval, controller.signal);
+      if (controller.signal.aborted) {
+        console.log(linkEndedNotice("a newer /link replaced it"));
+        return null;
+      }
+      const newest = activeLinkRunId();
+      if (newest && newest !== runId) {
+        console.log(linkEndedNotice("a /link started in another window replaced it"));
+        return null;
+      }
+
+      let pollRes: Response;
+      try {
+        pollRes = await fetch(`${base}/api/device/poll/${encodeURIComponent(code)}`, {
+          ...(pollSecret ? { headers: { authorization: `Bearer ${pollSecret}` } } : {}),
+          signal: AbortSignal.timeout(requestTimeoutMs),
+        });
+      } catch (err: any) {
+        noteFailure(`could not reach it: ${String(err?.message ?? err).split("\n")[0].slice(0, 80)}`);
+        continue; // transient network blip — the code still has time
+      }
+
+      if (pollRes.status === 404) {
+        console.log(linkEndedNotice("the broker no longer knows this code: it expired or was already used"));
+        return null;
+      }
+      if (!pollRes.ok) {
+        let detail = "";
+        try {
+          const e: any = await pollRes.json();
+          if (typeof e?.error === "string") detail = ` — ${e.error.trim().slice(0, 100)}`;
+        } catch {
+          // no JSON body
+        }
+        noteFailure(`HTTP ${pollRes.status}${detail}`);
+        continue;
+      }
+
+      let pollBody: any;
+      try {
+        pollBody = await pollRes.json();
+      } catch {
+        noteFailure("an unreadable answer");
+        continue;
+      }
+      failures = 0;
+      const lease = claimedTokenFrom(pollBody);
+      if (lease) {
+        saveProToken(lease);
+        console.log(`\n✅ Device linked — Pro lease saved.`);
+        return lease;
+      }
+
+      if (Date.now() - lastProgressLog >= 30_000) {
+        lastProgressLog = Date.now();
+        console.log(`Still waiting for you to claim the link on your phone… (code ${code})`);
+      }
     }
 
-    if (Date.now() - lastProgressLog >= 30_000) {
-      lastProgressLog = Date.now();
-      console.log(`Still waiting for you to claim the link on your phone… (code ${code})`);
-    }
+    console.log(linkEndedNotice(`it expired after ${minutes} min${lastProblem && failures > 0 ? `; the last answer was ${lastProblem}` : ""}`));
+    return null;
+  } finally {
+    releaseActiveLink(runId);
+    if (activeLink === controller) activeLink = null;
   }
-
-  console.log(`\n[PRO] Timed out after ${Math.round(timeoutMs / 60000)} minutes. Run /link to try again.`);
-  return null;
 }
