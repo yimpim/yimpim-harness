@@ -568,6 +568,11 @@ export interface EnsureContext {
   force?: boolean;
   /** Reads an icon's SVG from the published package (default: the pinned jsDelivr copy). Tests replace it. */
   fetchIcon?: FetchText;
+  /**
+   * For a new user-facing build: asking the person about the look (references, or three directions to pick from). Used only
+   * when the request is new UI, no design system exists and the project is new; uiDirections.ts is loaded only then.
+   */
+  visual?: import("./uiDirections.js").VisualIntake;
 }
 
 export interface EnsureResult {
@@ -643,6 +648,17 @@ export async function ensureDesignSystem(ctx: EnsureContext): Promise<EnsureResu
   if (!decision || decision.ui === "none" || decision.ui === "extend") return null;
   const exists = designSystemExists(ctx.repoRoot);
   if (exists && !ctx.force && decision.ui !== "restyle") return null;
+  // A new app or site: ask the person about the look first. Anything else (an existing app, a restyle, a feature) never gets here.
+  let look: import("./uiDirections.js").IntakeResult = { mode: "decide", reads: [] };
+  if (ctx.visual && decision.ui === "new" && !exists && ctx.visual.newProject) {
+    try {
+      const { askForLook } = await import("./uiDirections.js");
+      look = await askForLook(ctx.visual, { repoRoot: ctx.repoRoot, call: ctx.call, log: ctx.log });
+    } catch (err: any) {
+      ctx.log("[DESIGN] Asking about the look did not complete (" + String(err?.message ?? err).slice(0, 120) + "); the recommended direction is used.");
+    }
+  }
+  void look;
   const playbook = findPlaybook(decision.playbook) ?? PLAYBOOKS.find((p) => p.id === "saas")!;
   const platform: "web" | "native" | "both" = decision.platform === "unknown" ? (playbook.kind === "native" ? "native" : "web") : decision.platform;
   const product = findProduct(decision.product);

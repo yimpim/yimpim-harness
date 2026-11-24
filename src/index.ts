@@ -6280,6 +6280,22 @@ You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DI
           repoRoot,
           request: instructions.trim(),
           log: (line) => console.log(line),
+          // A new app or site: one question about the look (only then; see uiDirections.ts).
+          visual: {
+            ask:
+              isInteractive() || remote?.connected
+                ? (prompt, choices, fallback) =>
+                    askChoice({ id: `design_look_${Date.now()}`, kind: "blocking", prompt, choices, allowCustom: true, fallback, askedAt: new Date().toISOString() })
+                : undefined,
+            show: (label, file) => {
+              console.log(`   🖼️  ${label}: ${file}`);
+              if (remote?.connected) remote.pushScreenshot(`design_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, label, stageDesignImage(repoRoot, file));
+            },
+            visionModels: config.models.designerVision ?? config.models.verifierVision ?? config.models.editorVision ?? config.models.verifier,
+            autonomous: config.planning.questions === "autonomous",
+            newProject: isNewProject(repoRoot),
+            openRenderer,
+          },
         });
         if (made) console.log("🎨 [DESIGN] " + made.summary);
         // Inside a roadmap, what the design system leaves to do (icons, empty states, the app icon and logo) becomes units in the "Design" area.

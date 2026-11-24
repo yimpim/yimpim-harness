@@ -305,9 +305,11 @@ const USER_INITIATED: Record<string, string[]> = {
   // The critique and the polish (/design critique ui, /design polish ui) are the only commands that capture screens.
   "uiCapture.ts": ["uiCritique.ts", "uiPolish.ts"],
   // The read describes the captured cues; it opens no browser itself.
-  "uiReference.ts": ["referenceRead.ts", "uiCritique.ts"],
+  "uiReference.ts": ["referenceRead.ts", "uiCritique.ts", "uiDirections.ts"],
   // Spends a vision-model call per reference.
-  "referenceRead.ts": ["uiCritique.ts", "uiPolish.ts"],
+  "referenceRead.ts": ["uiCritique.ts", "uiPolish.ts", "uiDirections.ts"],
+  // Loaded by uiDesign.ts only with a dynamic import, for a new user-facing build in a new project (see uiDirections.test.ts).
+  "uiDirections.ts": [],
   // Loaded by index.ts only with a dynamic import inside the explicit command (see uiCritique.test.ts), never statically.
   "uiCritique.ts": ["uiPolish.ts"],
   // Likewise (see uiPolish.test.ts).
@@ -319,7 +321,7 @@ test("nothing a routine run executes can start a capture or open a reference: on
   for (const [mod, allowed] of Object.entries(USER_INITIATED)) {
     const imports = new RegExp(`from "\\.\\.?/(?:[\\w/]*/)?${mod.replace(/\.ts$/, "")}\\.js"`);
     const importers = files.filter((f) => f !== mod && imports.test(fs.readFileSync(path.join("src", f), "utf8")));
-    assert.deepEqual(importers, allowed, `${mod} may be imported only by the explicit /design commands (added in later commits)`);
+    assert.deepEqual([...importers].sort(), [...allowed].sort(), `${mod} may be imported only by the explicit /design commands and the new-app design step`);
   }
   // The check itself works: the test file imports uiCapture in exactly the form it looks for.
   assert.match(fs.readFileSync("test/uiCapture.test.ts", "utf8"), new RegExp(`from "\\.\\.?/(?:[\\w/]*/)?uiCapture\\.js"`));
