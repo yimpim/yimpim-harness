@@ -57,6 +57,9 @@ export interface TranslatedRemoteEvent {
  * such back-compat obligation — per the task contract, THESE must omit
  * taskId entirely when no task is running, not fall back to the stale id.
  */
+/** The phone's Discover & Plan card: planning (Discovery, the threat triage, the Planner) folds under it. */
+export const DISCOVER_AND_PLAN_PHASE_ID = "discover-and-plan";
+
 export function translateForRemote(
   event: YimpimEvent,
   currentPhase?: PhaseContext,
@@ -132,6 +135,8 @@ export function translateForRemote(
           // A security check (a command's review, the post-phase review) belongs to the phase it runs in, or the one just finished
           // when it runs between phases: a phone nests it inside that phase's card instead of opening a card of its own.
           ...(event.agent === "SECURITY" && currentPhase?.id ? { parentPhaseId: currentPhase.id } : {}),
+          // The pre-Planner threat triage belongs to planning: a phone folds it into the Discover & Plan card, not an orphan card.
+          ...(event.stage === "planning" ? { parentPhaseId: DISCOVER_AND_PLAN_PHASE_ID, stage: "planning" as const } : {}),
           acceptanceCriteria: currentPhase?.verification,
           retryOf: event.retryOf,
           attempt: event.attempt,

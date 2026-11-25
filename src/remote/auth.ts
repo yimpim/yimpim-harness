@@ -177,6 +177,16 @@ export function getValidProToken(now = Date.now()): string | null {
   return saved.token;
 }
 
+/**
+ * Why a phone prompt cannot be served right now, or null when it can. Reads ~/.yimpim/auth.json on every call, so a lease saved
+ * by /link a moment ago counts at once: nothing here is remembered from an earlier moment, and nothing says "not linked" while
+ * a valid lease is on disk.
+ */
+export function remotePromptBlocker(now = Date.now()): string | null {
+  if (getValidProToken(now)) return null;
+  return "This computer is not linked to YIMPIM Pro, or its Pro link has expired. Run /link on the computer, then send it again.";
+}
+
 // ---------------------------------------------------------------- renewal
 
 export interface RefreshOptions {

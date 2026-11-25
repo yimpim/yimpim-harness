@@ -315,6 +315,8 @@ export interface LabeledCompletionOptions {
   reason?: string;
   /** A background check with no visible result: its worker is not shown on a phone (see events.ts's background). */
   background?: boolean;
+  /** Part of planning, before the Planner runs (see events.ts's agent.start stage). */
+  stage?: "planning";
 }
 
 /**
@@ -332,11 +334,13 @@ export interface LabeledCompletionOptions {
 export async function runLabeledCompletion(options: LabeledCompletionOptions): Promise<string> {
   const { client, models, messages, agentName } = options;
   const background = options.background ? { background: true } : {};
+  const stage = options.stage ? { stage: options.stage } : {};
   events.emit({
     type: "agent.start",
     agent: agentName,
     models,
     ...background,
+    ...stage,
     ...(options.retryOf ? { retryOf: options.retryOf, attempt: options.attempt, reason: options.reason } : options.reason ? { reason: options.reason } : {}),
   });
   try {
