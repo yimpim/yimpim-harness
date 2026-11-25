@@ -176,6 +176,7 @@ import { RemoteSession, SessionLimitError } from "./remote/client.js";
 import { buildSessionHello } from "./remote/hello.js";
 import { PendingQuestion, RemoteStatus } from "./remote/protocol.js";
 import { translateForRemote } from "./remoteEventTranslator.js";
+import { PlannerStage } from "./plannerStage.js";
 import { logLocal, isLocalOnly } from "./localLog.js";
 import {
   readHistoryBacklogForReplay,
@@ -197,7 +198,7 @@ import { installPersistentInput, registerLiveCommands, printAbove, writeRawAbove
 import { ModelQueue } from "./modelQueue.js";
 import { ModelPanel } from "./modelPanel.js";
 import { provisionRelay, RelayUnavailable, ProvisionedRelay } from "./remote/autoRelay.js";
-import { executeLinkFlow, getValidProToken } from "./remote/auth.js";
+import { executeLinkFlow, getValidProToken, remotePromptBlocker } from "./remote/auth.js";
 import { loadApiKey, describeBackend, detectStaleEnvKey } from "./secrets.js";
 import {
   Attachment, AttachmentError, loadAttachments, describeAttachments,
@@ -1886,9 +1887,21 @@ async function connectRemote(
       return noted;
     };
 
+    // Checked against the lease on disk at the moment a phone prompt arrives — not against what this session was built with: /link
+    // may have run since (so an "unlinked" state read at startup is stale), and a lease can expire mid-session. A prompt that cannot
+    // be served is refused to the phone with the reason, so it is never left hanging with no answer. Nothing is consumed on refusal.
+    const refuseUnlinkedPrompt = (verb: "answer" | "message"): boolean => {
+      const reason = remotePromptBlocker();
+      if (reason === null) return false;
+      logLocal(`[REMOTE] ⚠️ ${verb} refused: ${reason}`);
+      session.push("command.refused", { verb, reason });
+      return true;
+    };
+
     const pairingUrl = await session.start(runId, path.basename(repoRoot), {
       onAbort: (reason) => runControl.requestAbort(reason || "phone"),
       onAnswer: (questionId, answer) => {
+        if (refuseUnlinkedPrompt("answer")) return;
         const noted = withAttachmentNote(answer);
         if (!runControl.answer(questionId, noted, "phone")) {
           logLocal(`[REMOTE] (answer for ${questionId} arrived too late — already resolved)`);
@@ -1901,6 +1914,7 @@ async function connectRemote(
         }
       },
       onMessage: (text) => {
+        if (refuseUnlinkedPrompt("message")) return;
         const noted = withAttachmentNote(text);
         const usedImmediately = runControl.provideForNextQuestion(noted);
         logLocal(
@@ -4359,6 +4373,32 @@ async function main(): Promise<void> {
   // shown); each worker.end carries its own id, even when another worker ended inside it.
   const workerFrames: { id: string; agent: string; background: boolean }[] = [];
   const shownWorker = () => [...workerFrames].reverse().find((w) => !w.background);
+  // The Planner, as a phone sees it: ONE worker for the whole planning stage — its first pass, the question check and every
+  // re-plan share one card (see plannerStage.ts). Opened by the first PLANNER pass after beginPlanning(), closed once by closePlanning().
+  const plannerStage = new PlannerStage(() => `w-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
+  const beginPlanning = (): void => {
+    // A stage left open by a path that never reached its close (an early exit) is closed first, so its card is not left hanging.
+    closePlanning("interrupted");
+    plannerStage.begin();
+  };
+  const closePlanning = (outcome: string): void => {
+    const end = plannerStage.close();
+    if (!end) return;
+    const i = workerFrames.findIndex((w) => w.id === end.workerId);
+    if (i >= 0) workerFrames.splice(i, 1);
+    currentWorkerId = shownWorker()?.id;
+    if (remote?.connected) {
+      const translated = translateForRemote(
+        { type: "agent.end", agent: "PLANNER", rounds: end.passes, outcome, tokensUsed: end.tokensUsed, costUsd: end.costUsd, elapsedMs: end.elapsedMs },
+        currentPhaseForEvents,
+        currentTaskId,
+        end.workerId,
+        taskRunning
+      );
+      if (translated) remote.push(translated.kind, translated.payload);
+      remote.updateStatus(buildUsageStatusPatch());
+    }
+  };
   // Who is asking, for question.ask / question.answered: the task, the running phase, and the innermost worker a phone is shown.
   questionContext = () => {
     const w = shownWorker();
@@ -4595,11 +4635,22 @@ async function main(): Promise<void> {
     // The id this event's own worker carries: a new one for its start, its own for its end, the innermost shown one otherwise.
     let eventWorkerId = currentWorkerId;
     let endingFrame = -1;
+    // A PLANNER pass during planning is part of the stage's one worker (see plannerStage.ts): it runs under that id and sends no
+    // worker.start/worker.end of its own. Its usage still counts, and console output is unchanged.
+    const plannerPass = (event.type === "agent.start" || event.type === "agent.end") && event.agent === "PLANNER" && !event.background && plannerStage.active;
+    let foldedPlannerPass = false;
     if (event.type === "agent.start") {
       // Opaque and unique for this process's lifetime — no need to survive
       // a restart (a worker never outlives one), unlike eventId.
-      const id = `w-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      workerFrames.push({ id, agent: event.agent, background: Boolean(event.background) });
+      let id: string;
+      if (plannerPass) {
+        const pass = plannerStage.startPass();
+        id = pass.workerId;
+        foldedPlannerPass = pass.fold;
+      } else {
+        id = `w-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      }
+      if (!foldedPlannerPass) workerFrames.push({ id, agent: event.agent, background: Boolean(event.background) });
       eventWorkerId = id;
       if (!event.background) {
         currentWorkerId = id;
@@ -4609,10 +4660,15 @@ async function main(): Promise<void> {
       runningAgentLabels.push(`${phase}${event.agent}`);
       refreshStatus();
     }
+    if (plannerPass && event.type === "agent.end") {
+      plannerStage.endPass(event.tokensUsed, event.costUsd);
+      foldedPlannerPass = true;
+      eventWorkerId = plannerStage.id;
+    }
     // The line says what is running NOW. When an agent ends it goes, or shows the one still running; it used to stay until the
     // whole task finished, so "DISCOVERY running…" sat there through the planner, the editor and the idle prompt.
     if (event.type === "agent.end") {
-      for (let i = workerFrames.length - 1; i >= 0; i--) {
+      for (let i = workerFrames.length - 1; i >= 0 && !foldedPlannerPass; i--) {
         if (workerFrames[i].agent === event.agent) {
           endingFrame = i;
           break;
@@ -4637,7 +4693,7 @@ async function main(): Promise<void> {
       // advisor.answer kinds (which never shipped before, so have no such
       // back-compat constraint) can correctly omit taskId while idle — see
       // translateForRemote's own comment.
-      const translated = translateForRemote(event, currentPhaseForEvents, currentTaskId, eventWorkerId, taskRunning);
+      const translated = foldedPlannerPass ? undefined : translateForRemote(event, currentPhaseForEvents, currentTaskId, eventWorkerId, taskRunning);
       if (translated) remote.push(translated.kind, translated.payload);
       // Usage refreshed after every agent — not just at the handful of
       // phase/task boundaries that already call updateStatus. The RAW event
@@ -5395,6 +5451,9 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
 
   taskLoop: while (true) {
   let instructions = "";
+  // The user's own words for this turn, when `instructions` had context appended for the model (see the classification branch
+  // below). task.start and the History title show THESE, never the appended text. Unset means `instructions` is already the user's text.
+  let userPrompt: string | undefined;
   // An agent's question in the middle of a task is answered from the specs, the task's own definition and the code first;
   // only what they do not settle (a real product decision) reaches the user.
   // Every question put to a person keeps its technical wording and gets a plain-words explanation under it, so someone who
@@ -5584,6 +5643,8 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
   // (above the try below, not inside it) so both the success path and the
   // catch block beside that try can reach it.
   const endTask = (state: "done" | "failed" | "aborted", taskUsage: UsageReport) => {
+    // A task that failed or was stopped mid-planning still closes its Planner card, so no worker is left open on the phone.
+    closePlanning(state === "done" ? "completed" : state);
     remote?.push("task.end", {
       taskId: currentTaskId,
       state,
@@ -6012,6 +6073,8 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
             // The same for an audit that only reported: "lets work on what existence found" carries the request and the findings.
             const audit = !advice && lastAudit && intentFollowsAudit ? lastAudit : null;
             if (audit) lastAudit = null;
+            // The model reads the context-enriched text below; the record of the task keeps what the user actually typed.
+            userPrompt = trimmed;
             instructions = advice
               ? `${trimmed}\n\n[Context: you previously answered "${advice.question}" with the following — use it if this request refers to it:\n${advice.answer}]`
               : audit
@@ -6147,7 +6210,7 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
     remote?.push("task.start", {
       taskId: currentTaskId,
       runId,
-      prompt: instructions.trim(),
+      prompt: (userPrompt ?? instructions).trim(),
       attachments: attachments.map((a) => a.label),
       ...(activeUnitId ? { roadmapUnitId: activeUnitId, roadmapId: loadRoadmap(repoRoot)?.createdAt } : {}),
     });
@@ -6155,7 +6218,7 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
     taskRunning = true;
     // Counted (and titled) at the start, so a task that ends without a single
     // model call still shows up in the lifetime task count.
-    usageLedger().beginTask(currentTaskId, { repo: path.basename(repoRoot), title: instructions });
+    usageLedger().beginTask(currentTaskId, { repo: path.basename(repoRoot), title: userPrompt ?? instructions });
     // Pushed immediately, as ONE consolidated snapshot, so a paired phone's
     // very next status already carries the new taskId AND a genuinely clean
     // slate — not just a new id stapled onto the PREVIOUS task's leftover
@@ -6391,7 +6454,8 @@ You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DI
     if (config.security.enabled && !verifyOnly && !direct) {
       try {
         const sec = await ensureThreatModel({
-          call: (ms, messages, label, json) => runLabeledCompletion({ client, models: ms, messages: messages as any, agentName: "SECURITY", jsonMode: json, reason: "Security: " + label }),
+          // stage: this runs before the Planner, as part of planning, so the phone folds it into the Discover & Plan card.
+          call: (ms, messages, label, json) => runLabeledCompletion({ client, models: ms, messages: messages as any, agentName: "SECURITY", jsonMode: json, reason: "Security: " + label, stage: "planning" }),
           // The security model writes the threat model, but only when the planner's models say the task is sensitive.
           models: securityModels(config.models),
           triageModels: config.models.planner,
@@ -6465,6 +6529,8 @@ ${memory.liveRules.map((r) => `- ${r}`).join("\n") || "None"}`;
     // next retry's `attempt`, and reset per task since it's declared inside
     // the per-task loop body.
     let plannerAttempt = 1;
+    // Planning is one phone card (see plannerStage.ts): every Planner pass from here to the close below folds into it.
+    beginPlanning();
     planOutput = direct ? direct.plan : await runToolAgent({
       prompt: buildUserContent(plannerPrompt, attachments) as any,
       repo,
@@ -6896,6 +6962,9 @@ The user wants you to decide, not ask: ${d.choice}`);
         );
       }
     }
+
+    // Planning is over: the one Planner card closes with the stage's cumulative tokens and cost.
+    closePlanning("completed");
 
     // Whatever was decided without asking goes into the plan, so it is listed with the other assumptions and can be
     // corrected in one go. The Planner's questions are settled either way and are not shown as unanswered.

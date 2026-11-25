@@ -36,8 +36,11 @@ function cliVersion(): string | undefined {
 export function buildSessionHello(opts: { repoRoot: string; shareHostname: boolean }): Partial<SessionHello> {
   const branch = readBranch(opts.repoRoot);
   const version = cliVersion();
+  const cwd = process.cwd();
   return {
     repoName: path.basename(opts.repoRoot).slice(0, 120),
+    projectName: path.basename(cwd).slice(0, 120),
+    cwd,
     ...(branch ? { branch } : {}),
     ...(opts.shareHostname ? { hostname: os.hostname().slice(0, 120) } : {}),
     platform: process.platform,

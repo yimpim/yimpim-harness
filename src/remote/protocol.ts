@@ -205,6 +205,10 @@ export interface RemoteStatus {
    *  under `status` below. */
   taskId: string;
   repoName: string;
+  /** The folder name this terminal runs in (path.basename of process.cwd()), so a phone with several terminals can label each one. Sealed. */
+  projectName?: string;
+  /** The working directory of this terminal. Sealed: the relay never sees a path. */
+  cwd?: string;
   state: "idle" | "planning" | "running" | "awaiting-input" | "done" | "failed" | "aborted";
   goal?: string;
   phases: { id: string; name: string; status: string }[];
@@ -309,7 +313,7 @@ export type RemoteEvent =
    * Who this terminal is, for a phone that has several: sent sealed at the start of a session and again when the phone pairs, so
    * the relay never sees a project or host name. `hostname` is left out when `remote.shareHostname` is off.
    */
-  | { kind: "session.hello"; repoName: string; branch?: string; hostname?: string; platform: string; cliVersion?: string; startedAt: string }
+  | { kind: "session.hello"; repoName: string; projectName?: string; cwd?: string; branch?: string; hostname?: string; platform: string; cliVersion?: string; startedAt: string }
   /** Emitted exactly once, the moment `taskId` is minted (right after the
    *  prompt is captured, before Discovery) — the explicit task-boundary
    *  counterpart to `status.state` transitions, which a client previously had
@@ -345,6 +349,8 @@ export type RemoteEvent =
       /** For a SECURITY worker: the phase it belongs to (the one it runs in, or the one just finished when it runs between phases), so a
        *  client nests it inside that phase's card. A background check with no visible result sends no worker.start/worker.end at all. */
       parentPhaseId?: string;
+      /** "planning" for a pass that runs before the Planner (the threat triage): its parentPhaseId is then the Discover & Plan card. */
+      stage?: "planning";
       acceptanceCriteria?: string[]; retryOf?: string; attempt?: number; reason?: string; exchangeId?: string }
   /** A worker finished its pass — `outcome` is a free-form label (e.g.
    *  "completed", "passed", "failed"). `tokensUsed`/`costUsd` are this

@@ -59,6 +59,10 @@ export function endedMessage(reason: string, limit?: number): string {
 /** One terminal's identity, sent sealed so a phone with several can tell them apart. */
 export interface SessionHello {
   repoName: string;
+  /** The folder this terminal was started in (path.basename of process.cwd()), so a phone can label the session. */
+  projectName?: string;
+  /** The working directory of this terminal. Sealed like the rest of the hello: the relay never sees it. */
+  cwd?: string;
   branch?: string;
   hostname?: string;
   platform: string;
@@ -291,6 +295,9 @@ export class RemoteSession {
     this.handlers = handlers;
     this.status.runId = runId;
     this.status.repoName = repoName;
+    // Carried in every status heartbeat (sealed), so the phone can label this terminal by project without a separate lookup.
+    if (hello?.projectName) this.status.projectName = hello.projectName;
+    if (hello?.cwd) this.status.cwd = hello.cwd;
 
     const pairingSecret = generatePairingSecret();
 

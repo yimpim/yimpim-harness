@@ -57,6 +57,9 @@ export type YimpimEvent =
       /** A background check with no visible result (the "does this need a design system" decision): counted, but never shown as a
        *  worker card on a phone, which would otherwise open an empty top-level "Run" card for it. */
       background?: boolean;
+      /** The pass runs before the Planner, as part of planning (the pre-Planner threat triage): a phone folds it into the
+       *  Discover & Plan card instead of opening an orphan card. Unset for everything else. */
+      stage?: "planning";
     }
   | {
       type: "agent.end";
