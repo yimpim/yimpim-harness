@@ -208,34 +208,60 @@ export function makePanel(judges: Judge[]): Panel {
       { role: "system" as const, content: SYSTEM },
       { role: "user" as const, content: body },
     ];
-    // All judges at once, each on its own, each given exactly the same thing. One that fails is a vote that is not "safe", never a pass.
-    const votes = await Promise.all(
-      judges.map(async (j): Promise<Vote> => {
-        try {
-          return parseVote(j.model, await j.call(messages));
-        } catch (err: any) {
-          return { model: j.model, verdict: "none", reason: `could not run (${String(err?.message ?? err).slice(0, 80)})` };
-        }
-      })
-    );
-    const safeCount = votes.filter((v) => v.verdict === "safe").length;
-    const allSafe = votes.length > 0 && safeCount === votes.length;
-    const outcome: ReviewOutcome = allSafe
-      ? { allow: true, why: `${votes.length} of ${votes.length} security judges said safe: ${votes[0].reason || "reviewed and judged safe"}` }
-      : { allow: false, why: whyNot(votes) };
+    const totalJudges = judges.length;
     events.emit({
-      type: "security.review",
-      kind,
-      action: label,
-      allowed: outcome.allow,
-      safeCount,
-      totalCount: votes.length,
-      summary: formatSecuritySummary(safeCount, votes.length, label),
+      type: "agent.start",
+      agent: "SECURITY",
+      models: judges.map((j) => j.model),
+      reason: label,
     });
-    auditLog(repoRoot, { kind, action: label, allowed: outcome.allow, votes: votes.map((v) => ({ model: v.model, verdict: v.verdict, reason: v.reason })) });
-    // A judge that could not answer is not remembered, so the next ask tries again.
-    if (outcome.allow || votes.every((v) => v.verdict !== "none")) memo.set(key, outcome);
-    return outcome;
+    let outcome: ReviewOutcome = { allow: false, why: "security panel did not complete" };
+    let safeCount = 0;
+    let summary = formatSecuritySummary(0, totalJudges, label);
+    try {
+      // All judges at once, each on its own, each given exactly the same thing. One that fails is a vote that is not "safe", never a pass.
+      const votes = await Promise.all(
+        judges.map(async (j): Promise<Vote> => {
+          try {
+            return parseVote(j.model, await j.call(messages));
+          } catch (err: any) {
+            return { model: j.model, verdict: "none", reason: `could not run (${String(err?.message ?? err).slice(0, 80)})` };
+          }
+        })
+      );
+      safeCount = votes.filter((v) => v.verdict === "safe").length;
+      const allSafe = totalJudges > 0 && safeCount === totalJudges;
+      outcome = allSafe
+        ? { allow: true, why: `${totalJudges} of ${totalJudges} security judges said safe: ${votes[0].reason || "reviewed and judged safe"}` }
+        : { allow: false, why: whyNot(votes) };
+      summary = formatSecuritySummary(safeCount, totalJudges, label);
+      events.emit({
+        type: "security.review",
+        kind,
+        action: label,
+        allowed: outcome.allow,
+        safeCount,
+        totalJudges,
+        totalCount: totalJudges,
+        summary,
+      });
+      auditLog(repoRoot, { kind, action: label, allowed: outcome.allow, votes: votes.map((v) => ({ model: v.model, verdict: v.verdict, reason: v.reason })) });
+      // A judge that could not answer is not remembered, so the next ask tries again.
+      if (outcome.allow || votes.every((v) => v.verdict !== "none")) memo.set(key, outcome);
+      return outcome;
+    } finally {
+      events.emit({
+        type: "agent.end",
+        agent: "SECURITY",
+        rounds: 1,
+        outcome: outcome.allow ? "completed" : "escalated",
+        summary,
+        action: label,
+        allowed: outcome.allow,
+        safeCount,
+        totalJudges,
+      });
+    }
   };
 
   return {

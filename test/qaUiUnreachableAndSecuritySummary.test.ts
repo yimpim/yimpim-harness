@@ -104,11 +104,12 @@ describe("Remote SECURITY event summary enrichment", () => {
     assert.equal(formatSecuritySummary(3, 3, "npm test"), "3/3 safe · npm test");
   });
 
-  test("makePanel emits security.review event and translateForRemote forwards summary and verdict fields", async () => {
+  test("makePanel emits one aggregated SECURITY worker + security.review event with true totalJudges count", async () => {
     const dir = await makeRepo();
-    const emitted: any[] = [];
+    const translated: any[] = [];
     const off = events.onEmit((ev) => {
-      if (ev.type === "security.review") emitted.push(ev);
+      const wire = translateForRemote(ev, { id: "p1", name: "Build", verification: [] }, "task-1", "w-1", true);
+      if (wire) translated.push(wire);
     });
     try {
       const panel = makePanel([
@@ -125,17 +126,25 @@ describe("Remote SECURITY event summary enrichment", () => {
         created: [],
       });
       assert.equal(outcome.allow, false);
-      assert.equal(emitted.length, 1);
-      assert.equal(emitted[0].summary, "2/3 safe · npm run build");
-      assert.equal(emitted[0].safeCount, 2);
-      assert.equal(emitted[0].totalCount, 3);
 
-      const wire = translateForRemote(emitted[0], { id: "p1", name: "Build", verification: [] }, "task-1", "w-1", true);
-      assert.ok(wire);
-      assert.equal(wire.kind, "security.review");
-      assert.equal(wire.payload.summary, "2/3 safe · npm run build");
-      assert.equal(wire.payload.action, "npm run build");
-      assert.equal(wire.payload.parentPhaseId, "p1");
+      const starts = translated.filter((e) => e.kind === "worker.start" && e.payload.agent === "SECURITY");
+      const ends = translated.filter((e) => e.kind === "worker.end" && e.payload.agent === "SECURITY");
+      const reviews = translated.filter((e) => e.kind === "security.review");
+
+      assert.equal(starts.length, 1, "must emit exactly one aggregated SECURITY worker.start");
+      assert.equal(ends.length, 1, "must emit exactly one aggregated SECURITY worker.end");
+      assert.equal(reviews.length, 1, "must emit exactly one aggregated security.review");
+
+      assert.equal(ends[0].payload.safeCount, 2);
+      assert.equal(ends[0].payload.totalJudges, 3);
+      assert.equal(ends[0].payload.summary, "2/3 safe · npm run build");
+      assert.equal(ends[0].payload.action, "npm run build");
+
+      assert.equal(reviews[0].payload.safeCount, 2);
+      assert.equal(reviews[0].payload.totalJudges, 3);
+      assert.equal(reviews[0].payload.summary, "2/3 safe · npm run build");
+      assert.equal(reviews[0].payload.action, "npm run build");
+      assert.equal(reviews[0].payload.parentPhaseId, "p1");
     } finally {
       off();
     }

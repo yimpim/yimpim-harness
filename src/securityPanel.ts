@@ -19,7 +19,7 @@ export function panelReviewerFor(client: OpenRouterClient, config: AgentConfig):
     judges.map((model) => ({
       model,
       call: (messages) =>
-        runLabeledCompletion({ client, models: [model], messages: messages as any, agentName: "SECURITY", jsonMode: true, reasoning: cfg?.reasoning ?? "medium", reason: `Security panel (test run): ${model}` }),
+        runLabeledCompletion({ client, models: [model], messages: messages as any, agentName: "SECURITY", jsonMode: true, reasoning: cfg?.reasoning ?? "medium", reason: `Security panel (test run): ${model}`, background: true }),
     }))
   );
   return (req) => panel.reviewCommand(req);

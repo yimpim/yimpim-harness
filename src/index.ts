@@ -4952,7 +4952,7 @@ async function main(): Promise<void> {
         judgeModels.map((model) => ({
           model,
           call: (messages) =>
-            runLabeledCompletion({ client, models: [model], messages: messages as any, agentName: "SECURITY", jsonMode: true, reasoning: panelCfg?.reasoning ?? "medium", reason: `Security panel: ${model}` }),
+            runLabeledCompletion({ client, models: [model], messages: messages as any, agentName: "SECURITY", jsonMode: true, reasoning: panelCfg?.reasoning ?? "medium", reason: `Security panel: ${model}`, background: true }),
         }))
       );
       agentTools.setCommandReviewer((req) => panel.reviewCommand(req), { coversElevated: true });

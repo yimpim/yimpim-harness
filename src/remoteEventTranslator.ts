@@ -166,6 +166,11 @@ export function translateForRemote(
           costUsd: event.costUsd,
           // How long the worker ran (additive: an older phone build ignores it).
           elapsedMs: event.elapsedMs,
+          ...(event.summary !== undefined ? { summary: event.summary } : {}),
+          ...(event.action !== undefined ? { action: event.action } : {}),
+          ...(event.allowed !== undefined ? { allowed: event.allowed } : {}),
+          ...(event.safeCount !== undefined ? { safeCount: event.safeCount } : {}),
+          ...(event.totalJudges !== undefined ? { totalJudges: event.totalJudges } : {}),
         },
       };
     }
@@ -287,6 +292,7 @@ export function translateForRemote(
           action: event.action,
           allowed: event.allowed,
           safeCount: event.safeCount,
+          totalJudges: event.totalJudges,
           totalCount: event.totalCount,
           summary: event.summary,
         },

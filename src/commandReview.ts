@@ -256,6 +256,7 @@ export function makeCommandReviewer(call: ReviewCall): (req: ReviewRequest) => P
       action: req.label,
       allowed: outcome.allow,
       safeCount,
+      totalJudges: 1,
       totalCount: 1,
       summary: `${safeCount}/1 safe · ${compactAction}`,
     });
