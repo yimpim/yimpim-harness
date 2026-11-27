@@ -20,10 +20,15 @@ import { lifecycleScripts, npmrcScriptOverride } from "./commandPolicy.js";
 import { alwaysAsk, dangerIn, injectionIn, filesToRead, type ReviewRequest, type ReviewOutcome, type ReviewCall, type ActionReview } from "./commandReview.js";
 import { events } from "./events.js";
 
-/** Concise one-line summary for remote SECURITY cards/events, e.g. "2/3 safe · npm run build". */
-export function formatSecuritySummary(safeCount: number, totalCount: number, action: string): string {
+/** Concise one-line summary for remote SECURITY cards/events, e.g. "3/3 safe · npm run build" or "2/3 escalated · npm run build". */
+export function formatSecuritySummary(
+  safeCount: number,
+  totalCount: number,
+  action: string,
+  allowed = totalCount > 0 && safeCount === totalCount
+): string {
   const compactAction = String(action ?? "").replace(/\s+/g, " ").trim().slice(0, 120) || "action";
-  return `${safeCount}/${totalCount} safe · ${compactAction}`;
+  return `${safeCount}/${totalCount} ${allowed ? "safe" : "escalated"} · ${compactAction}`;
 }
 
 export interface Judge {
@@ -217,7 +222,7 @@ export function makePanel(judges: Judge[]): Panel {
     });
     let outcome: ReviewOutcome = { allow: false, why: "security panel did not complete" };
     let safeCount = 0;
-    let summary = formatSecuritySummary(0, totalJudges, label);
+    let summary = formatSecuritySummary(0, totalJudges, label, false);
     try {
       // All judges at once, each on its own, each given exactly the same thing. One that fails is a vote that is not "safe", never a pass.
       const votes = await Promise.all(
@@ -234,10 +239,11 @@ export function makePanel(judges: Judge[]): Panel {
       outcome = allSafe
         ? { allow: true, why: `${totalJudges} of ${totalJudges} security judges said safe: ${votes[0].reason || "reviewed and judged safe"}` }
         : { allow: false, why: whyNot(votes) };
-      summary = formatSecuritySummary(safeCount, totalJudges, label);
+      summary = formatSecuritySummary(safeCount, totalJudges, label, outcome.allow);
       events.emit({
         type: "security.review",
         kind,
+        command: label,
         action: label,
         allowed: outcome.allow,
         safeCount,
@@ -256,6 +262,7 @@ export function makePanel(judges: Judge[]): Panel {
         rounds: 1,
         outcome: outcome.allow ? "completed" : "escalated",
         summary,
+        command: label,
         action: label,
         allowed: outcome.allow,
         safeCount,

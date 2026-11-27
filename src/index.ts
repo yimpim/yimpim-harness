@@ -106,6 +106,7 @@ let activeUnitId: string | undefined;
 let lastPhaseRuns = 1;
 // The QA confidence of the last phase that passed (verified, partial or static-only); undefined for a phase with no verdict. Set by runPhaseWithHealing; read for phase.end.
 let lastPhaseConfidence: string | undefined;
+let currentTaskBaseSha: string | undefined;
 // The folder a "program" request named as the app or code to rebuild from, if any.
 let programReferenceHint: string | null = null;
 // What the classifier decided about the roadmap, when the message was about it.
@@ -3211,7 +3212,7 @@ ${instructions}`;
       agentTools.getStagedDeletions(),
       preExistingDirty,
       verifyOnly,
-      { uiUnreachable }
+      { uiUnreachable, taskBaseSha: currentTaskBaseSha }
     );
 
     // Close the loop on the PREVIOUS repair attempt, if there was one: pair
@@ -4961,7 +4962,7 @@ async function main(): Promise<void> {
     } else {
       agentTools.setCommandReviewer(
         makeCommandReviewer((messages) =>
-          runLabeledCompletion({ client, models: securityModels(config.models), messages: messages as any, agentName: "SECURITY", jsonMode: true, reason: "Security: reviewing a command" })
+          runLabeledCompletion({ client, models: securityModels(config.models), messages: messages as any, agentName: "SECURITY", jsonMode: true, reason: "Security: reviewing a command", background: true })
         )
       );
     }
@@ -4991,6 +4992,7 @@ async function main(): Promise<void> {
   // directories are refused, and a command is denied, asked about first, or
   // allowed exactly as it would be for the Editor (qaProjectBackend.ts).
   verifier.setProjectTools({
+    repoRoot,
     readFile: (p, a, b) => agentTools.readFile(p, a, b),
     searchCode: (pattern, sub) => agentTools.searchCode(pattern, sub),
     listFiles: (dir) => agentTools.listFiles(dir),
@@ -5337,6 +5339,11 @@ async function main(): Promise<void> {
       return;
     }
     currentTaskId = `task-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    try {
+      currentTaskBaseSha = (await repo.git(["rev-parse", "HEAD"])).trim() || undefined;
+    } catch {
+      currentTaskBaseSha = undefined;
+    }
     currentPhaseForEvents = undefined;
     currentTaskUsageStart = requestUsageStart ?? events.usageReport();
     workerLedger.resetTask();
@@ -6285,6 +6292,11 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
     // for it, and the previous task's own final "done" status risks the same
     // if anything executes between it and here before this line moves.
     currentTaskId = `task-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    try {
+      currentTaskBaseSha = (await repo.git(["rev-parse", "HEAD"])).trim() || undefined;
+    } catch {
+      currentTaskBaseSha = undefined;
+    }
     // Discovery/Planner run before any phase exists — if a leftover phase
     // object from the PREVIOUS task's own phase loop survives here, their
     // worker.start events wrongly carry that old phase's id/name (translateForRemote

@@ -91,13 +91,72 @@ export const PhaseSchema = z.object({
  * question with zero options (a genuine open-ended one) is still valid, it
  * just asks with no suggested buttons.
  */
+const TRAILING_RECOMMENDED_RE = /\s*\(\s*recommended\s*\)\s*$/i;
+const TRAILING_PAREN_RE = /\s*\([^)]*\)\s*$/;
+
+function normalizeClarifierBase(option: string): string {
+  let s = option.trim().replace(TRAILING_RECOMMENDED_RE, "").trim();
+  // Strip one trailing parenthetical restatement (e.g. "(simple default)") so near-duplicate
+  // options with different parenthetical notes collapse cleanly to one choice.
+  const stripped = s.replace(TRAILING_PAREN_RE, "").trim();
+  if (stripped.length > 0) s = stripped;
+  return s.replace(/\s+/g, " ").toLowerCase();
+}
+
+/**
+ * Deduplicates multiple-choice clarifier options sharing the same normalized base text
+ * (ignoring trailing `(Recommended)` or parenthetical restatements) and attaches
+ * `(Recommended)` to the single matching option instead of appending a duplicate.
+ */
+export function deduplicateClarifierOptions(
+  rawOptions: string[],
+  recommended?: string,
+  opts?: { annotateRecommended?: boolean }
+): { options: string[]; recommended?: string } {
+  const annotateRecommended = opts?.annotateRecommended ?? true;
+  const recBase = recommended ? normalizeClarifierBase(recommended) : undefined;
+  const byBase = new Map<string, { label: string; isRecommended: boolean }>();
+  const order: string[] = [];
+
+  for (const raw of rawOptions) {
+    const trimmed = String(raw ?? "").trim();
+    if (!trimmed) continue;
+    const hadRec = TRAILING_RECOMMENDED_RE.test(trimmed);
+    const cleanLabel = trimmed.replace(TRAILING_RECOMMENDED_RE, "").trim();
+    if (!cleanLabel) continue;
+    const base = normalizeClarifierBase(cleanLabel);
+    if (!base) continue;
+
+    const existing = byBase.get(base);
+    if (existing) {
+      if (hadRec) existing.isRecommended = true;
+    } else {
+      byBase.set(base, { label: cleanLabel, isRecommended: hadRec || (recBase !== undefined && base === recBase) });
+      order.push(base);
+    }
+  }
+
+  let matchedRecommended: string | undefined;
+  const options = order.map((base) => {
+    const entry = byBase.get(base)!;
+    const formatted = annotateRecommended && entry.isRecommended ? `${entry.label} (Recommended)` : entry.label;
+    if (entry.isRecommended && matchedRecommended === undefined) matchedRecommended = formatted;
+    return formatted;
+  });
+
+  return { options, recommended: matchedRecommended };
+}
+
 export const ClarifyingQuestionSchema = z.object({
   question: z.string(),
   // .max() would REJECT the whole plan over a model giving 4 options
-  // instead of 3 — disproportionate for a cosmetic overflow. Truncating
-  // instead matches every other cap in this schema (MAX_PLAN_PHASES,
-  // clarifyingQuestions itself below): keep what fits, never nuke the plan.
-  options: z.array(z.string()).default([]).transform((arr) => arr.slice(0, 3)),
+  // instead of 3 — disproportionate for a cosmetic overflow. Deduplicating
+  // before truncating ensures a duplicate "(Recommended)" option never crowds
+  // out a real choice or appears twice.
+  options: z
+    .array(z.string())
+    .default([])
+    .transform((arr) => deduplicateClarifierOptions(arr).options.slice(0, 3)),
 });
 
 export type ClarifyingQuestion = z.infer<typeof ClarifyingQuestionSchema>;

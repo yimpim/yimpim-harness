@@ -7,6 +7,7 @@
  * as assumptions. Nothing here asks for more than changes the plan.
  */
 import { isNewProject, NEW_PROJECT_MAX_SOURCE_FILES } from "./questionScope.js";
+import { deduplicateClarifierOptions } from "./planner.js";
 import type { Msg, ModelCall } from "./roadmapPlan.js";
 import type { UnitDraft } from "./roadmap.js";
 import fs from "fs";
@@ -152,11 +153,12 @@ export function parseBatch(raw: string, maxQuestions = MAX_QUESTIONS, maxPerSect
     for (const q of Array.isArray(s?.questions) ? s.questions : []) {
       if (questions.length >= maxPerSection || used + questions.length >= maxQuestions) break; // a model that asks too much is cut off, earliest sections first
       const question = clip(q?.question, 300);
-      const options = (Array.isArray(q?.options) ? q.options : []).map((o: unknown) => clip(o, 80)).filter((o: string) => o && o.toLowerCase() !== DECIDE_FOR_ME.toLowerCase());
-      const unique = [...new Set<string>(options)].slice(0, 5);
-      if (!question || unique.length < 2) continue;
+      const rawOptions = (Array.isArray(q?.options) ? q.options : []).map((o: unknown) => clip(o, 80)).filter((o: string) => o && o.toLowerCase() !== DECIDE_FOR_ME.toLowerCase());
       const rec = clip(q?.recommended, 80);
-      questions.push({ question, why: clip(q?.why, 200), options: unique, recommended: unique.find((o) => o.toLowerCase() === rec.toLowerCase()) ?? unique[0] });
+      const deduped = deduplicateClarifierOptions(rawOptions, rec || undefined, { annotateRecommended: false });
+      const unique = deduped.options.slice(0, 5);
+      if (!question || unique.length < 2) continue;
+      questions.push({ question, why: clip(q?.why, 200), options: unique, recommended: deduped.recommended ?? unique[0] });
     }
     const assumed = clip(s?.assumed, 300);
     if (questions.length === 0 && !assumed) continue;

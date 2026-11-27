@@ -550,6 +550,20 @@ export class RemoteSession {
 
     const at = new Date().toISOString();
 
+    // Guarantee every SECURITY worker.end carries command, safeCount, totalJudges, and a concise summary
+    // rather than bare "completed"/"escalated" status text.
+    if (kind === "worker.end" && payload.agent === "SECURITY") {
+      const cmd = String(payload.command ?? payload.action ?? "security check").trim() || "security check";
+      const totalJudges = typeof payload.totalJudges === "number" ? payload.totalJudges : 1;
+      const allowed = typeof payload.allowed === "boolean" ? payload.allowed : payload.outcome === "completed";
+      const safeCount = typeof payload.safeCount === "number" ? payload.safeCount : allowed ? totalJudges : 0;
+      const summary =
+        typeof payload.summary === "string" && payload.summary.trim()
+          ? payload.summary.trim()
+          : `${safeCount}/${totalJudges} ${allowed ? "safe" : "escalated"} · ${cmd}`;
+      payload = { ...payload, command: cmd, action: cmd, safeCount, totalJudges, summary };
+    }
+
     // This is the single choke point every outbound event goes through —
     // translated agent events (worker.start, file.changed, ...), status
     // pushes, model-config pushes, all of it. Durable persistence lives HERE,

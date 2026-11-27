@@ -167,6 +167,7 @@ export function translateForRemote(
           // How long the worker ran (additive: an older phone build ignores it).
           elapsedMs: event.elapsedMs,
           ...(event.summary !== undefined ? { summary: event.summary } : {}),
+          ...(event.command !== undefined ? { command: event.command } : event.action !== undefined ? { command: event.action } : {}),
           ...(event.action !== undefined ? { action: event.action } : {}),
           ...(event.allowed !== undefined ? { allowed: event.allowed } : {}),
           ...(event.safeCount !== undefined ? { safeCount: event.safeCount } : {}),
@@ -289,6 +290,7 @@ export function translateForRemote(
           workerId,
           ...(currentPhase?.id ? { parentPhaseId: currentPhase.id, phaseId: currentPhase.id } : {}),
           kind: event.kind,
+          command: event.command ?? event.action,
           action: event.action,
           allowed: event.allowed,
           safeCount: event.safeCount,

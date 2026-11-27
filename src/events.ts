@@ -59,6 +59,7 @@ export type YimpimEvent =
       background?: boolean;
       /** Optional concise summary/verdict metadata (e.g. aggregated SECURITY panel verdict: "3/3 safe · npm run build"). */
       summary?: string;
+      command?: string;
       action?: string;
       allowed?: boolean;
       safeCount?: number;
@@ -78,6 +79,7 @@ export type YimpimEvent =
       background?: boolean;
       /** Optional concise summary/verdict metadata (e.g. aggregated SECURITY panel verdict: "3/3 safe · npm run build"). */
       summary?: string;
+      command?: string;
       action?: string;
       allowed?: boolean;
       safeCount?: number;
@@ -144,6 +146,7 @@ export type YimpimEvent =
   | {
       type: "security.review";
       kind: string;
+      command?: string;
       action: string;
       allowed: boolean;
       safeCount: number;

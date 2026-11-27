@@ -12,16 +12,68 @@
  * On top of that, whatever a tool returns is scrubbed for obvious secrets
  * before the model sees it, because output can contain what files cannot.
  */
+import fs from "node:fs";
+import path from "node:path";
+import { createRequire } from "node:module";
 import type { QaBackend, ToolSpec } from "./qaBrowserAgent.js";
 import type { SerialHooks } from "./qaFirmware.js";
 
 export interface ProjectToolHooks {
+  repoRoot?: string;
   readFile(path: string, startLine?: number, endLine?: number): Promise<string>;
   searchCode(pattern: string, subPath?: string): Promise<string>;
   listFiles(dir?: string): Promise<string>;
   runCommand(args: { command: string; cwd?: string; purpose?: string }): Promise<string>;
   /** Only on a firmware project with a serial-capable tool installed. Read-only. */
   serial?: SerialHooks;
+}
+
+const BROWSER_PACKAGES = ["playwright", "playwright-core", "puppeteer", "puppeteer-core", "cypress"] as const;
+
+/**
+ * Native, zero-shell browser-automation package check for QA. Replaces inline
+ * `node -e "const a=['playwright','puppeteer',...]" ...` probes that previously
+ * tripped the security panel and stalled waiting for human approval.
+ */
+export function detectInstalledBrowsers(repoRoot: string): {
+  installed: string[];
+  missing: string[];
+  summary: string;
+} {
+  const installed: string[] = [];
+  const missing: string[] = [];
+  const req = createRequire(path.join(path.resolve(repoRoot), "package.json"));
+  for (const pkg of BROWSER_PACKAGES) {
+    let found = false;
+    try {
+      req.resolve(pkg);
+      found = true;
+    } catch {
+      const direct = path.join(repoRoot, "node_modules", pkg, "package.json");
+      if (fs.existsSync(direct)) found = true;
+    }
+    if (found) installed.push(pkg);
+    else missing.push(pkg);
+  }
+  const summary =
+    installed.length > 0
+      ? `Installed browser automation package(s): ${installed.join(", ")}. Not installed: ${missing.join(", ") || "none"}.`
+      : `No browser automation packages installed in this project (checked: ${BROWSER_PACKAGES.join(", ")}).`;
+  return { installed, missing, summary };
+}
+
+/**
+ * Detects read-only inline `node -e` / `node --eval` browser-availability probes
+ * (e.g. checking whether playwright/puppeteer can be required) so projectBackend
+ * can answer them natively without invoking the shell or security panel.
+ */
+export function isInlineBrowserProbeCommand(command: string): boolean {
+  const trimmed = command.trim();
+  if (!/^node(?:\.exe)?\s+(?:-e|--eval)\s+/i.test(trimmed)) return false;
+  if (!/\b(playwright|puppeteer|cypress)\b/i.test(trimmed)) return false;
+  // Reject anything that writes, spawns, networks, or chains shell commands.
+  if (/\b(exec|spawn|fork|writeFile|unlink|rmSync|fetch|http|https|net|child_process)\b/i.test(trimmed)) return false;
+  return /\b(require|resolve|import|playwright|puppeteer)\b/i.test(trimmed);
 }
 
 /** Masks values that look like credentials. Best effort, not a guarantee. */
@@ -50,6 +102,14 @@ const PROJECT_TOOLS: ToolSpec[] = [
   },
 ];
 
+const BROWSER_TOOLS: ToolSpec[] = [
+  {
+    name: "check_browser_tools",
+    args: "{}",
+    does: "Check natively (without running a shell command) which headless browser packages (playwright, puppeteer, cypress) are installed in this project.",
+  },
+];
+
 const SERIAL_TOOLS: ToolSpec[] = [
   { name: "list_serial_ports", args: "{}", does: "List the serial ports and boards currently attached to this computer. An empty list means no board is plugged in." },
   {
@@ -61,9 +121,14 @@ const SERIAL_TOOLS: ToolSpec[] = [
 
 export function projectBackend(hooks: ProjectToolHooks): QaBackend {
   const out = (note: string, text: string) => ({ evidence: note, text: redactSecrets(String(text)).slice(0, MAX_OUT) });
+  const tools = [
+    ...PROJECT_TOOLS,
+    ...(hooks.repoRoot ? BROWSER_TOOLS : []),
+    ...(hooks.serial ? SERIAL_TOOLS : []),
+  ];
   return {
     kind: "project",
-    tools: hooks.serial ? [...PROJECT_TOOLS, ...SERIAL_TOOLS] : PROJECT_TOOLS,
+    tools,
     state: () => ({ viewport: "", conditions: [] }),
     async run(tool, args) {
       if (tool === "read_file") {
@@ -81,9 +146,17 @@ export function projectBackend(hooks: ProjectToolHooks): QaBackend {
       if (tool === "list_files") {
         return out(`files ${args.path ? String(args.path).slice(0, 300) : "."}`, await hooks.listFiles(args.path ? String(args.path).slice(0, 300) : undefined));
       }
+      if (tool === "check_browser_tools") {
+        const result = detectInstalledBrowsers(hooks.repoRoot ?? process.cwd());
+        return out("browser tools check", result.summary);
+      }
       if (tool === "run_command") {
         const command = String(args.command ?? "").slice(0, 600);
         if (!command.trim()) throw new Error("command is required");
+        if (isInlineBrowserProbeCommand(command)) {
+          const result = detectInstalledBrowsers(hooks.repoRoot ?? process.cwd());
+          return out("browser tools check (native)", result.summary);
+        }
         return out(
           `command ${command.slice(0, 120)}`,
           await hooks.runCommand({

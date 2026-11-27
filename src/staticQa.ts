@@ -166,13 +166,65 @@ async function git(repoRoot: string, args: string[]): Promise<string> {
  * same bug agentTouchedPaths (index.ts) was already written to avoid for
  * commit/revert but which never reached the verifier's own diff collection.
  */
-export async function collectChangeSet(repoRoot: string, excludePaths?: Set<string>): Promise<ChangeSet> {
+export async function collectChangeSet(
+  repoRoot: string,
+  excludePaths?: Set<string>,
+  taskBaseSha?: string
+): Promise<ChangeSet> {
   const modified: string[] = [];
   const added: string[] = [];
   const deleted: string[] = [];
   const renamed: { from: string; to: string }[] = [];
   const lockFiles: string[] = [];
   const excluded = excludePaths ?? new Set<string>();
+
+  // When a task spans multiple commits (e.g. an earlier phase committed code and a later
+  // commit only appended QA_REVIEW.md), include committed changes across taskBaseSha..HEAD
+  // so QA evaluates the full task range rather than only the last commit's working-tree diff.
+  let diffRef = "HEAD";
+  if (taskBaseSha) {
+    try {
+      const headSha = (await git(repoRoot, ["rev-parse", "HEAD"])).trim();
+      if (headSha && headSha !== taskBaseSha.trim()) {
+        diffRef = taskBaseSha.trim();
+        const committed = await git(repoRoot, ["diff", "--name-status", "-M", `${diffRef}..HEAD`]);
+        for (const line of committed.split(/\r?\n/)) {
+          if (!line.trim()) continue;
+          const cols = line.split("\t");
+          const code = cols[0] ?? "";
+          if ((code.startsWith("R") || code.startsWith("C")) && cols.length >= 3) {
+            const from = cols[1].trim();
+            const to = cols[2].trim();
+            if (excluded.has(from) || excluded.has(to)) continue;
+            if (isLockFile(to)) {
+              if (!lockFiles.includes(to)) lockFiles.push(to);
+              continue;
+            }
+            if (!isReviewable(to)) continue;
+            if (!renamed.some((r) => r.from === from && r.to === to)) renamed.push({ from, to });
+            continue;
+          }
+          const file = (cols[1] ?? "").trim();
+          if (!file || excluded.has(file)) continue;
+          if (isLockFile(file)) {
+            if (!lockFiles.includes(file)) lockFiles.push(file);
+            continue;
+          }
+          if (!isReviewable(file)) continue;
+          if (code.startsWith("A")) {
+            if (!added.includes(file)) added.push(file);
+          } else if (code.startsWith("D")) {
+            if (!deleted.includes(file)) deleted.push(file);
+          } else {
+            if (!modified.includes(file)) modified.push(file);
+          }
+        }
+      }
+    } catch {
+      // Invalid/unreachable taskBaseSha: fall back to HEAD cleanly.
+      diffRef = "HEAD";
+    }
+  }
 
   let porcelain = "";
   try {
@@ -244,7 +296,7 @@ export async function collectChangeSet(repoRoot: string, excludePaths?: Set<stri
       // unchanged code; the deterministic +/- scans above don't touch context
       // lines at all, so this cannot affect their signal.
       diff = await git(repoRoot, [
-        "diff", "HEAD", "-M", "-U1", "--",
+        "diff", diffRef, "-M", "-U1", "--",
         ...modified, ...deleted, ...renamed.map((r) => r.from), ...renamed.map((r) => r.to),
       ]);
     } catch {

@@ -100,8 +100,8 @@ describe("uiUnreachable / build-only QA preservation across repairs", () => {
 
 describe("Remote SECURITY event summary enrichment", () => {
   test("formatSecuritySummary formats concise verdict + command summary", () => {
-    assert.equal(formatSecuritySummary(2, 3, "npm run build"), "2/3 safe · npm run build");
-    assert.equal(formatSecuritySummary(3, 3, "npm test"), "3/3 safe · npm test");
+    assert.equal(formatSecuritySummary(2, 3, "npm run build", false), "2/3 escalated · npm run build");
+    assert.equal(formatSecuritySummary(3, 3, "npm test", true), "3/3 safe · npm test");
   });
 
   test("makePanel emits one aggregated SECURITY worker + security.review event with true totalJudges count", async () => {
@@ -137,12 +137,14 @@ describe("Remote SECURITY event summary enrichment", () => {
 
       assert.equal(ends[0].payload.safeCount, 2);
       assert.equal(ends[0].payload.totalJudges, 3);
-      assert.equal(ends[0].payload.summary, "2/3 safe · npm run build");
+      assert.equal(ends[0].payload.summary, "2/3 escalated · npm run build");
+      assert.equal(ends[0].payload.command, "npm run build");
       assert.equal(ends[0].payload.action, "npm run build");
 
       assert.equal(reviews[0].payload.safeCount, 2);
       assert.equal(reviews[0].payload.totalJudges, 3);
-      assert.equal(reviews[0].payload.summary, "2/3 safe · npm run build");
+      assert.equal(reviews[0].payload.summary, "2/3 escalated · npm run build");
+      assert.equal(reviews[0].payload.command, "npm run build");
       assert.equal(reviews[0].payload.action, "npm run build");
       assert.equal(reviews[0].payload.parentPhaseId, "p1");
     } finally {

@@ -237,7 +237,8 @@ export function makeCommandReviewer(call: ReviewCall): (req: ReviewRequest) => P
     ]
       .filter((l) => l !== "")
       .join("\n");
-    let outcome: ReviewOutcome;
+    events.emit({ type: "agent.start", agent: "SECURITY", models: [], reason: req.label });
+    let outcome: ReviewOutcome = { allow: false, why: "the security review did not complete" };
     try {
       const parsed = parseVerdict(await call([{ role: "system", content: SYSTEM }, { role: "user", content: body }]));
       if (!parsed) outcome = { allow: false, why: "the security review gave no usable answer" };
@@ -245,21 +246,36 @@ export function makeCommandReviewer(call: ReviewCall): (req: ReviewRequest) => P
       else outcome = { allow: false, why: `security review: ${parsed.verdict || "no verdict"}${parsed.reason ? ` — ${parsed.reason}` : ""}` };
     } catch (err: any) {
       outcome = { allow: false, why: `the security review could not run (${String(err?.message ?? err).slice(0, 80)})` };
+    } finally {
+      const safeCount = outcome.allow ? 1 : 0;
+      const compactAction = String(req.label ?? "").replace(/\s+/g, " ").trim().slice(0, 120) || "command";
+      const summary = `${safeCount}/1 ${outcome.allow ? "safe" : "escalated"} · ${compactAction}`;
+      events.emit({
+        type: "security.review",
+        kind: "command",
+        command: req.label,
+        action: req.label,
+        allowed: outcome.allow,
+        safeCount,
+        totalJudges: 1,
+        totalCount: 1,
+        summary,
+      });
+      events.emit({
+        type: "agent.end",
+        agent: "SECURITY",
+        rounds: 1,
+        outcome: outcome.allow ? "completed" : "escalated",
+        command: req.label,
+        action: req.label,
+        allowed: outcome.allow,
+        safeCount,
+        totalJudges: 1,
+        summary,
+      });
     }
     // A failed review is not remembered, so the next ask tries it again.
     if (outcome.allow || !/could not run|no usable answer/.test(outcome.why)) memo.set(key, outcome);
-    const safeCount = outcome.allow ? 1 : 0;
-    const compactAction = String(req.label ?? "").replace(/\s+/g, " ").trim().slice(0, 120) || "command";
-    events.emit({
-      type: "security.review",
-      kind: "command",
-      action: req.label,
-      allowed: outcome.allow,
-      safeCount,
-      totalJudges: 1,
-      totalCount: 1,
-      summary: `${safeCount}/1 safe · ${compactAction}`,
-    });
     return outcome;
   };
 }

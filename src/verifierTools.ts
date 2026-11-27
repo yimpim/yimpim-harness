@@ -396,8 +396,33 @@ const DOC_ONLY_EXTENSIONS = new Set([".md", ".mdx", ".txt", ".rst", ".adoc"]);
  * this is a plain extension check against the actual git change set, which
  * is the only way to be certain rather than trusting an LLM's say-so.
  */
-function documentationOnlyPaths(change: ChangeSet): string[] | undefined {
-  const paths = [...change.modified, ...change.added, ...change.deleted, ...change.renamed.map((r) => r.to)];
+/**
+ * Harness-generated bookkeeping/metadata files that must never cause a code/UI
+ * phase to be misclassified as "doc-only" (skipping build and Playwright QA).
+ */
+export function isHarnessMetadataPath(filePath: string): boolean {
+  const norm = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+  return (
+    norm === "QA_REVIEW.md" ||
+    norm.endsWith("/QA_REVIEW.md") ||
+    norm === "PROGRESS.md" ||
+    norm.endsWith("/PROGRESS.md") ||
+    norm === ".yimpim" ||
+    norm.startsWith(".yimpim/") ||
+    norm.includes("/.yimpim/") ||
+    norm === ".agent" ||
+    norm.startsWith(".agent/") ||
+    isEvidenceNoise(norm)
+  );
+}
+
+export function documentationOnlyPaths(change: ChangeSet): string[] | undefined {
+  const paths = [
+    ...change.modified,
+    ...change.added,
+    ...change.deleted,
+    ...change.renamed.map((r) => r.to),
+  ].filter((p) => !isHarnessMetadataPath(p));
   if (paths.length === 0) return undefined;
   if (!paths.every((p) => DOC_ONLY_EXTENSIONS.has(path.extname(p).toLowerCase()))) return undefined;
   return paths.sort();
@@ -951,7 +976,7 @@ export class AutonomousVerifier {
      * reachable in the running UI until a later phase — preserved across REPAIR
      * cycles so QA skips browser/UI screenshot probes on an unmounted component.
      */
-    opts?: { uiUnreachable?: boolean }
+    opts?: { uiUnreachable?: boolean; taskBaseSha?: string }
   ): Promise<VerificationResult> {
     this.unreachableStates = [];
     // QA never runs through agentLoop.ts's runToolAgent (it's a separate,
@@ -992,7 +1017,7 @@ export class AutonomousVerifier {
     // (see below): a docs-only or build-skipped change still gets it.
 
     // Tier 0 — change set. Did the editor touch anything at all.
-    const change = await this.changeSetGate(ledger, editorNoOpClaim, stagedDeletions, preExistingDirty, verifyOnly);
+    const change = await this.changeSetGate(ledger, editorNoOpClaim, stagedDeletions, preExistingDirty, verifyOnly, opts?.taskBaseSha);
     const hasRealChange = Boolean(change && !change.isEmpty);
 
     // A verify-only phase legitimately has NO change set on a clean pass —
@@ -2415,11 +2440,12 @@ Respond ONLY with JSON: {"status": "PASS"|"DEFECT"|"INCONCLUSIVE"${isBrowserSurf
     // design. Takes the same inconclusive (non-blocking) branch below as a
     // real editorNoOpClaim would, so this never depends on a caller
     // remembering to seed a synthetic claim string to get the same effect.
-    verifyOnly = false
+    verifyOnly = false,
+    taskBaseSha?: string
   ): Promise<ChangeSet | undefined> {
     let change: ChangeSet;
     try {
-      change = await collectChangeSet(this.repoRoot, preExistingDirty);
+      change = await collectChangeSet(this.repoRoot, preExistingDirty, taskBaseSha);
       // git has no idea a file was staged for deletion (that's an
       // AgentTools-only record, never written to the working tree) — without
       // this, staticQaReview has no way to tell "intentionally retired" apart
