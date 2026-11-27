@@ -1078,6 +1078,18 @@ export class AutonomousVerifier {
 
   // ------------------------------------------------------------ Tier 1: build
 
+  private writeEpochProvider?: () => number;
+  private lastCleanBuildCheck?: { epoch: number; labels: Set<string> };
+  private cleanSweepProvider?: () => { files: string[]; output: string; epoch?: number } | undefined;
+
+  public setWriteEpochProvider(fn: (() => number) | undefined): void {
+    this.writeEpochProvider = fn;
+  }
+
+  public setCleanSweepProvider(fn: (() => { files: string[]; output: string; epoch?: number } | undefined) | undefined): void {
+    this.cleanSweepProvider = fn;
+  }
+
   private async buildGate(
     profile: ProjectProfile,
     caps: Capabilities,
@@ -1092,6 +1104,29 @@ export class AutonomousVerifier {
         "no build or typecheck command is available for this project and environment",
         "static source review"
       );
+      return;
+    }
+
+    // Deduplicate: if run_build_check just passed on these exact commands with zero edits since,
+    // reuse that verified result instead of running the identical build/typecheck twice back-to-back.
+    const currentEpoch = this.writeEpochProvider?.();
+    if (
+      currentEpoch !== undefined &&
+      this.lastCleanBuildCheck &&
+      this.lastCleanBuildCheck.epoch === currentEpoch &&
+      commands.every((c) => this.lastCleanBuildCheck!.labels.has(c.label))
+    ) {
+      for (const { label } of commands) {
+        console.log(`[QA] ✓ Reusing clean build check (no edits since): ${label}`);
+        ledger.add({
+          tier: "build",
+          gate: label,
+          method: "executed",
+          status: "pass",
+          blocking: true,
+          detail: "reused from run_build_check (exit code 0, no edits since)",
+        });
+      }
       return;
     }
 
@@ -1222,6 +1257,9 @@ export class AutonomousVerifier {
     }
 
     const results: string[] = [];
+    const passedLabels: string[] = [];
+    let allPassed = true;
+    const epochBefore = this.writeEpochProvider?.();
     for (const { label, bin, args, env, timeout, prepare } of commands) {
       if (prepare) {
         try {
@@ -1243,7 +1281,9 @@ export class AutonomousVerifier {
         });
         console.log(`[${agentLabel}] ✓ ${label} passed`);
         results.push(`[PASS] ${label}`);
+        passedLabels.push(label);
       } catch (err: any) {
+        allPassed = false;
         // Every outcome below logs something — the bug this fixes was a
         // SILENT continue on unavailable/timeout: the console showed
         // "Running build check: X" and then nothing, straight into the
@@ -1266,6 +1306,12 @@ export class AutonomousVerifier {
         // same early-return buildGate itself uses.
         break;
       }
+    }
+    const epochAfter = this.writeEpochProvider?.();
+    if (allPassed && passedLabels.length === commands.length && epochBefore !== undefined && epochBefore === epochAfter) {
+      this.lastCleanBuildCheck = { epoch: epochAfter, labels: new Set(passedLabels) };
+    } else {
+      this.lastCleanBuildCheck = undefined;
     }
     return results.join("\n\n");
   }
@@ -1492,6 +1538,15 @@ export class AutonomousVerifier {
         env: CI_ENV,
       });
     }
+
+    // Order fast typecheck/lint checks ahead of slow bundle exports (e.g. expo export)
+    // so a 2s TypeScript error fails immediately instead of waiting for a full web bundle.
+    const isFastTypecheck = (label: string) => /\b(typecheck|tsc|check)\b/i.test(label);
+    const isSlowBundle = (label: string) => /\bexpo export\b/i.test(label);
+    cmds.sort((a, b) => {
+      const rank = (c: { label: string }) => (isFastTypecheck(c.label) ? 0 : isSlowBundle(c.label) ? 2 : 1);
+      return rank(a) - rank(b);
+    });
 
     return cmds;
   }
@@ -2682,6 +2737,29 @@ Respond ONLY with JSON: {"keep": true|false, "reason": "<one sentence>"}`,
       }
       return;
     }
+    // Deduplicate: if EditorSweep just passed on these exact selected test files with zero edits since,
+    // reuse that verified pass instead of spawning the same Jest/Vitest suite a second time.
+    const cleanSweep = this.cleanSweepProvider?.();
+    const currentEpoch = this.writeEpochProvider?.();
+    if (
+      !nothingChanged &&
+      cleanSweep &&
+      currentEpoch !== undefined &&
+      cleanSweep.epoch === currentEpoch &&
+      sel.selected.every((f) => cleanSweep.files.includes(f.replace(/\\/g, "/").replace(/^\.\//, "")))
+    ) {
+      console.log(`[QA] ✓ Reusing clean EditorSweep test result (no edits since, ${sel.selected.length} file(s))`);
+      ledger.add({
+        tier: "build",
+        gate,
+        method: "executed",
+        status: "pass",
+        blocking: true,
+        detail: `${passedList(cleanSweep.output, sel.selected)} (${scope}; reused from EditorSweep with no edits since)`,
+      });
+      return;
+    }
+
     const run = await runSuiteLogged(this.repoRoot, sel.selected);
     if (run.ok) {
       ledger.add({ tier: "build", gate, method: "executed", status: "pass", blocking: true, detail: `${passedList(run.output, sel.selected)} (${scope})` });

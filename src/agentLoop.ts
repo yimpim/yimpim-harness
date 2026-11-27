@@ -496,6 +496,9 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
   let advisorBudgetMessageSent = false;
   let plannerBudgetMessageSent = false;
   let discoveryBudgetMessageSent = false;
+  // Disables tool calls via toolChoice="none" (keeping `availableTools` byte-identical
+  // so provider prompt caching on the tool-schema prefix is never invalidated).
+  let forceTextOnly = false;
   // Reads already sent to the model in this conversation, so the same file is not
   // sent in full again and again. Keyed by how many files have been written, so a
   // re-read after an edit (to check it) is allowed.
@@ -548,7 +551,7 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
 
     const response = await client.complete(models, messages, {
       tools: availableTools,
-      toolChoice: "auto",
+      toolChoice: forceTextOnly ? "none" : "auto",
       agent: agentName,
     });
 
@@ -581,7 +584,7 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
             `a real tool call — asking it to retry properly (${leakedToolCallNudges}/${MAX_LEAKED_TOOL_CALL_NUDGES}).`
         );
         messages.push({
-          role: "system",
+          role: "user",
           content:
             "[INTERVENTION] Your last response was not a valid tool call — it read as a tool-call attempt " +
             "written out as plain text instead of an actual function call. Use the real function-calling " +
@@ -598,7 +601,7 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
             `prompting it to act (${emptyTurnNudges}/${MAX_EMPTY_TURN_NUDGES}).`
         );
         messages.push({
-          role: "system",
+          role: "user",
           content:
             "[INTERVENTION] You produced no tool call and have not changed any file. Describing a change " +
             "is not making one. Call patch_file (or write_file for a genuinely new file) NOW to apply the " +
@@ -611,6 +614,62 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
 
       emitAgentEnd(rounds, "completed");
       return message?.content || "";
+    }
+
+    // Parallelize pure read-only tool batches within a single turn when >1 tool call is emitted,
+    // while keeping message ordering, logging, and budget enforcement strictly sequential below.
+    const PARALLEL_READ_ONLY = new Set(["read_file", "search_code", "list_files", "get_file_outline"]);
+    const prefetchedReadOnly = new Map<string, Promise<{ ok: true; value: string } | { ok: false; err: any }>>();
+    if (
+      toolCalls.length > 1 &&
+      !forceTextOnly &&
+      !isPlanner &&
+      agentName !== "ADVISOR" &&
+      agentName !== "HEAL_SANDBOX" &&
+      toolCalls.every((c: any) => PARALLEL_READ_ONLY.has(c?.function?.name))
+    ) {
+      const epoch = agentTools.writesSoFar();
+      const keyOf = (p: string, a?: number, b?: number) => `${epoch}|${String(p).replace(/\\/g, "/")}|${a ?? ""}-${b ?? ""}`;
+      for (const call of toolCalls) {
+        const name = call.function.name;
+        let parsedArgs: any = {};
+        try {
+          parsedArgs = JSON.parse(call.function.arguments || "{}");
+        } catch {}
+        let work: Promise<string> | undefined;
+        if (name === "search_code") {
+          const cs = typeof parsedArgs.caseSensitive === "boolean" ? parsedArgs.caseSensitive : false;
+          const pats = Array.isArray(parsedArgs.patterns) && parsedArgs.patterns.length > 0 ? parsedArgs.patterns : undefined;
+          work = pats ? agentTools.searchCodeMulti(pats, parsedArgs.path, cs) : agentTools.searchCode(parsedArgs.pattern, parsedArgs.path, cs);
+        } else if (name === "list_files") {
+          work = agentTools.listFiles(parsedArgs.path, Boolean(parsedArgs.recursive));
+        } else if (name === "get_file_outline") {
+          const paths = Array.isArray(parsedArgs.paths) && parsedArgs.paths.length > 0 ? parsedArgs.paths : undefined;
+          work = paths ? agentTools.getFileOutlines(paths) : agentTools.getFileOutline(parsedArgs.path);
+        } else if (name === "read_file") {
+          let paths: string[] | undefined = Array.isArray(parsedArgs.paths) && parsedArgs.paths.length > 0 ? parsedArgs.paths : undefined;
+          if (paths && paths.length === 1 && (typeof parsedArgs.startLine === "number" || typeof parsedArgs.endLine === "number")) {
+            parsedArgs.path = paths[0];
+            paths = undefined;
+          }
+          if (!paths) {
+            const sl = typeof parsedArgs.startLine === "number" ? parsedArgs.startLine : undefined;
+            const el = typeof parsedArgs.endLine === "number" ? parsedArgs.endLine : undefined;
+            if (!readMemo.has(keyOf(parsedArgs.path, sl, el))) {
+              work = agentTools.readFile(parsedArgs.path, sl, el);
+            }
+          }
+        }
+        if (work) {
+          prefetchedReadOnly.set(
+            call.id,
+            work.then(
+              (value) => ({ ok: true as const, value }),
+              (err) => ({ ok: false as const, err })
+            )
+          );
+        }
+      }
     }
 
     for (const call of toolCalls) {
@@ -790,7 +849,18 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
       // the generic branches below so a Planner read_file can never fall
       // through to the unbounded readFiles variant.
       try {
-        if (isPlanner && name === "read_file") {
+        const takePrefetched = async (fallback: () => Promise<string>): Promise<string> => {
+          const hit = prefetchedReadOnly.get(call.id);
+          if (!hit) return fallback();
+          prefetchedReadOnly.delete(call.id);
+          const settled = await hit;
+          if (!settled.ok) throw settled.err;
+          return settled.value;
+        };
+
+        if (forceTextOnly && name !== "conclude_task") {
+          toolOutput = "Tool budget is spent and no further tool calls are allowed. Respond now in plain text from the evidence already gathered.";
+        } else if (isPlanner && name === "read_file") {
           const relPath = typeof args.path === "string" ? args.path : "";
           const startLine = typeof args.startLine === "number" ? args.startLine : undefined;
           const endLine = typeof args.endLine === "number" ? args.endLine : undefined;
@@ -854,7 +924,7 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
               toolOutput = again([String(args.path)]);
               console.log(`[${displayName}] ↩️ Already read, not sent again: ${args.path}`);
             } else {
-              toolOutput = await agentTools.readFile(args.path, startLine, endLine);
+              toolOutput = await takePrefetched(() => agentTools.readFile(args.path, startLine, endLine));
               readMemo.add(key);
               const lines = toolOutput.split("\n").length;
               const rangeNote = startLine !== undefined || endLine !== undefined ? ` (lines ${startLine ?? 1}-${endLine ?? "end"})` : "";
@@ -870,7 +940,7 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
           // override this in normalizeSearchPattern.
           const caseSensitive = args.caseSensitive === true;
           if (Array.isArray(args.patterns) && args.patterns.length > 0) {
-            toolOutput = await agentTools.searchCodeMulti(args.patterns, args.path, caseSensitive);
+            toolOutput = await takePrefetched(() => agentTools.searchCodeMulti(args.patterns, args.path, caseSensitive));
             const summary = summarizeReadOnlyResult(toolOutput, "match", "matches", ["No matches found."]);
             // Kept as the exact same "Searched code with pattern" prefix the
             // single-pattern branch below uses — the phone UI groups consecutive
@@ -879,23 +949,23 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
             // fold into the same group.
             console.log(`[${displayName}] Searched code with pattern: ${args.patterns.map((p: string) => `"${p}"`).join(", ")} → ${summary}`);
           } else {
-            toolOutput = await agentTools.searchCode(args.pattern, args.path, caseSensitive);
+            toolOutput = await takePrefetched(() => agentTools.searchCode(args.pattern, args.path, caseSensitive));
             const summary = summarizeReadOnlyResult(toolOutput, "match", "matches", ["No matches found."]);
             console.log(`[${displayName}] Searched code with pattern: "${args.pattern}" → ${summary}`);
           }
         } else if (name === "list_files") {
           readOrSearchStreak++;
-          toolOutput = await agentTools.listFiles(args.path, args.recursive);
+          toolOutput = await takePrefetched(() => agentTools.listFiles(args.path, args.recursive));
           const dirSummary = summarizeReadOnlyResult(toolOutput, "entry", "entries", ["No files found."]);
           console.log(`[${displayName}] Scanned directory: ${args.path || "."}${args.recursive ? " (recursive)" : ""} → ${dirSummary}`);
         } else if (name === "get_file_outline") {
           readOrSearchStreak++;
           if (Array.isArray(args.paths) && args.paths.length > 0) {
-            toolOutput = await agentTools.getFileOutlines(args.paths);
+            toolOutput = await takePrefetched(() => agentTools.getFileOutlines(args.paths));
             const summary = summarizeReadOnlyResult(toolOutput, "declaration", "declarations", ["No structural declarations identified."]);
             console.log(`[${displayName}] Outlined ${args.paths.length} file(s): ${args.paths.join(", ")} → ${summary}`);
           } else {
-            toolOutput = await agentTools.getFileOutline(args.path);
+            toolOutput = await takePrefetched(() => agentTools.getFileOutline(args.path));
             const summary = summarizeReadOnlyResult(toolOutput, "declaration", "declarations", ["No structural declarations identified."]);
             console.log(`[${displayName}] Outlined declarations in: ${args.path} → ${summary}`);
           }
@@ -993,9 +1063,9 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
         !advisorBudgetMessageSent
       ) {
         advisorBudgetMessageSent = true;
-        availableTools = [];
+        forceTextOnly = true;
         messages.push({
-          role: "system",
+          role: "user",
           content:
             "[ADVISOR INTERVENTION] You have gathered enough repository evidence. Further lookup is disabled. " +
             "Answer the user's original question directly in the next response, distinguishing confirmed facts " +
@@ -1004,8 +1074,8 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
       }
 
       // Discovery budget: enough reading, or enough rounds, and it must write
-      // up what it has. Tools are removed so another search cannot even be
-      // asked for, and the message restates the shape of the answer.
+      // up what it has. Tools are disabled via toolChoice="none" (preserving the
+      // tool-schema prefix cache), and the message restates the shape of the answer.
       if (agentName === "DISCOVERY" && !discoveryBudgetMessageSent) {
         const read = agentTools
           .inspectedThisPhase()
@@ -1020,12 +1090,12 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
           }).length;
         if (read >= DISCOVERY_FILE_BUDGET || rounds >= DISCOVERY_ROUND_BUDGET) {
           discoveryBudgetMessageSent = true;
-          availableTools = [];
+          forceTextOnly = true;
           console.log(
             `[${displayName}] 🔒 Budget reached (${read} file(s) read, ${rounds} turn(s)) — writing up what was found.`
           );
           messages.push({
-            role: "system",
+            role: "user",
             content:
               "[DISCOVERY INTERVENTION] Your reading budget is spent. No more tools. Write your final answer NOW from " +
               "what you have already read: the taskFindings JSON block (every existingFiles entry a file you actually " +
@@ -1035,20 +1105,18 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
         }
       }
 
-      // Planner budget surface: once the 3-file cap is spent, tell the Planner
-      // in-band (and drop its tools entirely, so a further attempt cannot even
-      // be expressed) that it must now emit the plan. AgentTools already
-      // refuses a fourth path; this is what stops the Planner from wasting
-      // rounds discovering that one refusal at a time.
+      // Planner budget surface: once the file cap is spent, tell the Planner
+      // in-band (and disable tools via toolChoice="none" to preserve prompt cache)
+      // that it must now emit the plan.
       if (isPlanner && !plannerBudgetMessageSent && agentTools.plannerInspectionBudgetLeft() === 0) {
         plannerBudgetMessageSent = true;
-        availableTools = [];
+        forceTextOnly = true;
         console.log(
           `[${displayName}] 🔒 Inspection budget exhausted (${agentTools.plannerInspectedThisPass().length} file(s)) — ` +
             `planning from what has been seen.`
         );
         messages.push({
-          role: "system",
+          role: "user",
           content: isRepairPlanner
             ? "[PLANNER INTERVENTION] Your file inspection budget is fully spent. No further read_file or " +
               "get_symbol_definition calls will be accepted. State your diagnosis and exact fix instructions now " +
@@ -1083,7 +1151,7 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
         }
 
         messages.push({
-          role: "system",
+          role: "user",
           content:
             agentName === "REPAIR"
               ? "[INTERVENTION] You have inspected many files without making an edit. " +
@@ -1111,22 +1179,9 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
     }
   }
 
-  // Round budget exhausted without a clean conclusion. Giving up here with a
-  // placeholder — what this used to do unconditionally — throws away every
-  // finding, edit, or piece of reasoning the model produced across the whole
-  // budget, no matter how close it was to a real answer. Advisor's own
-  // inspection-budget nudge and Planner's own file-budget nudge already
-  // solve exactly this by clearing `availableTools` and asking for a final
-  // answer — but only when THEIR OWN counter trips with at least one round
-  // still left to use it. If the round cap is what actually ends the loop
-  // (their nudge fired too late, or never fired at all), there was no
-  // recovery. This is that recovery, applied universally: one guaranteed
-  // final call with tools stripped entirely, so the model cannot do
-  // anything but answer in plain text — the same shape `runToolAgent`
-  // already returns for a no-tool-call response in every other case.
   runControl.throwIfAborted();
   messages.push({
-    role: "system",
+    role: "user",
     content:
       "[TURN LIMIT] Your tool-call budget for this task is exhausted — no more tools are available. " +
       "Respond now, in plain text, with your best answer or summary based on everything you have already " +
@@ -1134,7 +1189,7 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
       "guessing or claiming more than you actually confirmed.",
   });
   try {
-    const finalResponse = await client.complete(models, messages, { tools: [], toolChoice: "auto", agent: agentName });
+    const finalResponse = await client.complete(models, messages, { tools: availableTools, toolChoice: "none", agent: agentName });
     const finalMessage = finalResponse?.choices?.[0]?.message || finalResponse?.message || finalResponse;
     const finalContent = typeof finalMessage?.content === "string" ? finalMessage.content.trim() : "";
     if (finalContent) {

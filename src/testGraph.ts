@@ -16,7 +16,7 @@ import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { listTestFiles } from "./focusTests.js";
-import { runSuite, type SuiteRun } from "./testRun.js";
+import { runSuite, failingTestFiles, type SuiteRun } from "./testRun.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -215,8 +215,22 @@ export async function failsBefore(opts: BaselineOptions): Promise<Set<string> | 
     const nm = path.join(repoRoot, "node_modules");
     if (fs.existsSync(nm) && !fs.existsSync(path.join(wt, "node_modules"))) fs.symlinkSync(nm, path.join(wt, "node_modules"), "junction");
     const there = files.filter((f) => fs.existsSync(path.join(wt, f)));
-    const results = await Promise.all(there.map(async (f) => ({ f, r: await run(wt, [f]) })));
-    return new Set(results.filter((x) => !x.r.ok).map((x) => x.f));
+    if (there.length === 0) return new Set();
+    // Run all baseline files in ONE batched invocation to avoid spawning N concurrent Jest/Vitest processes.
+    const batched = await run(wt, there);
+    if (batched.ok) return new Set();
+    if (there.length === 1) return new Set(there);
+    const parsed = failingTestFiles(batched.output);
+    const thereSet = new Set(there.map((f) => f.replace(/\\/g, "/").replace(/^\.\//, "")));
+    const matched = parsed.map((f) => f.replace(/\\/g, "/").replace(/^\.\//, "")).filter((f) => thereSet.has(f));
+    if (matched.length > 0) return new Set(matched);
+    // Fallback when a custom runner didn't print per-file FAIL lines: run sequentially (never N-way parallel).
+    const red = new Set<string>();
+    for (const f of there) {
+      const r = await run(wt, [f]);
+      if (!r.ok) red.add(f);
+    }
+    return red;
   } catch {
     return undefined;
   } finally {

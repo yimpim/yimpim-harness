@@ -2112,7 +2112,26 @@ export class AgentTools {
     }
   }
 
+  private writePathFilter?: (relPath: string) => boolean;
+
+  /**
+   * Optional per-pass write-path restriction (e.g. restricting _focus test reconciliation
+   * strictly to permanent test files so production source code cannot be edited unverified).
+   */
+  public setWritePathFilter(filter?: (relPath: string) => boolean): void {
+    this.writePathFilter = filter;
+  }
+
+  private assertWritePathAllowed(filePath: string): void {
+    if (!this.writePathFilter) return;
+    const rel = this.relOf(filePath);
+    if (!this.writePathFilter(rel)) {
+      throw new Error(`[WRITE SCOPE] Editing "${rel}" is not allowed in this pass.`);
+    }
+  }
+
   public async writeFile(filePath: string, content: string): Promise<string> {
+    this.assertWritePathAllowed(filePath);
     this.assertMustPassIntact(filePath, content);
     // A NEW one-off report, summary or helper script at the project root is not part of the project: it goes in the scratch folder, which is
     // never committed and is emptied when the task ends. A file that already exists, or one anywhere else, is written where it was asked.
@@ -2164,6 +2183,7 @@ export class AgentTools {
   }
 
   public async patchFile(filePath: string, search: string, replace: string): Promise<string> {
+    this.assertWritePathAllowed(filePath);
     const fullPath = this.resolveSafePath(filePath);
     // Budget checked here (nothing on disk has changed yet), but the write is
     // only RECORDED after fs.writeFile below succeeds — see that call.
@@ -2176,21 +2196,94 @@ export class AgentTools {
     const find = search.replace(/\r\n/g, "\n");
     const repl = replace.replace(/\r\n/g, "\n");
 
-    if (!content.includes(find)) {
-      throw new Error(`Search block not found in ${filePath}. Check indentation and whitespace.`);
-    }
+    let actualFind = find;
+    let actualRepl = repl;
 
-    const matches = content.split(find).length - 1;
-    if (matches > 1) {
-      throw new Error(
-        `Ambiguous patch: "${filePath}" contains ${matches} occurrences of the search block. ` +
-          `Include more surrounding context so exactly one location matches.`
-      );
+    if (!content.includes(find)) {
+      // Unique whitespace/indentation-normalized fallback: helps cheap Editor models when
+      // a search block has minor leading/trailing indentation drift, while refusing any ambiguous match.
+      const contentLines = content.split("\n");
+      const findLines = find.split("\n");
+      const findTrimmed = findLines.map((l) => l.trim());
+      const hasNonEmpty = findTrimmed.some((l) => l.length > 0);
+      const matchStarts: number[] = [];
+      if (hasNonEmpty && findLines.length <= contentLines.length) {
+        for (let i = 0; i <= contentLines.length - findLines.length; i++) {
+          let ok = true;
+          for (let j = 0; j < findLines.length; j++) {
+            if (contentLines[i + j].trim() !== findTrimmed[j]) {
+              ok = false;
+              break;
+            }
+          }
+          if (ok) matchStarts.push(i);
+        }
+      }
+      if (matchStarts.length === 1) {
+        const startIdx = matchStarts[0];
+        const matchedSlice = contentLines.slice(startIdx, startIdx + findLines.length);
+        actualFind = matchedSlice.join("\n");
+        // Preserve the file's indentation offset on replaced lines when the first non-empty line shifted.
+        const firstNonEmptyIdx = findLines.findIndex((l) => l.trim().length > 0);
+        const searchIndent = firstNonEmptyIdx >= 0 ? (findLines[firstNonEmptyIdx].match(/^[ \t]*/) ?? [""])[0] : "";
+        const fileIndent = firstNonEmptyIdx >= 0 ? (matchedSlice[firstNonEmptyIdx].match(/^[ \t]*/) ?? [""])[0] : "";
+        if (searchIndent !== fileIndent) {
+          actualRepl = repl
+            .split("\n")
+            .map((line) => {
+              if (!line.trim()) return line;
+              if (searchIndent && line.startsWith(searchIndent)) return fileIndent + line.slice(searchIndent.length);
+              if (!searchIndent) return fileIndent + line;
+              return line;
+            })
+            .join("\n");
+        }
+      } else if (matchStarts.length > 1) {
+        throw new Error(
+          `Ambiguous patch: "${filePath}" contains ${matchStarts.length} whitespace-normalized occurrences of the search block ` +
+            `(lines ${matchStarts.map((s) => s + 1).join(", ")}). Include more surrounding context so exactly one location matches.`
+        );
+      } else {
+        // Compute nearest-line diagnostic hints for the first non-empty line of search.
+        const needle = findTrimmed.find((l) => l.length > 0) ?? "";
+        const hints: string[] = [];
+        if (needle) {
+          const needleTokens = needle.split(/\W+/).filter((t) => t.length >= 3);
+          const scored: { line: number; score: number; text: string }[] = [];
+          for (let i = 0; i < contentLines.length; i++) {
+            const trimmed = contentLines[i].trim();
+            if (!trimmed) continue;
+            let score = 0;
+            if (trimmed.includes(needle) || needle.includes(trimmed)) score += 10;
+            for (const tok of needleTokens) {
+              if (trimmed.includes(tok)) score += 1;
+            }
+            if (score > 0) scored.push({ line: i + 1, score, text: trimmed.slice(0, 120) });
+          }
+          scored.sort((a, b) => b.score - a.score || a.line - b.line);
+          for (const s of scored.slice(0, 3)) {
+            hints.push(`  L${s.line}: ${s.text}`);
+          }
+        }
+        const hintSuffix =
+          hints.length > 0
+            ? `\nNearest matching lines in ${filePath}:\n${hints.join("\n")}`
+            : "";
+        throw new Error(`Search block not found in ${filePath}. Check indentation and whitespace.${hintSuffix}`);
+      }
+    } else {
+      const matches = content.split(find).length - 1;
+      if (matches > 1) {
+        throw new Error(
+          `Ambiguous patch: "${filePath}" contains ${matches} occurrences of the search block. ` +
+            `Include more surrounding context so exactly one location matches.`
+        );
+      }
     }
 
     // Function form: prevents $&, $1, $' in the replacement from being expanded
     // as regex substitution patterns and silently corrupting the file.
-    const patched = content.replace(find, () => repl);
+    const patched = content.replace(actualFind, () => actualRepl);
     this.assertMustPassIntact(filePath, patched); // checked on what the file WOULD hold, before a byte is written
     await fs.writeFile(fullPath, hadCrlf ? patched.replace(/\n/g, "\r\n") : patched, "utf-8");
     // Registered only AFTER the bytes are on disk: registering up front meant a

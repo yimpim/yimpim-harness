@@ -350,10 +350,10 @@ describe("runToolAgent — recovers a real answer when the round budget runs out
     assert.equal(result, "Based on dead.ts, here is my best answer.");
     assert.doesNotMatch(result, /Turn limit/);
     assert.equal(requests.length, 3, "2 rounds under the cap, plus exactly one forced final call");
-    assert.deepEqual(optionsSeen[2].tools, [], "the forced final call must strip every tool");
+    assert.equal(optionsSeen[2].toolChoice, "none", "the forced final call must disable tools via toolChoice='none' to preserve prompt cache");
 
     const lastMessage = requests[2][requests[2].length - 1];
-    assert.equal(lastMessage.role, "system");
+    assert.equal(lastMessage.role, "user");
     assert.match(lastMessage.content, /\[TURN LIMIT\]/);
   });
 

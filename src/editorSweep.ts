@@ -106,7 +106,30 @@ export class EditorSweep {
     }
   }
 
+  /** Tracks the most recent clean sweep so QA's selectedTestGate can avoid re-running identical tests when zero edits occurred since. */
+  private lastClean?: { files: string[]; output: string; epoch?: number };
+  private writeEpochProvider?: () => number;
+
+  public setWriteEpochProvider(fn: () => number): void {
+    this.writeEpochProvider = fn;
+  }
+
+  public lastCleanSweep(): { files: string[]; output: string; epoch?: number } | undefined {
+    return this.lastClean;
+  }
+
   private async execute(files: string[]): Promise<{ failing: string[]; output: string; refused?: string }> {
+    // Batch all affected test files into ONE test-runner invocation when running through RunTestSession.
+    if (files.length > 1 && !this.deps.runFile && this.session?.runMany) {
+      const r = await this.session.runMany(files);
+      if (r.refused) return { failing: [], output: r.output, refused: r.text };
+      if (!outputFailed(r.output)) return { failing: [], output: r.output };
+      const parsed = failingTestFiles(r.output);
+      const fileSet = new Set(files.map(norm));
+      const matched = parsed.map(norm).filter((f) => fileSet.has(f));
+      return { failing: matched.length > 0 ? matched : [...files], output: r.output };
+    }
+
     let output = "";
     const failing: string[] = [];
     for (const f of files) {
@@ -168,7 +191,11 @@ export class EditorSweep {
 
     const ran = await this.execute(files);
     if (ran.refused) return { kind: "bounce", message: `the tests could not be run: ${ran.refused}` };
-    if (ran.failing.length === 0) return { kind: "clean", note: `${files.length} affected test file${files.length === 1 ? "" : "s"} pass` };
+    if (ran.failing.length === 0) {
+      this.lastClean = { files: files.map(norm), output: ran.output, epoch: this.writeEpochProvider?.() };
+      return { kind: "clean", note: `${files.length} affected test file${files.length === 1 ? "" : "s"} pass` };
+    }
+    this.lastClean = undefined;
 
     const caused = await this.causedBy(ran.failing);
     if (caused.length === 0) return { kind: "clean", note: `${files.length} affected test file${files.length === 1 ? "" : "s"} run; the ones failing were already failing before this phase` };

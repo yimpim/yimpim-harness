@@ -33,6 +33,8 @@ export interface DirectRunner {
   kind: "jest" | "vitest";
   /** Builds the full argument list for one run. */
   build(file: string, namePattern?: string): string[];
+  /** Builds the full argument list for a batched multi-file run in one process. */
+  buildMany(files: string[]): string[];
 }
 
 /** `package.json` of a dependency found under the project's own node_modules (the sandbox links it), and the script its `bin` names. */
@@ -70,6 +72,7 @@ export function resolveDirectRunner(root: string): DirectRunner | undefined {
       args: [jest],
       kind: "jest",
       build: (file, namePattern) => [jest, "--ci", "--colors=false", ...cfg, file, ...(namePattern ? ["-t", namePattern] : [])],
+      buildMany: (files) => [jest, "--ci", "--colors=false", ...cfg, ...files],
     };
   }
   const vitest = binOf(root, "vitest");
@@ -79,6 +82,7 @@ export function resolveDirectRunner(root: string): DirectRunner | undefined {
       args: [vitest],
       kind: "vitest",
       build: (file, namePattern) => [vitest, "run", file, ...(namePattern ? ["-t", namePattern] : [])],
+      buildMany: (files) => [vitest, "run", ...files],
     };
   }
   return undefined;
@@ -195,6 +199,7 @@ export interface RunTestResult {
 
 export interface RunTestSession {
   run(args: Record<string, unknown>): Promise<RunTestResult>;
+  runMany?(files: string[]): Promise<RunTestResult>;
 }
 
 export type ExecFn = (bin: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; shell: false; timeout: number; maxBuffer: number }) => Promise<{ stdout: string; stderr: string }>;
@@ -339,6 +344,85 @@ export function createRunTestSession(deps: {
       }
       const seconds = Math.round((now() - started) / 100) / 10;
       const head = `--- run_test ${file}${namePattern ? ` -t "${namePattern}"` : ""} (${seconds}s)${note}`;
+      return { text: `${head}\n${shapeOutput(output)}`, refused: false, output };
+    },
+    async runMany(rawFiles: string[]) {
+      const files: string[] = [];
+      for (const raw of rawFiles) {
+        const file = posix(String(raw ?? "")).replace(/^\.\//, "").trim();
+        if (!file) continue;
+        if (!SAFE(file) || !isTestPath(file)) return refuse(`${file} is not a test file inside the project.`);
+        const abs = path.resolve(root, file);
+        if (!(abs + path.sep).startsWith(root + path.sep) || abs === root) return refuse(`${file} is outside the sandbox.`);
+        if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return refuse(`${file} does not exist in the sandbox.`);
+        files.push(file);
+      }
+      if (files.length === 0) return refuse("no test files provided.");
+
+      const runner = resolveDirectRunner(root);
+      const argv = runner ? runner.buildMany(files) : [];
+
+      const toReview: { rel: string; hash: string; text: string; added: string[] }[] = [];
+      for (const rel of changedFiles(root)) {
+        let text: string;
+        try {
+          const full = path.join(root, rel);
+          if (!fs.statSync(full).isFile() || fs.statSync(full).size > 2 * 1024 * 1024) continue;
+          text = fs.readFileSync(full, "utf8");
+        } catch {
+          continue;
+        }
+        const hash = sha(text);
+        if (approved.get(rel) === hash) continue;
+        toReview.push({ rel, hash, text, added: addedLines(root, rel, text) });
+      }
+
+      const flagged: { rel: string; why: string }[] = [];
+      for (const f of toReview) {
+        const added = f.added.join("\n");
+        const danger = injectionIn(added) ?? HARD_REFUSE.find((h) => h.re.test(added))?.why;
+        if (danger) return refuse(`${f.rel} ${danger}. Remove that code; the sandbox does not run it.`);
+        const why = new Set<string>();
+        for (const line of f.added) for (const s of SUSPICIOUS) if (s.re.test(line)) why.add(s.why);
+        if (auditText(f.rel, added).some((h) => h.severity === "defect")) why.add("it contains something that looks like a secret or an unsafe construct");
+        if (why.size > 0) flagged.push({ rel: f.rel, why: [...why].join("; ") });
+      }
+
+      if (flagged.length > 0) {
+        if (!deps.gate.review) return refuse(`${flagged.map((f) => `${f.rel}: ${f.why}`).join(" | ")}. A security review is needed and none is available, so it was not run.`);
+        let outcome: ReviewOutcome;
+        try {
+          outcome = await deps.gate.review({
+            argv: [runner?.bin ?? "test-runner", ...argv],
+            label: `run_test ${files.length} file(s)`,
+            purpose: `${deps.purpose ?? "run affected tests"} after the agent changed ${flagged.map((f) => f.rel).join(", ")}`,
+            cwd: root,
+            repoRoot: root,
+            created: flagged.map((f) => f.rel),
+            show: flagged.map((f) => f.rel),
+          });
+        } catch (e: any) {
+          return refuse(`the security review could not be completed (${String(e?.message ?? e).slice(0, 120)}), so it was not run.`);
+        }
+        if (!outcome.allow) return refuse(`${outcome.why} Remove that code; the sandbox does not run it.`);
+      }
+      for (const f of toReview) approved.set(f.rel, f.hash);
+
+      const started = now();
+      let output: string;
+      let note = "";
+      if (runner) {
+        const r = await exec(runner.bin, argv, { cwd: root, env: scrubbedEnv(), shell: false, timeout: 600_000, maxBuffer: 64 * 1024 * 1024 });
+        output = `${r.stdout}\n${r.stderr}`;
+      } else if (deps.fallbackRun) {
+        const r = await deps.fallbackRun(root, files);
+        output = r.output;
+        note = "\n(this project's test runner could not be started directly, so the selected files were run via the fallback runner)";
+      } else {
+        return refuse("this project has no test runner that can be started (Jest or Vitest) and no fallback was given.");
+      }
+      const seconds = Math.round((now() - started) / 100) / 10;
+      const head = `--- run_test (${files.length} files) (${seconds}s)${note}`;
       return { text: `${head}\n${shapeOutput(output)}`, refused: false, output };
     },
   };

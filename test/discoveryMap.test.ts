@@ -99,7 +99,7 @@ describe("Discovery's reading budget", () => {
     for (let i = 0; i < total; i++) await fs.writeFile(path.join(dir, `f${i}.ts`), `export const v${i} = ${i};\n`, "utf-8");
 
     const requests: any[][] = [];
-    const toolsSeen: any[] = [];
+    const toolChoicesSeen: any[] = [];
     const queue: any[] = Array.from({ length: total }, (_, i) => ({
       role: "assistant",
       content: null,
@@ -108,7 +108,7 @@ describe("Discovery's reading budget", () => {
     const client = {
       async complete(_m: string[], messages: any[], options?: any) {
         requests.push(messages.map((m) => ({ ...m })));
-        toolsSeen.push(options?.tools);
+        toolChoicesSeen.push(options?.toolChoice);
         return { choices: [{ message: queue.shift() ?? { role: "assistant", content: "taskFindings written" } }] };
       },
     } as any;
@@ -134,7 +134,7 @@ describe("Discovery's reading budget", () => {
     assert.ok(refused.length > 0, "calls after the budget were refused, not run");
     assert.ok(last.some((m: any) => typeof m.content === "string" && m.content.includes("[DISCOVERY INTERVENTION]")));
     assert.ok(last.some((m: any) => typeof m.content === "string" && m.content.includes("taskFindings JSON block")));
-    assert.deepEqual(toolsSeen[toolsSeen.length - 1] ?? [], []);
+    assert.equal(toolChoicesSeen[toolChoicesSeen.length - 1], "none");
   });
 
   test("directory listings do not use up the budget, only files read do", async () => {

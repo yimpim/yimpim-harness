@@ -134,6 +134,8 @@ export interface UsageBucket {
   prompt: number;
   completion: number;
   total: number;
+  /** Prompt tokens served from provider prompt cache (when reported). */
+  cached?: number;
   /** Sum of every call's cost that actually reported one. */
   cost: number;
   /** True once at least one call in this bucket reported a cost — lets a
@@ -268,6 +270,9 @@ class EventBus {
       e.prompt += usage.prompt;
       e.completion += usage.completion;
       e.total += usage.total;
+      if (usage.cached !== undefined && usage.cached > 0) {
+        e.cached = (e.cached ?? 0) + usage.cached;
+      }
       if (usage.cost !== undefined) {
         e.cost += usage.cost;
         e.costKnown = true;
@@ -279,6 +284,9 @@ class EventBus {
     this.usage.totals.prompt += usage.prompt;
     this.usage.totals.completion += usage.completion;
     this.usage.totals.total += usage.total;
+    if (usage.cached !== undefined && usage.cached > 0) {
+      this.usage.totals.cached = (this.usage.totals.cached ?? 0) + usage.cached;
+    }
     if (usage.cost !== undefined) {
       this.usage.totals.cost += usage.cost;
       this.usage.totals.costKnown = true;
@@ -320,17 +328,21 @@ class EventBus {
   usageDelta(since: UsageReport): UsageReport {
     type Bucket = Record<string, UsageBucket>;
     const emptyEntry: UsageBucket = { calls: 0, prompt: 0, completion: 0, total: 0, cost: 0, costKnown: false };
-    const diffEntry = (cur: UsageBucket, prev: UsageBucket): UsageBucket => ({
-      calls: cur.calls - prev.calls,
-      prompt: cur.prompt - prev.prompt,
-      completion: cur.completion - prev.completion,
-      total: cur.total - prev.total,
-      cost: cur.cost - prev.cost,
-      // Known if EITHER side ever saw a cost — a bucket that only existed
-      // before the snapshot (prev.costKnown) still means cost is/was known
-      // for this key, and one that only appeared after still counts too.
-      costKnown: cur.costKnown || prev.costKnown,
-    });
+    const diffEntry = (cur: UsageBucket, prev: UsageBucket): UsageBucket => {
+      const cachedDiff = (cur.cached ?? 0) - (prev.cached ?? 0);
+      return {
+        calls: cur.calls - prev.calls,
+        prompt: cur.prompt - prev.prompt,
+        completion: cur.completion - prev.completion,
+        total: cur.total - prev.total,
+        ...(cachedDiff > 0 ? { cached: cachedDiff } : {}),
+        cost: cur.cost - prev.cost,
+        // Known if EITHER side ever saw a cost — a bucket that only existed
+        // before the snapshot (prev.costKnown) still means cost is/was known
+        // for this key, and one that only appeared after still counts too.
+        costKnown: cur.costKnown || prev.costKnown,
+      };
+    };
     const diffBucket = (current: Bucket, before: Bucket): Bucket => {
       const out: Bucket = {};
       for (const [key, cur] of Object.entries(current)) {
@@ -366,16 +378,20 @@ class EventBus {
     // rather than printing a misleading "$0.0000" next to real spend on rows
     // where it's simply unknown.
     const costSuffix = (u: UsageBucket) => (u.costKnown ? `  ${formatCost(u.cost)}` : "");
+    const cacheSuffix = (u: UsageBucket) =>
+      u.cached && u.cached > 0 && u.prompt > 0
+        ? `  (${Math.min(100, Math.round((u.cached / u.prompt) * 100))}% cached)`
+        : "";
 
     const rows = Object.entries(byAgent)
       .sort((a, b) => b[1].total - a[1].total)
-      .map(([agent, u]) => `  ${agent.toUpperCase().padEnd(10)} ${String(u.calls).padStart(4)} calls  ${formatTokens(u.total).padStart(10)} tokens${costSuffix(u)}`);
+      .map(([agent, u]) => `  ${agent.toUpperCase().padEnd(10)} ${String(u.calls).padStart(4)} calls  ${formatTokens(u.total).padStart(10)} tokens${costSuffix(u)}${cacheSuffix(u)}`);
 
     return [
       "",
       `${label} (use this to check whether model tiering is paying off):`,
       ...rows,
-      `  ${"TOTAL".padEnd(10)} ${String(totals.calls).padStart(4)} calls  ${formatTokens(totals.total).padStart(10)} tokens${costSuffix(totals)}`,
+      `  ${"TOTAL".padEnd(10)} ${String(totals.calls).padStart(4)} calls  ${formatTokens(totals.total).padStart(10)} tokens${costSuffix(totals)}${cacheSuffix(totals)}`,
       "",
     ].join("\n");
   }

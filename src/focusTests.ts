@@ -417,6 +417,7 @@ export async function finalizeFocusTests(opts: FinalizeOptions): Promise<FocusOu
   if (files.length === 0) return outcomes;
   const root = testRootDir(repoRoot);
 
+  try {
   for (const focusRel of files) {
     let content = "";
     try {
@@ -496,14 +497,15 @@ export async function finalizeFocusTests(opts: FinalizeOptions): Promise<FocusOu
       });
     }
   }
-
-  for (const f of files) {
-    try {
-      fsSync.unlinkSync(path.join(repoRoot, f));
-    } catch {}
+  } finally {
+    for (const f of files) {
+      try {
+        fsSync.unlinkSync(path.join(repoRoot, f));
+      } catch {}
+    }
+    saveFocusFiles(repoRoot, []);
+    removeEmptyFocusDir(repoRoot);
   }
-  saveFocusFiles(repoRoot, []);
-  removeEmptyFocusDir(repoRoot);
   return outcomes;
 }
 

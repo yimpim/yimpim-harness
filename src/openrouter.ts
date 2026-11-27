@@ -7,6 +7,72 @@ import { trackCall } from "./liveCalls.js";
 import { redactMessages } from "./redact.js";
 import { tuneRequest, isReasoningRejected, isPriceCapMiss } from "./requestTuning.js";
 
+export function supportsExplicitPromptCaching(model: string): boolean {
+  return /^anthropic\//i.test(model) || /\bclaude\b/i.test(model);
+}
+
+function withEphemeralCacheControl(msg: ChatMessage): ChatMessage {
+  if (typeof msg.content === "string") {
+    return {
+      ...msg,
+      content: [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }],
+    };
+  }
+  if (Array.isArray(msg.content) && msg.content.length > 0) {
+    const blocks = msg.content.slice();
+    const last = blocks[blocks.length - 1];
+    if (last && typeof last === "object") {
+      blocks[blocks.length - 1] = { ...last, cache_control: { type: "ephemeral" } };
+    }
+    return { ...msg, content: blocks };
+  }
+  return msg;
+}
+
+/**
+ * Adds OpenRouter/Anthropic explicit prompt-caching breakpoints without mutating caller inputs:
+ *  1) Last system message (static instructions/persona prefix)
+ *  2) Last tool definition (tool-schema prefix)
+ *  3) Rolling checkpoint on the last non-system user/tool message in multi-turn conversations
+ */
+export function applyPromptCaching(
+  model: string,
+  messages: ChatMessage[],
+  tools?: FunctionTool[]
+): { messages: ChatMessage[]; tools?: FunctionTool[] } {
+  if (!supportsExplicitPromptCaching(model)) {
+    return { messages, tools };
+  }
+
+  const outMessages = messages.slice();
+  let lastSystemIdx = -1;
+  let lastRollingIdx = -1;
+  for (let i = 0; i < outMessages.length; i++) {
+    const role = outMessages[i]?.role;
+    if (role === "system") lastSystemIdx = i;
+    else if (role === "user" || role === "tool") lastRollingIdx = i;
+  }
+
+  if (lastSystemIdx >= 0) {
+    outMessages[lastSystemIdx] = withEphemeralCacheControl(outMessages[lastSystemIdx]);
+  }
+  if (lastRollingIdx >= 0 && outMessages.length >= 3) {
+    outMessages[lastRollingIdx] = withEphemeralCacheControl(outMessages[lastRollingIdx]);
+  }
+
+  let outTools = tools;
+  if (tools && tools.length > 0) {
+    outTools = tools.slice();
+    const lastTool = outTools[outTools.length - 1];
+    outTools[outTools.length - 1] = {
+      ...lastTool,
+      cache_control: { type: "ephemeral" },
+    } as FunctionTool;
+  }
+
+  return { messages: outMessages, tools: outTools };
+}
+
 export interface FunctionTool {
   type: "function";
   function: {
@@ -140,7 +206,19 @@ export class OpenRouterClient {
   }
 
   private async delay(ms: number): Promise<void> {
-    return new Promise((res) => setTimeout(res, ms));
+    if (runControl.isAborted) throw new AbortedError(runControl.reason);
+    const signal = runControl.signal;
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new AbortedError(runControl.reason));
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   /** How long to wait between checks when the account is out of credits. A field (not only the constant) so a test can shorten it. */
@@ -517,9 +595,14 @@ export class OpenRouterClient {
         const endCall = trackCall(agent, model);
 
         try {
-          const bodyPayload: Record<string, any> = {
+          const cachedPayload = applyPromptCaching(
             model,
             messages,
+            options?.tools && options.tools.length > 0 ? options.tools : undefined
+          );
+          const bodyPayload: Record<string, any> = {
+            model,
+            messages: cachedPayload.messages,
             // Streamed rather than single-shot: a 120s budget covering the
             // WHOLE generation killed long-but-healthy completions mid-flight,
             // and gave no way to tell "still working" apart from "hung" while
@@ -527,7 +610,7 @@ export class OpenRouterClient {
             // (cleared the moment the first chunk lands — see below), so a
             // slow model no longer gets its work thrown away at the deadline.
             stream: true,
-            tools: options?.tools && options.tools.length > 0 ? options.tools : undefined,
+            tools: cachedPayload.tools,
             tool_choice: options?.toolChoice,
             temperature: options?.temperature,
             // Without this, OpenRouter's usage block carries only token counts —

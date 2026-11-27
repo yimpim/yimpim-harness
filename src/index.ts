@@ -29,6 +29,7 @@ import {
   renderTestsNotNeededForGoal,
   runFocusedTests,
   isTestPath,
+  isFocusPath,
 } from "./focusTests.js";
 import { winSafeCommand } from "./capabilities.js";
 import { neutralizeLegacyQuarantine } from "./quarantine.js";
@@ -3442,37 +3443,42 @@ Test hook just added: ${hookHowTo}` : hookHowTo;
             ),
           // QA decides whether it belongs in the permanent suite at all.
           decide: (req) => verifier.judgeFocusTest(phase.verificationGoal ?? phase.instructions, req),
-          // The Editor then folds it into what is already there.
+          // The Editor then folds it into what is already there — strictly restricted to permanent test paths.
           review: async ({ focusRel, candidates, suggestedNew, reason }) => {
             agentTools.beginPhase([...candidates, suggestedNew], 6, `review focused test ${focusRel}`);
-            await runToolAgent({
-              prompt:
-                `A temporary focused test was written to prove one change in this phase: \`${focusRel}\`. ` +
-                `It passed and will be deleted. QA judged that it describes lasting behavior worth keeping in the PERMANENT ` +
-                `test suite: "${reason}". Your job is to fold that into the existing suite correctly.\n\n` +
-                `If the permanent tests already cover it, make no edit and call conclude_task with status ALREADY_COMPLETED.\n\n` +
-                (candidates.length > 0
-                  ? `Permanent tests that already touch this code (read them before deciding):\n${candidates.map((c) => `  - ${c}`).join("\n")}\n\n`
-                  : `No existing permanent test covers this code.\n\n`) +
-                `To fold it in:\n` +
-                `1. Read the candidate tests above and find where this behavior is already tested, even partly.\n` +
-                `2. UPDATE that test in place: change, tighten or replace the existing case so the file reflects how the app ` +
-                `behaves NOW. Do not append a near-duplicate beside it, and do not leave an older case that the new behavior ` +
-                `makes wrong — fix or remove that case.\n` +
-                `3. Only if nothing covers it at all, add ONE new permanent test at \`${suggestedNew}\` (use real imports from ` +
-                `that location; match the project's existing test style and avoid new mocks).\n` +
-                `4. Edit only test files. Never edit source code, never delete a test file, never touch \`${focusRel}\`.\n` +
-                `5. Never add a test that pins call order, snapshots, or this one edit's implementation.`,
-              phase: { name: `review focused test ${focusRel}`, instructions: `Review ${focusRel} against the permanent tests.` },
-              repo,
-              repoRoot,
-              client,
-              config,
-              agentTools,
-              models: currentEditorModels,
-              agentName: "EDITOR",
-              visionMode: false,
-            });
+            agentTools.setWritePathFilter((p) => isTestPath(p) && !isFocusPath(p));
+            try {
+              await runToolAgent({
+                prompt:
+                  `A temporary focused test was written to prove one change in this phase: \`${focusRel}\`. ` +
+                  `It passed and will be deleted. QA judged that it describes lasting behavior worth keeping in the PERMANENT ` +
+                  `test suite: "${reason}". Your job is to fold that into the existing suite correctly.\n\n` +
+                  `If the permanent tests already cover it, make no edit and call conclude_task with status ALREADY_COMPLETED.\n\n` +
+                  (candidates.length > 0
+                    ? `Permanent tests that already touch this code (read them before deciding):\n${candidates.map((c) => `  - ${c}`).join("\n")}\n\n`
+                    : `No existing permanent test covers this code.\n\n`) +
+                  `To fold it in:\n` +
+                  `1. Read the candidate tests above and find where this behavior is already tested, even partly.\n` +
+                  `2. UPDATE that test in place: change, tighten or replace the existing case so the file reflects how the app ` +
+                  `behaves NOW. Do not append a near-duplicate beside it, and do not leave an older case that the new behavior ` +
+                  `makes wrong — fix or remove that case.\n` +
+                  `3. Only if nothing covers it at all, add ONE new permanent test at \`${suggestedNew}\` (use real imports from ` +
+                  `that location; match the project's existing test style and avoid new mocks).\n` +
+                  `4. Edit only test files. Never edit source code, never delete a test file, never touch \`${focusRel}\`.\n` +
+                  `5. Never add a test that pins call order, snapshots, or this one edit's implementation.`,
+                phase: { name: `review focused test ${focusRel}`, instructions: `Review ${focusRel} against the permanent tests.` },
+                repo,
+                repoRoot,
+                client,
+                config,
+                agentTools,
+                models: currentEditorModels,
+                agentName: "EDITOR",
+                visionMode: false,
+              });
+            } finally {
+              agentTools.setWritePathFilter(undefined);
+            }
           },
         });
         if (focusOutcomes.length > 0) {
@@ -4024,6 +4030,7 @@ ${repairPlan
   console.error(`\n❌ [PHASE FAILED] ${failureReason}`);
 
   // Scoped, non-destructive cleanup: only the agent's own edits are undone.
+  clearFocusFiles(repoRoot);
   console.log(`[REVERT] Undoing the agent's changes (pre-existing work is preserved)...`);
   try {
     await revertAgentChanges(repoRoot, repo, preExistingDirty);
@@ -4939,18 +4946,20 @@ async function main(): Promise<void> {
       );
     }
   }
+  verifier.setWriteEpochProvider(() => agentTools.writesSoFar());
   // The Editor keeps its tests current: before it may conclude, the tests its change can reach are run, what the change made stale is sent back to it to fix, and what
   // it still cannot fix goes to the heal before QA. The code it changed is screened by the same panel as every other test run.
   if (config.heal?.editorSweep !== false) {
-    agentTools.setAffectedTests(
-      new EditorSweep({
-        repoRoot,
-        written: () => agentTools.filesWrittenThisPhase(),
-        review: panelReviewerFor(client, config) ?? makeCommandReviewer(securityReviewCall(client, config, "Security: reviewing code before the Editor's test run")),
-        heal: healerFor(client, config, repoRoot, (l) => console.log(`[TESTS] ${l}`)),
-        log: (l) => console.log(`[TESTS] ${l}`),
-      })
-    );
+    const editorSweep = new EditorSweep({
+      repoRoot,
+      written: () => agentTools.filesWrittenThisPhase(),
+      review: panelReviewerFor(client, config) ?? makeCommandReviewer(securityReviewCall(client, config, "Security: reviewing code before the Editor's test run")),
+      heal: healerFor(client, config, repoRoot, (l) => console.log(`[TESTS] ${l}`)),
+      log: (l) => console.log(`[TESTS] ${l}`),
+    });
+    editorSweep.setWriteEpochProvider(() => agentTools.writesSoFar());
+    agentTools.setAffectedTests(editorSweep);
+    verifier.setCleanSweepProvider(() => editorSweep.lastCleanSweep());
   }
   // Backs the run_build_check tool: lets EDITOR/REPAIR confirm a patch
   // actually compiles before handing back to QA, reusing the SAME
