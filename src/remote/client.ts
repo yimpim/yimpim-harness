@@ -999,18 +999,46 @@ export class RemoteSession {
     // cursor without acknowledging/replaying it and emit a clean status snapshot instead.
     if (
       (p.verb === "fetch_history" || p.verb === "history_replay") &&
-      p.taskId === undefined &&
-      typeof p.afterEventId === "number" &&
-      p.afterEventId > 0 &&
-      (!this.hasEmittedTaskEvents || p.afterEventId > this.nextEventId - 1)
+      p.taskId === undefined
     ) {
-      logLocal(
-        `[REMOTE] Ignoring stale ${p.verb} gap-recovery cursor afterEventId=${p.afterEventId} ` +
-          `(session hasEmittedTaskEvents=${this.hasEmittedTaskEvents}, latestEventId=${this.nextEventId - 1}); emitting fresh session status.`
-      );
-      this.updateStatus({});
-      this.pushHello();
-      return;
+      const latestEventId = this.nextEventId - 1;
+      const isStaleCursor =
+        typeof p.afterEventId === "number" &&
+        p.afterEventId > 0 &&
+        (!this.hasEmittedTaskEvents || p.afterEventId > latestEventId);
+      if (isStaleCursor) {
+        logLocal(
+          `[REMOTE] Ignoring stale ${p.verb} gap-recovery cursor afterEventId=${p.afterEventId} ` +
+            `(session hasEmittedTaskEvents=${this.hasEmittedTaskEvents}, latestEventId=${latestEventId}); emitting fresh session status.`
+        );
+        this.updateStatus({});
+        this.pushHello();
+        return;
+      }
+
+      // Fresh session (`!this.hasEmittedTaskEvents`, e.g. afterEventId 0 / omitted)
+      // or already caught up (`afterEventId >= latestEventId` with zero events to
+      // replay): immediately emit a clean status snapshot and an empty
+      // `history.fetched` completion marker so the phone clears its sync indicator
+      // right away without replaying stale cross-session events.
+      const isEmptyReplay =
+        !this.hasEmittedTaskEvents ||
+        (typeof p.afterEventId === "number" && p.afterEventId >= latestEventId);
+      if (isEmptyReplay) {
+        logLocal(
+          `[REMOTE] Answering empty ${p.verb} request (afterEventId=${p.afterEventId ?? 0}, ` +
+            `latestEventId=${latestEventId}) with immediate snapshot and completion marker.`
+        );
+        this.updateStatus({});
+        this.pushHello();
+        this.pushHistoryFetched(
+          p.after ?? "",
+          typeof p.afterEventId === "number" && p.afterEventId > 0 ? p.afterEventId : undefined,
+          0,
+          false,
+        );
+        return;
+      }
     }
 
     // Every remote action is echoed locally, so the terminal is always an

@@ -154,4 +154,72 @@ describe("RemoteSession stale gap-recovery cursor hardening", () => {
       globalThis.fetch = origFetch;
     }
   });
+
+  test("emits immediate status snapshot and empty history.fetched on fresh session (afterEventId: 0) or caught-up cursor (afterEventId === nextEventId - 1)", async () => {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any) => {
+      const u = String(url);
+      if (u.endsWith("/v1/register")) {
+        return new Response(JSON.stringify({ sessionId: "sess_empty_replay", agentToken: "tok_empty" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true, commands: [] }), { status: 200 });
+    }) as any;
+
+    try {
+      const historyCalls: any[] = [];
+      const session = new RemoteSession({
+        brokerUrl: "https://broker.example.invalid",
+        allowAnswer: true,
+        redactLogs: false,
+      });
+
+      const pairingUrl = await session.start("run-empty", "my-app", makeHandlers((c) => historyCalls.push(c)));
+      const key = Buffer.from(decodePairing(pairingUrl.split("#")[1]).key, "base64url");
+
+      // 1. Fresh session with afterEventId: 0 -> immediate snapshot + empty history.fetched, no onFetchHistory.
+      (session as any).outbox.length = 0;
+      const freshCmd = seal(key, "sess_empty_replay", 1, {
+        id: "cmd-fresh-0",
+        issuedAt: new Date().toISOString(),
+        deviceId: "phone-1",
+        payload: { verb: "history_replay", afterEventId: 0 },
+      });
+      (session as any).handleEnvelope(freshCmd);
+
+      assert.equal(historyCalls.length, 0);
+      const emittedFresh = ((session as any).outbox as Envelope[]).map((e) => open<any>(key, e));
+      assert.ok(emittedFresh.some((e) => e.kind === "status"));
+      const fetchedFresh = emittedFresh.find((e) => e.kind === "history.fetched");
+      assert.ok(fetchedFresh);
+      assert.equal(fetchedFresh.count, 0);
+      assert.equal(fetchedFresh.truncated, false);
+
+      // 2. Caught-up session (afterEventId === nextEventId - 1) -> immediate snapshot + empty history.fetched.
+      session.push("task.start", { taskId: "t1", task: "work" });
+      session.push("worker.start", { taskId: "t1", worker: "EDITOR" });
+      const latestEventId = (session as any).nextEventId - 1;
+      (session as any).outbox.length = 0;
+
+      const caughtUpCmd = seal(key, "sess_empty_replay", 2, {
+        id: "cmd-caught-up",
+        issuedAt: new Date().toISOString(),
+        deviceId: "phone-1",
+        payload: { verb: "history_replay", afterEventId: latestEventId },
+      });
+      (session as any).handleEnvelope(caughtUpCmd);
+
+      assert.equal(historyCalls.length, 0);
+      const emittedCaughtUp = ((session as any).outbox as Envelope[]).map((e) => open<any>(key, e));
+      assert.ok(emittedCaughtUp.some((e) => e.kind === "status"));
+      const fetchedCaughtUp = emittedCaughtUp.find((e) => e.kind === "history.fetched");
+      assert.ok(fetchedCaughtUp);
+      assert.equal(fetchedCaughtUp.count, 0);
+      assert.equal(fetchedCaughtUp.truncated, false);
+      assert.equal(fetchedCaughtUp.lastEventId, latestEventId);
+
+      await session.stop("test done");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });
