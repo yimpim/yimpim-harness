@@ -93,6 +93,7 @@ export type RemoteVerb =
    * on a fresh pairing).
    */
   | { verb: "fetch_history"; after?: string; afterEventId?: number; taskId?: string }
+  | { verb: "history_replay"; after?: string; afterEventId?: number; taskId?: string }
   /**
    * Tier 1 — the History list: a page of `tasks.index` entries, newest
    * first. Pure read of something already produced, same "always safe"
@@ -151,7 +152,7 @@ export type RemoteVerb =
 export type VerbName = RemoteVerb["verb"];
 
 /** Verbs that can never be disabled: stopping (and viewing something already produced) is always safe. */
-export const ALWAYS_ALLOWED: VerbName[] = ["abort", "ping", "fetch_diff", "fetch_history", "fetch_screenshot", "get_model_config", "get_roadmap", "get_usage", "list_models", "history.list"];
+export const ALWAYS_ALLOWED: VerbName[] = ["abort", "ping", "fetch_diff", "fetch_history", "history_replay", "fetch_screenshot", "get_model_config", "get_roadmap", "get_usage", "list_models", "history.list"];
 
 export interface RemoteCommand {
   id: string;

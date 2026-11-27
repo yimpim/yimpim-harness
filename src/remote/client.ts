@@ -147,6 +147,25 @@ const NOT_PERSISTED_KINDS = new Set([
   "session.hello",
 ]);
 
+/** Event kinds that are bootstrap/protocol/snapshot traffic rather than task activity. */
+const NON_TASK_EVENT_KINDS = new Set([
+  "status",
+  "session.hello",
+  "session.end",
+  "pong",
+  "command.accepted",
+  "command.refused",
+  "history.fetched",
+  "history.index",
+  "model.config",
+  "usage.totals",
+  "roadmap.state",
+  "screenshot.chunk",
+  "diff.chunk",
+]);
+
+const MAX_RECENT_EVENTS = 500;
+
 const POLL_BACKOFF_MS = [1000, 2000, 5000, 10_000, 20_000];
 /** ~1 minute of backoff: well past any restart, so a warning means it is real. */
 const UNAUTHORIZED_POLLS_BEFORE_WARNING = 6;
@@ -183,6 +202,7 @@ function describePhoneCommand(p: RemoteVerb): string {
     case "fetch_diff":
       return `requested the diff for change ${p.changeId}`;
     case "fetch_history":
+    case "history_replay":
       return p.taskId !== undefined
         ? `requested task ${p.taskId}'s history after eventId ${p.afterEventId ?? 0}`
         : `requested history after ${p.afterEventId !== undefined ? `eventId ${p.afterEventId}` : p.after} (gap recovery)`;
@@ -350,6 +370,10 @@ export class RemoteSession {
   private flushFailures = 0;
   private handlers?: RemoteHandlers;
   private seenCommands = new Set<string>();
+  /** In-memory session-scoped event ring buffer, reset cleanly on every start(). */
+  private recentEvents: Array<{ eventId: number; kind: string; at: string; payload: Record<string, unknown> }> = [];
+  private nextEventId = 1;
+  private hasEmittedTaskEvents = false;
 
   private status: RemoteStatus = {
     runId: "",
@@ -385,12 +409,36 @@ export class RemoteSession {
    * The session key is embedded in the URL fragment and never sent anywhere.
    */
   async start(runId: string, repoName: string, handlers: RemoteHandlers, hello?: Partial<SessionHello>): Promise<string> {
+    // Initialize completely clean session-scoped state with zero carryover across /remote-control re-pairs.
+    const now = new Date().toISOString();
     this.handlers = handlers;
-    this.status.runId = runId;
-    this.status.repoName = repoName;
-    // Carried in every status heartbeat (sealed), so the phone can label this terminal by project without a separate lookup.
-    if (hello?.projectName) this.status.projectName = hello.projectName;
-    if (hello?.cwd) this.status.cwd = hello.cwd;
+    this.stopped = false;
+    this.ending = false;
+    this.seq = 0;
+    this.outbox = [];
+    this.seenCommands.clear();
+    this.recentEvents = [];
+    this.nextEventId = 1;
+    this.hasEmittedTaskEvents = false;
+    this.failures = 0;
+    this.flushFailures = 0;
+    this.unauthorizedPolls = 0;
+    this.wasPaired = false;
+
+    const cleanRepoName = repoName.trim() || "(no project)";
+    this.status = {
+      runId,
+      taskId: "",
+      repoName: cleanRepoName,
+      ...(hello?.projectName ? { projectName: hello.projectName } : {}),
+      ...(hello?.cwd ? { cwd: hello.cwd } : {}),
+      state: "idle",
+      phases: [],
+      pendingQuestions: [],
+      tokensUsed: 0,
+      startedAt: now,
+      updatedAt: now,
+    };
 
     const pairingSecret = generatePairingSecret();
 
@@ -523,6 +571,16 @@ export class RemoteSession {
     let eventId: number | undefined;
     if (this.opts.repoRoot && !NOT_PERSISTED_KINDS.has(kind)) {
       eventId = appendHistoryEntry(this.opts.repoRoot, kind, payload, at, this.opts.redactLogs, this.status.repoName);
+    }
+
+    if (!NON_TASK_EVENT_KINDS.has(kind)) {
+      this.hasEmittedTaskEvents = true;
+      const ringEventId = eventId !== undefined ? eventId : this.nextEventId;
+      this.nextEventId = Math.max(this.nextEventId + 1, ringEventId + 1);
+      this.recentEvents.push({ eventId: ringEventId, kind, at, payload });
+      if (this.recentEvents.length > MAX_RECENT_EVENTS) {
+        this.recentEvents.splice(0, this.recentEvents.length - MAX_RECENT_EVENTS);
+      }
     }
 
     this.outbox.push(
@@ -935,6 +993,26 @@ export class RemoteSession {
       return;
     }
 
+    // Guard against stale cross-session gap-recovery cursors (e.g., a phone reconnecting
+    // with afterEventId from a prior session before this session has emitted any task events,
+    // or with an afterEventId past this session's current nextEventId - 1). Ignore the stale
+    // cursor without acknowledging/replaying it and emit a clean status snapshot instead.
+    if (
+      (p.verb === "fetch_history" || p.verb === "history_replay") &&
+      p.taskId === undefined &&
+      typeof p.afterEventId === "number" &&
+      p.afterEventId > 0 &&
+      (!this.hasEmittedTaskEvents || p.afterEventId > this.nextEventId - 1)
+    ) {
+      logLocal(
+        `[REMOTE] Ignoring stale ${p.verb} gap-recovery cursor afterEventId=${p.afterEventId} ` +
+          `(session hasEmittedTaskEvents=${this.hasEmittedTaskEvents}, latestEventId=${this.nextEventId - 1}); emitting fresh session status.`
+      );
+      this.updateStatus({});
+      this.pushHello();
+      return;
+    }
+
     // Every remote action is echoed locally, so the terminal is always an
     // audit log — with the actual content, not just the verb name, since
     // "received: answer" tells you nothing about what was answered.
@@ -989,6 +1067,7 @@ export class RemoteSession {
         this.handlers?.onFetchDiff(p.changeId);
         break;
       case "fetch_history":
+      case "history_replay":
         this.handlers?.onFetchHistory({ after: p.after, afterEventId: p.afterEventId, taskId: p.taskId });
         break;
       case "history.list":
