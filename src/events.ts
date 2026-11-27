@@ -127,7 +127,17 @@ export type YimpimEvent =
    *  same reason advisor.answer is: it was only ever an untagged `log` block,
    *  indistinguishable from everything else printed around it. Only emitted
    *  when non-empty. */
-  | { type: "manual.steps"; steps: { step: string; reason: string; phase?: string }[] };
+  | { type: "manual.steps"; steps: { step: string; reason: string; phase?: string }[] }
+  /** Security panel/reviewer verdict summary for a command or action (e.g. "2/3 safe · npm run build"). */
+  | {
+      type: "security.review";
+      kind: string;
+      action: string;
+      allowed: boolean;
+      safeCount: number;
+      totalCount: number;
+      summary: string;
+    };
 
 export interface UsageBucket {
   calls: number;

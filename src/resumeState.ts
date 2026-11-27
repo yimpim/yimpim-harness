@@ -39,6 +39,8 @@ export interface ResumeState {
  *  of tries to actually land. */
 export interface PhaseRepairContext {
   editorHowToVerify?: string;
+  /** True when the Editor declared this phase's UI component is not yet wired/reachable until a later phase (preserved across repairs). */
+  uiUnreachable?: boolean;
   repairHistory: string[];
   /** What the Editor (or a Repair) reported differing from a planned assertion, by id. */
   assertionDeltas?: { id: string; action: string; reason: string; replacement?: string }[];

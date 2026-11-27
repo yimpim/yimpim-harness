@@ -132,6 +132,7 @@ import {
   AutonomousVerifier,
   VerificationResult,
   HOW_TO_VERIFY_GOAL_MARKER,
+  isUiUnreachableNote,
   isToolingFailure,
   describeToolingFailure,
   reportsNoTestsFound,
@@ -2775,6 +2776,7 @@ ${instructions}`;
   // goal was necessarily written before any of this code existed. Folded
   // into the goal the Verifier actually checks against, below.
   let editorHowToVerify: string | undefined;
+  let uiUnreachable = false;
   // What the Editor (or a later Repair) reported differing from a planned
   // assertion. In-memory only: a resumed phase re-derives them on its next pass.
   let editorDeltas: AssertionDelta[] = [];
@@ -2997,6 +2999,7 @@ ${instructions}`;
     }
 
     editorHowToVerify = extractHowToVerify(editorResult);
+    uiUnreachable = isUiUnreachableNote(editorHowToVerify) || isUiUnreachableNote(editorResult);
     editorDeltas = mergeDeltas(editorDeltas, extractAssertionDeltas(editorResult));
     editorTestsNotNeeded = extractTestsNotNeeded(editorResult) ?? editorTestsNotNeeded;
   } catch (err: any) {
@@ -3169,6 +3172,7 @@ ${instructions}`;
   // looks, to the next repair call, identical to a totally fresh defect.
   const repairHistory: string[] = resumed ? [...resumed.repairHistory] : [];
   let lastRepairExplanation: string | undefined = resumed?.editorHowToVerify;
+  if (resumed?.uiUnreachable) uiUnreachable = true;
 
   // Saved before the first verification, so a crash or Ctrl-C during it still
   // resumes with what the Editor claimed. editorHowToVerify is left out on
@@ -3206,7 +3210,8 @@ ${instructions}`;
       editorNoOpClaim,
       agentTools.getStagedDeletions(),
       preExistingDirty,
-      verifyOnly
+      verifyOnly,
+      { uiUnreachable }
     );
 
     // Close the loop on the PREVIOUS repair attempt, if there was one: pair
@@ -3224,7 +3229,7 @@ ${instructions}`;
     // a crash or Ctrl-C mid-loop still resumes with whatever was learned up
     // to this point — see savePhaseRepairContext's own comment.
     if (phase.id && !result.passed) {
-      savePhaseRepairContext(repoRoot, phase.id, { editorHowToVerify, repairHistory, assertionDeltas: editorDeltas, testsNotNeeded: editorTestsNotNeeded });
+      savePhaseRepairContext(repoRoot, phase.id, { editorHowToVerify, uiUnreachable, repairHistory, assertionDeltas: editorDeltas, testsNotNeeded: editorTestsNotNeeded });
     }
 
     const usageSoFar = events.usageReport().totals;
@@ -3315,7 +3320,7 @@ ${instructions}`;
         if (hookHowTo) editorHowToVerify = editorHowToVerify ? `${editorHowToVerify}
 
 Test hook just added: ${hookHowTo}` : hookHowTo;
-        if (phase.id) savePhaseRepairContext(repoRoot, phase.id, { editorHowToVerify, repairHistory, assertionDeltas: editorDeltas, testsNotNeeded: editorTestsNotNeeded });
+        if (phase.id) savePhaseRepairContext(repoRoot, phase.id, { editorHowToVerify, uiUnreachable, repairHistory, assertionDeltas: editorDeltas, testsNotNeeded: editorTestsNotNeeded });
         continue;
       } else {
         const note = `Could not verify: ${states.join("; ")}. ${decision.why}`;
@@ -3983,6 +3988,9 @@ ${repairPlan
         // superseding, not appending to, whatever the initial pass said.
         const repaired = extractHowToVerify(repairResult);
         if (repaired) editorHowToVerify = repaired;
+        // Preserve uiUnreachable across REPAIR -> QA cycles so a repair pass fixing a build/test error
+        // does not accidentally re-enable browser screenshot verification on an unmounted component.
+        uiUnreachable = uiUnreachable || isUiUnreachableNote(repaired) || isUiUnreachableNote(repairResult);
         editorDeltas = mergeDeltas(editorDeltas, extractAssertionDeltas(repairResult));
         editorTestsNotNeeded = extractTestsNotNeeded(repairResult) ?? editorTestsNotNeeded;
         lastRepairEdited = agentTools.writesSoFar() !== writesBeforeRepair;
@@ -4009,7 +4017,7 @@ ${repairPlan
         // window where a crash between this repair finishing and the next
         // verification running would lose more than just the not-yet-closed
         // history entry for this one attempt.
-        if (phase.id) savePhaseRepairContext(repoRoot, phase.id, { editorHowToVerify, repairHistory, assertionDeltas: editorDeltas, testsNotNeeded: editorTestsNotNeeded });
+        if (phase.id) savePhaseRepairContext(repoRoot, phase.id, { editorHowToVerify, uiUnreachable, repairHistory, assertionDeltas: editorDeltas, testsNotNeeded: editorTestsNotNeeded });
       } catch (err: any) {
         if (err.message?.startsWith("ESCALATION_NEEDED")) {
           stopReason = "environmental";

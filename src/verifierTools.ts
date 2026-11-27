@@ -111,6 +111,25 @@ export const QA_USAGE_SUBROLES: readonly string[] = ["VERIFIER", "verifier-nav",
  *  calling runVerification — see stableGoalKey below for why this matters. */
 export const HOW_TO_VERIFY_GOAL_MARKER = "\n\nHow to verify (from the engineer who just built this):\n";
 
+const UI_UNREACHABLE_PATTERNS = [
+  /\bnot\s+yet\s+(?:wired|mounted|integrated|connected|rendered|reachable|navigable)\b/i,
+  /\b(?:wired|mounted|integrated|connected|rendered|reachable)\s+(?:in|by|until)\s+(?:a\s+)?(?:later|subsequent|next|future)\s+phase\b/i,
+  /\bnot\s+(?:yet\s+)?reachable\s+in\s+(?:the\s+)?(?:running\s+)?(?:ui|app|browser)\b/i,
+  /\bunmounted\s+(?:component|screen|view)\b/i,
+  /\bbuild-only\s+verification\b/i,
+];
+
+/**
+ * Returns true when an Editor/Repair exit note or howToVerify explicitly states
+ * that the component is not yet wired/mounted/reachable in the running UI until
+ * a later phase, so QA should run build-only verification instead of launching
+ * browser screenshot probes on an unmounted component.
+ */
+export function isUiUnreachableNote(text?: string): boolean {
+  if (!text) return false;
+  return UI_UNREACHABLE_PATTERNS.some((re) => re.test(text));
+}
+
 /**
  * The enriched goal (base + Editor's howToVerify) is genuinely better input
  * for the vision-navigation decision itself — it can mention exactly which
@@ -926,7 +945,13 @@ export class AutonomousVerifier {
      * actual diff to review (see below). Defaults to false so every
      * existing caller keeps the original behavior unchanged.
      */
-    verifyOnly = false
+    verifyOnly = false,
+    /**
+     * When true, the phase's Editor declared the component is not yet wired or
+     * reachable in the running UI until a later phase — preserved across REPAIR
+     * cycles so QA skips browser/UI screenshot probes on an unmounted component.
+     */
+    opts?: { uiUnreachable?: boolean }
   ): Promise<VerificationResult> {
     this.unreachableStates = [];
     // QA never runs through agentLoop.ts's runToolAgent (it's a separate,
@@ -1030,8 +1055,21 @@ export class AutonomousVerifier {
       // the kind of "real issue" that should go back to the editor, not wait
       // on a human at the terminal. verifyOnly forces this probe's UI-nav
       // hunt on even with no diff to classify (see runtimeVisualGate).
+      const uiUnreachable = Boolean(opts?.uiUnreachable) || isUiUnreachableNote(phaseGoal);
       if (!docOnly && !ledger.hasBlockingFailure()) {
-        await this.runtimeVisualGate(phaseGoal, profile, caps, ledger, screenshotDir, change, verifyOnly);
+        if (uiUnreachable && !verifyOnly) {
+          ledger.add({
+            tier: "visual",
+            gate: "visual QA",
+            method: "inspected",
+            status: "pass",
+            blocking: false,
+            detail:
+              "skipped browser/UI screenshot verification — component is not yet wired/reachable in the running UI until a later phase (build-only verification preserved)",
+          });
+        } else {
+          await this.runtimeVisualGate(phaseGoal, profile, caps, ledger, screenshotDir, change, verifyOnly);
+        }
       }
 
       // Per-assertion verdicts by ID, from everything gathered above. Skipped

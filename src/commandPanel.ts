@@ -18,6 +18,13 @@ import path from "path";
 import crypto from "crypto";
 import { lifecycleScripts, npmrcScriptOverride } from "./commandPolicy.js";
 import { alwaysAsk, dangerIn, injectionIn, filesToRead, type ReviewRequest, type ReviewOutcome, type ReviewCall, type ActionReview } from "./commandReview.js";
+import { events } from "./events.js";
+
+/** Concise one-line summary for remote SECURITY cards/events, e.g. "2/3 safe · npm run build". */
+export function formatSecuritySummary(safeCount: number, totalCount: number, action: string): string {
+  const compactAction = String(action ?? "").replace(/\s+/g, " ").trim().slice(0, 120) || "action";
+  return `${safeCount}/${totalCount} safe · ${compactAction}`;
+}
 
 export interface Judge {
   model: string;
@@ -211,10 +218,20 @@ export function makePanel(judges: Judge[]): Panel {
         }
       })
     );
-    const allSafe = votes.length > 0 && votes.every((v) => v.verdict === "safe");
+    const safeCount = votes.filter((v) => v.verdict === "safe").length;
+    const allSafe = votes.length > 0 && safeCount === votes.length;
     const outcome: ReviewOutcome = allSafe
       ? { allow: true, why: `${votes.length} of ${votes.length} security judges said safe: ${votes[0].reason || "reviewed and judged safe"}` }
       : { allow: false, why: whyNot(votes) };
+    events.emit({
+      type: "security.review",
+      kind,
+      action: label,
+      allowed: outcome.allow,
+      safeCount,
+      totalCount: votes.length,
+      summary: formatSecuritySummary(safeCount, votes.length, label),
+    });
     auditLog(repoRoot, { kind, action: label, allowed: outcome.allow, votes: votes.map((v) => ({ model: v.model, verdict: v.verdict, reason: v.reason })) });
     // A judge that could not answer is not remembered, so the next ask tries again.
     if (outcome.allow || votes.every((v) => v.verdict !== "none")) memo.set(key, outcome);

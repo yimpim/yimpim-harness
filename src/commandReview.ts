@@ -15,6 +15,7 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { events } from "./events.js";
 import { executableName, isReadOnlyGit } from "./commandPolicy.js";
 
 export interface ReviewRequest {
@@ -247,6 +248,17 @@ export function makeCommandReviewer(call: ReviewCall): (req: ReviewRequest) => P
     }
     // A failed review is not remembered, so the next ask tries it again.
     if (outcome.allow || !/could not run|no usable answer/.test(outcome.why)) memo.set(key, outcome);
+    const safeCount = outcome.allow ? 1 : 0;
+    const compactAction = String(req.label ?? "").replace(/\s+/g, " ").trim().slice(0, 120) || "command";
+    events.emit({
+      type: "security.review",
+      kind: "command",
+      action: req.label,
+      allowed: outcome.allow,
+      safeCount,
+      totalCount: 1,
+      summary: `${safeCount}/1 safe · ${compactAction}`,
+    });
     return outcome;
   };
 }

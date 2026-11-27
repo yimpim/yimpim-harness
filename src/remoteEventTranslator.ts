@@ -276,6 +276,21 @@ export function translateForRemote(
         },
       };
     }
+    case "security.review":
+      return {
+        kind: "security.review",
+        payload: {
+          taskId,
+          workerId,
+          ...(currentPhase?.id ? { parentPhaseId: currentPhase.id, phaseId: currentPhase.id } : {}),
+          kind: event.kind,
+          action: event.action,
+          allowed: event.allowed,
+          safeCount: event.safeCount,
+          totalCount: event.totalCount,
+          summary: event.summary,
+        },
+      };
     default:
       return undefined;
   }
