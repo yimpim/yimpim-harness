@@ -7,6 +7,15 @@ import { trackCall } from "./liveCalls.js";
 import { redactMessages } from "./redact.js";
 import { tuneRequest, isReasoningRejected, isPriceCapMiss } from "./requestTuning.js";
 
+/**
+ * Unified OpenRouter app attribution headers sent on every outbound request to openrouter.ai
+ * (chat completions, model catalog, and API key checks) so all usage reports under one app.
+ */
+export const OPENROUTER_APP_HEADERS = {
+  "HTTP-Referer": "https://yimpim.com",
+  "X-Title": "Yimpim",
+} as const;
+
 export function supportsExplicitPromptCaching(model: string): boolean {
   return /^anthropic\//i.test(model) || /\bclaude\b/i.test(model);
 }
@@ -700,8 +709,7 @@ export class OpenRouterClient {
               headers: {
                 Authorization: `Bearer ${this.apiKey}`,
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/yimpim/agent",
-                "X-Title": "Local Code Agent",
+                ...OPENROUTER_APP_HEADERS,
               },
               body: JSON.stringify(bodyPayload),
               signal: controller.signal,

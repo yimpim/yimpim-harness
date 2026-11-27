@@ -4,6 +4,7 @@
  */
 
 import { scrubCredentials } from "../redact.js";
+import { OPENROUTER_APP_HEADERS } from "../openrouter.js";
 
 export const AUTH_KEY_URL = "https://openrouter.ai/api/v1/auth/key";
 
@@ -64,7 +65,7 @@ export async function checkKey(
   let res: Response;
   try {
     res = await doFetch(AUTH_KEY_URL, {
-      headers: { authorization: `Bearer ${key.trim()}` },
+      headers: { authorization: `Bearer ${key.trim()}`, ...OPENROUTER_APP_HEADERS },
       signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
     });
   } catch (err: any) {

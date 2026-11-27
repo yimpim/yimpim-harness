@@ -6,6 +6,8 @@
  * exactly what that key can actually reach — and a slug can never be "wrong".
  */
 
+import { OPENROUTER_APP_HEADERS } from "./openrouter.js";
+
 export interface CatalogModel {
   id: string;
   name: string;
@@ -268,7 +270,7 @@ function perMillion(raw: unknown): number | null {
 
 export async function fetchCatalog(apiKey: string): Promise<CatalogModel[]> {
   const res = await fetch("https://openrouter.ai/api/v1/models", {
-    headers: { authorization: `Bearer ${apiKey}` },
+    headers: { authorization: `Bearer ${apiKey}`, ...OPENROUTER_APP_HEADERS },
     signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) {
