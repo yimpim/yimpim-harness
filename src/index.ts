@@ -5310,7 +5310,7 @@ async function main(): Promise<void> {
    * gets for a build: task.start, a worker card per model call (runLabeledCompletion emits those), and task.end carrying the
    * exact tokens and cost. The lifetime ledger attributes the calls to this task too. Inside a running task it adds nothing.
    */
-  let closeOwnTask: ((state: "done" | "failed") => void) | undefined;
+  let closeOwnTask: ((state: "done" | "failed") => Promise<void>) | undefined;
   // Where the usage counters stood when the request being handled was typed, BEFORE the router (and the existence check) spent anything.
   // A job's cost is measured from here, so those calls are part of what the request cost, not lost between tasks.
   let requestUsageStart: UsageReport | null = null;
@@ -5348,7 +5348,7 @@ async function main(): Promise<void> {
       if (spent) console.log(spent);
       costShownForRequest = true;
       requestUsageStart = null;
-      closeOwnTask?.(state);
+      await closeOwnTask?.(state);
     }
   };
 
@@ -5714,26 +5714,47 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
   // between-segment instead of staying in this task's file. Declared here
   // (above the try below, not inside it) so both the success path and the
   // catch block beside that try can reach it.
-  const endTask = (state: "done" | "failed" | "aborted", taskUsage: UsageReport) => {
+  let lastEndedTaskId = "";
+  const endTask = async (state: "done" | "failed" | "aborted", taskUsage: UsageReport): Promise<void> => {
+    if (currentTaskId && lastEndedTaskId === currentTaskId) return;
+    if (currentTaskId) lastEndedTaskId = currentTaskId;
     // A task that failed or was stopped mid-planning still closes its Planner card, so no worker is left open on the phone.
     closePlanning(state === "done" ? "completed" : state);
+    const totalPhases = activePlan?.phases.length ?? 0;
+    const phasesCompleted = completedPhaseIds.length;
+    const cost = taskUsage.totals.costKnown ? taskUsage.totals.cost : undefined;
+    const status: "completed" | "failed" | "stopped" =
+      state === "done" ? "completed" : state === "aborted" ? "stopped" : "failed";
     remote?.push("task.end", {
+      type: "task_end",
+      status,
       taskId: currentTaskId,
       state,
+      phasesCompleted,
+      totalPhases,
+      tokens: taskUsage.totals.total,
       tokensUsed: taskUsage.totals.total,
-      ...(taskUsage.totals.costKnown ? { costUsd: taskUsage.totals.cost } : {}),
+      ...(cost !== undefined ? { cost, costUsd: cost } : {}),
     });
     taskRunning = false;
     // Closes the task's ledger record, then tells a paired phone the new
     // lifetime total — after task.end, so the phone sees it as the last word.
     usageLedger().endTask(currentTaskId, state);
     remote?.pushUsageTotals(toUsageWire(usageLedger().snapshot()));
+    // Reconcile status heartbeat so even a dropped packet converges on the next poll.
+    remote?.updateStatus({
+      state,
+      taskRunning: false,
+      taskStatus: state === "done" ? "completed" : "failed",
+      ...buildUsageStatusPatch(),
+    });
     // Otherwise an /ask asked during the idle gap before the NEXT task starts
     // (ADVISOR's own agent.start, kept for old-phone compat) inherits this
     // just-finished task's phase context on its worker.start — the exact same
     // kind of stale-leftover leak currentTaskId's own mint-time reset already
     // guards against, just caught one task-boundary later.
     currentPhaseForEvents = undefined;
+    await remote?.flush();
     remote?.notify("done");
   };
   closeOwnTask = (state) => endTask(state, events.usageDelta(currentTaskUsageStart));
@@ -7504,7 +7525,7 @@ The user wants you to decide, not ask: ${d.choice}`);
   clearLastFailure(repoRoot);
   // Only now, after every one of this task's own closing lines above has
   // been printed — see endTask's own comment for why task.end has to come last.
-  endTask("done", events.usageDelta(currentTaskUsageStart));
+  await endTask("done", events.usageDelta(currentTaskUsageStart));
 
   await confirmStagedDeletions(agentTools, repoRoot, runId, remote);
 
@@ -7670,7 +7691,12 @@ The user wants you to decide, not ask: ${d.choice}`);
     return;
 
     } catch (err: any) {
-      if (!(err instanceof AbortedError) && !(err instanceof TaskFailedError)) throw err;
+      if (!(err instanceof AbortedError) && !(err instanceof TaskFailedError)) {
+        if (taskRunning) {
+          await endTask("failed", events.usageDelta(currentTaskUsageStart));
+        }
+        throw err;
+      }
       setStatusLine(undefined);
       runningAgentLabels.length = 0;
       statusBase = undefined;
@@ -7792,7 +7818,7 @@ The user wants you to decide, not ask: ${d.choice}`);
       // instead). Pushed only now, after the usage summary and manual steps
       // above — see endTask's own comment for why task.end has to come last,
       // not right after updateStatus.
-      endTask(err instanceof AbortedError ? "aborted" : "failed", taskUsage);
+      await endTask(err instanceof AbortedError ? "aborted" : "failed", taskUsage);
 
       await confirmStagedDeletions(agentTools, repoRoot, runId, remote);
 

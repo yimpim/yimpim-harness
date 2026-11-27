@@ -433,6 +433,8 @@ export class RemoteSession {
       ...(hello?.projectName ? { projectName: hello.projectName } : {}),
       ...(hello?.cwd ? { cwd: hello.cwd } : {}),
       state: "idle",
+      taskRunning: false,
+      taskStatus: "idle",
       phases: [],
       pendingQuestions: [],
       tokensUsed: 0,
@@ -772,9 +774,74 @@ export class RemoteSession {
     this.push("model.catalog_unavailable", { role, reason });
   }
 
+  private deriveTaskStatusFields(
+    state: RemoteStatus["state"]
+  ): { taskRunning: boolean; taskStatus: "idle" | "running" | "completed" | "failed" } {
+    switch (state) {
+      case "planning":
+      case "running":
+      case "awaiting-input":
+        return { taskRunning: true, taskStatus: "running" };
+      case "done":
+        return { taskRunning: false, taskStatus: "completed" };
+      case "failed":
+      case "aborted":
+        return { taskRunning: false, taskStatus: "failed" };
+      case "idle":
+      default:
+        return { taskRunning: false, taskStatus: "idle" };
+    }
+  }
+
   updateStatus(patch: Partial<RemoteStatus>): void {
-    this.status = { ...this.status, ...patch, updatedAt: new Date().toISOString() };
+    const nextState = patch.state ?? this.status.state;
+    const derived = this.deriveTaskStatusFields(nextState);
+    this.status = {
+      ...this.status,
+      ...patch,
+      taskRunning: patch.taskRunning ?? derived.taskRunning,
+      taskStatus: patch.taskStatus ?? derived.taskStatus,
+      updatedAt: new Date().toISOString(),
+    };
     this.push("status", { status: this.status });
+  }
+
+  /**
+   * Emit an explicit terminal task-completion event (`task.end` with `type: "task_end"`,
+   * `status: "completed" | "failed" | "stopped"`, final phase counts, tokens, and cost),
+   * reconcile status heartbeat fields (`taskRunning: false`, `taskStatus`), and immediately
+   * flush to the broker without waiting for the periodic timer tick.
+   */
+  async emitTaskEnd(opts: {
+    taskId: string;
+    state: "done" | "failed" | "aborted";
+    phasesCompleted: number;
+    totalPhases: number;
+    tokens: number;
+    cost?: number;
+  }): Promise<void> {
+    if (!this.connected) return;
+    const status: "completed" | "failed" | "stopped" =
+      opts.state === "done" ? "completed" : opts.state === "aborted" ? "stopped" : "failed";
+    this.push("task.end", {
+      type: "task_end",
+      status,
+      taskId: opts.taskId,
+      state: opts.state,
+      phasesCompleted: opts.phasesCompleted,
+      totalPhases: opts.totalPhases,
+      tokens: opts.tokens,
+      tokensUsed: opts.tokens,
+      ...(opts.cost !== undefined ? { cost: opts.cost, costUsd: opts.cost } : {}),
+    });
+    this.updateStatus({
+      state: opts.state,
+      taskRunning: false,
+      taskStatus: opts.state === "done" ? "completed" : "failed",
+      tokensUsed: opts.tokens,
+      ...(opts.cost !== undefined ? { costUsd: opts.cost } : {}),
+    });
+    await this.flush();
   }
 
   askQuestion(q: PendingQuestion): void {
@@ -817,45 +884,89 @@ export class RemoteSession {
     return batch;
   }
 
+  private inFlightFlush?: Promise<void>;
+
+  private async flushOneBatch(timeoutMs = 15_000): Promise<boolean> {
+    if (this.stopped) return false;
+    if (this.outbox.length === 0 && !this.telemetry.pending) return true;
+    const batch = this.drainOutboxBatch();
+    const metrics = this.telemetry.drain();
+    try {
+      const res = await fetch(`${this.base()}/v1/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.agentToken}` },
+        body: JSON.stringify({ sessionId: this.sessionId, events: batch, ...(metrics ? { metrics } : {}) }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const endedBy = await this.endedReasonOf(res);
+      if (endedBy !== undefined) {
+        await this.handleEnded(endedBy);
+        return false;
+      }
+      if (!res.ok) {
+        // Non-2xx (500/502/503/429/413): re-queue so events and metrics are not silently dropped.
+        // Exception: a single event rejected with 413 Payload Too Large would wedge the queue forever.
+        if (res.status === 413 && batch.length <= 1) {
+          console.warn(`[REMOTE] ⚠️ Dropping oversized event rejected with HTTP 413 (${batch[0]?.data.length ?? 0} bytes).`);
+          this.telemetry.restore(metrics);
+        } else {
+          this.outbox.unshift(...batch);
+          this.telemetry.restore(metrics);
+        }
+        this.flushFailures++;
+        return false;
+      }
+      this.flushFailures = 0;
+      return true;
+    } catch {
+      // Put them back; a dropped network must not lose events.
+      this.outbox.unshift(...batch);
+      this.telemetry.restore(metrics);
+      this.flushFailures++;
+      return false;
+    }
+  }
+
+  /**
+   * Immediately flush all currently queued events/metrics to the broker without waiting
+   * for the periodic 900ms flush timer. Coalesces with any in-flight flush and never throws.
+   */
+  async flush(): Promise<void> {
+    if (!this.connected || this.stopped) return;
+    if (this.inFlightFlush) {
+      await this.inFlightFlush.catch(() => {});
+    }
+    if (this.stopped || (this.outbox.length === 0 && !this.telemetry.pending)) return;
+    const run = (async () => {
+      const deadline = Date.now() + 5_000;
+      while (!this.stopped && (this.outbox.length > 0 || this.telemetry.pending) && Date.now() < deadline) {
+        const ok = await this.flushOneBatch(Math.max(1_000, deadline - Date.now()));
+        if (!ok) break;
+      }
+    })();
+    this.inFlightFlush = run;
+    try {
+      await run;
+    } finally {
+      if (this.inFlightFlush === run) this.inFlightFlush = undefined;
+    }
+  }
+
   private beginFlushing(): void {
     const tick = async () => {
       if (this.stopped) return;
       if (this.outbox.length > 0 || this.telemetry.pending) {
-        const batch = this.drainOutboxBatch();
-        const metrics = this.telemetry.drain();
-        try {
-          const res = await fetch(`${this.base()}/v1/events`, {
-            method: "POST",
-            headers: { "content-type": "application/json", authorization: `Bearer ${this.agentToken}` },
-            body: JSON.stringify({ sessionId: this.sessionId, events: batch, ...(metrics ? { metrics } : {}) }),
-            signal: AbortSignal.timeout(15_000),
-          });
-          const endedBy = await this.endedReasonOf(res);
-          if (endedBy !== undefined) {
-            await this.handleEnded(endedBy);
-            return;
+        if (!this.inFlightFlush) {
+          const run = this.flushOneBatch(15_000).then(() => {});
+          this.inFlightFlush = run;
+          try {
+            await run;
+          } finally {
+            if (this.inFlightFlush === run) this.inFlightFlush = undefined;
           }
-          if (!res.ok) {
-            // Non-2xx (500/502/503/429/413): re-queue so events and metrics are not silently dropped.
-            // Exception: a single event rejected with 413 Payload Too Large would wedge the queue forever.
-            if (res.status === 413 && batch.length <= 1) {
-              console.warn(`[REMOTE] ⚠️ Dropping oversized event rejected with HTTP 413 (${batch[0]?.data.length ?? 0} bytes).`);
-              this.telemetry.restore(metrics);
-            } else {
-              this.outbox.unshift(...batch);
-              this.telemetry.restore(metrics);
-            }
-            this.flushFailures++;
-          } else {
-            this.flushFailures = 0;
-          }
-        } catch {
-          // Put them back; a dropped network must not lose events.
-          this.outbox.unshift(...batch);
-          this.telemetry.restore(metrics);
-          this.flushFailures++;
         }
       }
+      if (this.stopped) return;
       const nextDelay =
         this.flushFailures === 0
           ? 900

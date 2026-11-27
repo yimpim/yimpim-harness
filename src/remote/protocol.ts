@@ -211,6 +211,10 @@ export interface RemoteStatus {
   /** The working directory of this terminal. Sealed: the relay never sees a path. */
   cwd?: string;
   state: "idle" | "planning" | "running" | "awaiting-input" | "done" | "failed" | "aborted";
+  /** Explicit task-level run flag carried on every status heartbeat so transient dropped packets reconcile on the next poll. */
+  taskRunning?: boolean;
+  /** Explicit task-level terminal/active status carried on every status heartbeat for reliable reconciliation. */
+  taskStatus?: "idle" | "running" | "completed" | "failed";
   goal?: string;
   phases: { id: string; name: string; status: string }[];
   currentPhase?: string;
