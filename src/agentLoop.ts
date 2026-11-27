@@ -3,7 +3,7 @@ import path from "node:path";
 import { OpenRouterClient, FunctionTool, ChatMessage } from "./openrouter.js";
 import { RepoTools } from "./repoTools.js";
 import { AgentConfig } from "./config.js";
-import { AgentTools, TOOLS_SCHEMA, PendingQuestion } from "./agentTools.js";
+import { AgentTools, TOOLS_SCHEMA, PLANNER_TOOLS_SCHEMA, PendingQuestion } from "./agentTools.js";
 import { EDITOR_SYSTEM, DISCOVERY_SYSTEM, ADVISOR_SYSTEM, PLANNER_SYSTEM, PLANNER_VERIFY_SYSTEM } from "./prompts.js";
 import { events } from "./events.js";
 import { runControl, AbortedError, askAnywhere } from "./remote/control.js";
@@ -229,8 +229,12 @@ export function buildContextualSystemPrompt(
   }
 
   // 2. Inject .agent/repo_map.json to eliminate blind exploration
+  // Planner receives ONE clean, alphabetically sorted, compact copy of repo_map and nav_map
+  // in its initial user context (via readPlannerMetadata), so skip injecting them into
+  // Planner's system prompt to avoid duplicate dumps and system-prompt cache busting.
+  const isPlannerRole = agentName === "PLANNER" || agentName === "planner";
   const repoMapPath = path.join(repoRoot, ".agent", "repo_map.json");
-  if (fsSync.existsSync(repoMapPath)) {
+  if (!isPlannerRole && fsSync.existsSync(repoMapPath)) {
     try {
       const raw = fsSync.readFileSync(repoMapPath, "utf-8");
       const map = JSON.parse(raw);
@@ -268,7 +272,7 @@ export function buildContextualSystemPrompt(
   // start instead of guessing blind — it still confirms every step visually,
   // this only narrows what it tries first.
   const navMapPath = path.join(repoRoot, ".agent", "nav_map.json");
-  if (fsSync.existsSync(navMapPath)) {
+  if (!isPlannerRole && fsSync.existsSync(navMapPath)) {
     try {
       const raw = fsSync.readFileSync(navMapPath, "utf-8");
       const map = JSON.parse(raw);
@@ -370,7 +374,9 @@ export async function runToolAgent(options: AgentRunOptions): Promise<string> {
 
 async function runToolAgentConversation(options: AgentRunOptions): Promise<string> {
   const { prompt, client, config, agentTools, models, agentName, repo } = options;
-  let availableTools = options.tools ?? TOOLS_SCHEMA;
+  // REPAIR_PLANNER is a bounded, read-only diagnosis role: default to PLANNER_TOOLS_SCHEMA
+  // when the caller omits `tools` rather than handing it the full 17-tool write/exec TOOLS_SCHEMA.
+  let availableTools = options.tools ?? (agentName === "REPAIR_PLANNER" ? PLANNER_TOOLS_SCHEMA : TOOLS_SCHEMA);
   // The repair Planner diagnoses a failure from the evidence it is given and
   // can read the code. It must never hand the question to a person, who cannot
   // know what the harness saw. So it has no way to ask (see the refusal below).
@@ -816,7 +822,7 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
           toolOutput = await agentTools.registerScreenNav(args);
         } else if (name === "read_file") {
           readOrSearchStreak++;
-          const epoch = agentTools.filesWrittenThisPhase().length;
+          const epoch = agentTools.writesSoFar();
           const keyOf = (p: string, a?: number, b?: number) => `${epoch}|${String(p).replace(/\\/g, "/")}|${a ?? ""}-${b ?? ""}`;
           const again = (list: string[]) =>
             `You already read ${list.join(", ")} in full earlier in this conversation (same range) and nothing has been edited since, so it is in your context above and is not sent again. ` +

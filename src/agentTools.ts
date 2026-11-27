@@ -860,6 +860,14 @@ export const PLANNER_TOOLS_SCHEMA = [
   },
 ];
 
+export const SEARCH_CODE_TOOL = TOOLS_SCHEMA.find((t) => t.function.name === "search_code")!;
+
+/**
+ * Bounded read-only tool schema for REPAIR_PLANNER when widened search is needed
+ * (runtime/visual failure or build failure with no external paths named by compiler).
+ */
+export const REPAIR_PLANNER_WIDENED_TOOLS_SCHEMA = [...PLANNER_TOOLS_SCHEMA, SEARCH_CODE_TOOL];
+
 export interface PendingQuestion {
   id: string;
   topic: string;
@@ -1481,8 +1489,13 @@ export class AgentTools {
     const key = this.assertPlannerFileAllowed(filePath);
 
     const name = symbol.trim();
-    const content = await this.readFile(key);
-    const lines = content.split("\n");
+    // Read raw file directly (like getFileOutline) instead of calling this.readFile(key):
+    // readFile() records lines 1..wholeLines in readLedger even though we only return <=120 lines,
+    // which would poison subsequent get_symbol_definition or ranged read_file calls on this file.
+    this.filesInspected.add(key);
+    const absPath = this.resolveSafeReadPath(key);
+    const content = await fs.readFile(absPath, "utf-8");
+    const lines = content.split(/\r?\n/);
 
     // A declaration line mentions the symbol AND looks like a declaration —
     // requiring both is what keeps a mere call site (`await agentTools.patchFile(`)
@@ -1519,10 +1532,14 @@ export class AgentTools {
 
     const MAX_DEFINITION_LINES = 120;
     let body = lines.slice(start, end + 1);
+    const shownEndLine = Math.min(end + 1, start + MAX_DEFINITION_LINES);
     if (body.length > MAX_DEFINITION_LINES) {
       body = body.slice(0, MAX_DEFINITION_LINES).concat(
         `... [definition truncated at ${MAX_DEFINITION_LINES} lines — read ${key} for the rest]`
       );
+    }
+    if (this.readStage) {
+      this.readLedger.record(this.readStage, key, start + 1, shownEndLine);
     }
 
     return `${key}:L${start + 1} — ${name}\n${body.join("\n")}`;

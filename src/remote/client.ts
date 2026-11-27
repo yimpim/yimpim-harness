@@ -147,6 +147,8 @@ const NOT_PERSISTED_KINDS = new Set([
 const POLL_BACKOFF_MS = [1000, 2000, 5000, 10_000, 20_000];
 /** ~1 minute of backoff: well past any restart, so a warning means it is real. */
 const UNAUTHORIZED_POLLS_BEFORE_WARNING = 6;
+/** Stop polling after repeated unknown 401s so a dead session doesn't spam the relay forever. */
+const UNAUTHORIZED_POLLS_BEFORE_STOP = 10;
 // Same raw chunk size the phone itself uses for uploads,
 // so both directions behave the same way under the broker's body-size limit.
 const SCREENSHOT_CHUNK_BYTES = 48 * 1024;
@@ -255,6 +257,8 @@ export class RemoteSession {
   private hello?: SessionHello;
   private pollTimer?: NodeJS.Timeout;
   private flushTimer?: NodeJS.Timeout;
+  private pollAbort?: AbortController;
+  private flushFailures = 0;
   private handlers?: RemoteHandlers;
   private seenCommands = new Set<string>();
 
@@ -642,20 +646,25 @@ export class RemoteSession {
     }).catch(() => {});
   }
 
+  private drainOutboxBatch(): Envelope[] {
+    const batch: Envelope[] = [];
+    let bytes = 0;
+    while (this.outbox.length > 0 && batch.length < 100) {
+      const nextSize = this.outbox[0].data.length;
+      // Always take at least one event even if it alone busts the budget
+      // (shouldn't happen at this chunk size, but must never stall).
+      if (batch.length > 0 && bytes + nextSize > MAX_BATCH_BYTES) break;
+      batch.push(this.outbox.shift()!);
+      bytes += nextSize;
+    }
+    return batch;
+  }
+
   private beginFlushing(): void {
     const tick = async () => {
       if (this.stopped) return;
       if (this.outbox.length > 0 || this.telemetry.pending) {
-        const batch: Envelope[] = [];
-        let bytes = 0;
-        while (this.outbox.length > 0 && batch.length < 100) {
-          const nextSize = this.outbox[0].data.length;
-          // Always take at least one event even if it alone busts the budget
-          // (shouldn't happen at this chunk size, but must never stall).
-          if (batch.length > 0 && bytes + nextSize > MAX_BATCH_BYTES) break;
-          batch.push(this.outbox.shift()!);
-          bytes += nextSize;
-        }
+        const batch = this.drainOutboxBatch();
         const metrics = this.telemetry.drain();
         try {
           const res = await fetch(`${this.base()}/v1/events`, {
@@ -669,13 +678,32 @@ export class RemoteSession {
             await this.handleEnded(endedBy);
             return;
           }
+          if (!res.ok) {
+            // Non-2xx (500/502/503/429/413): re-queue so events and metrics are not silently dropped.
+            // Exception: a single event rejected with 413 Payload Too Large would wedge the queue forever.
+            if (res.status === 413 && batch.length <= 1) {
+              console.warn(`[REMOTE] ⚠️ Dropping oversized event rejected with HTTP 413 (${batch[0]?.data.length ?? 0} bytes).`);
+              this.telemetry.restore(metrics);
+            } else {
+              this.outbox.unshift(...batch);
+              this.telemetry.restore(metrics);
+            }
+            this.flushFailures++;
+          } else {
+            this.flushFailures = 0;
+          }
         } catch {
           // Put them back; a dropped network must not lose events.
           this.outbox.unshift(...batch);
           this.telemetry.restore(metrics);
+          this.flushFailures++;
         }
       }
-      this.flushTimer = setTimeout(tick, 900);
+      const nextDelay =
+        this.flushFailures === 0
+          ? 900
+          : Math.min(15_000, 900 * Math.pow(2, Math.min(this.flushFailures, 5)));
+      this.flushTimer = setTimeout(tick, nextDelay);
       this.flushTimer.unref?.();
     };
     void tick();
@@ -686,14 +714,21 @@ export class RemoteSession {
   private beginPolling(): void {
     const tick = async () => {
       if (this.stopped) return;
+      const pollAbort = new AbortController();
+      this.pollAbort = pollAbort;
       try {
+        const signal =
+          typeof AbortSignal.any === "function"
+            ? AbortSignal.any([pollAbort.signal, AbortSignal.timeout(40_000)])
+            : pollAbort.signal;
         const res = await fetch(
           `${this.base()}/v1/commands?sessionId=${encodeURIComponent(this.sessionId)}`,
           {
             headers: { authorization: `Bearer ${this.agentToken}` },
-            signal: AbortSignal.timeout(40_000),
+            signal,
           }
         );
+        if (this.stopped) return;
         if (res.ok) {
           const body: any = await res.json();
           if (body.ended) {
@@ -725,14 +760,23 @@ export class RemoteSession {
                 `[REMOTE] ⚠️ The relay no longer recognises this session. Run /remote-control to pair your phone again.`
               );
             }
+            if (this.unauthorizedPolls >= UNAUTHORIZED_POLLS_BEFORE_STOP) {
+              this.stopped = true;
+              if (this.flushTimer) clearTimeout(this.flushTimer);
+              return;
+            }
           } else {
             this.unauthorizedPolls = 0;
           }
         }
       } catch {
+        if (this.stopped) return;
         this.failures++;
+      } finally {
+        if (this.pollAbort === pollAbort) this.pollAbort = undefined;
       }
 
+      if (this.stopped) return;
       const delay = this.failures === 0 ? 0 : POLL_BACKOFF_MS[Math.min(this.failures - 1, POLL_BACKOFF_MS.length - 1)];
       this.pollTimer = setTimeout(tick, delay);
       this.pollTimer.unref?.();
@@ -897,26 +941,34 @@ export class RemoteSession {
     // exact session right now and can use the signal.
     this.push("session.end", { reason });
 
-    // Best-effort final flush so the phone sees why the session ended.
-    if (this.outbox.length > 0 || this.telemetry.pending) {
+    // Cancel timers and any in-flight 40s command long-poll immediately so teardown never hangs.
+    this.stopped = true;
+    if (this.pollTimer) clearTimeout(this.pollTimer);
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.pollAbort?.abort();
+
+    // Best-effort final flush respecting MAX_BATCH_BYTES and the 100-event cap, within a bounded deadline.
+    const flushDeadline = Date.now() + 4_000;
+    while ((this.outbox.length > 0 || this.telemetry.pending) && Date.now() < flushDeadline) {
+      const batch = this.drainOutboxBatch();
+      const metrics = this.telemetry.drain();
+      const remainingMs = Math.max(500, flushDeadline - Date.now());
       try {
-        const metrics = this.telemetry.drain();
-        await fetch(`${this.base()}/v1/events`, {
+        const res = await fetch(`${this.base()}/v1/events`, {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${this.agentToken}` },
           body: JSON.stringify({
             sessionId: this.sessionId,
-            events: this.outbox.splice(0),
+            events: batch,
             ...(metrics ? { metrics } : {}),
           }),
-          signal: AbortSignal.timeout(5000),
+          signal: AbortSignal.timeout(remainingMs),
         });
-      } catch {}
+        if (!res.ok) break;
+      } catch {
+        break;
+      }
     }
-
-    this.stopped = true;
-    if (this.pollTimer) clearTimeout(this.pollTimer);
-    if (this.flushTimer) clearTimeout(this.flushTimer);
 
     // Delete the session on the broker right now rather than leaving it for
     // the 12h TTL sweep — otherwise a re-pairing agent's OLD session keeps

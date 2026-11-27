@@ -196,6 +196,38 @@ export class RunLock {
     }
   }
 
+  private shutdownHooks = new Set<() => Promise<void> | void>();
+  private shuttingDown = false;
+
+  /**
+   * Register an async/sync teardown hook (e.g. RemoteSession.stop) to run
+   * before lock release and process.exit on SIGINT/SIGTERM/SIGHUP/SIGBREAK.
+   * Returns an unregister function so re-pairing never leaks listeners.
+   */
+  registerShutdownHook(fn: () => Promise<void> | void): () => void {
+    this.shutdownHooks.add(fn);
+    return () => {
+      this.shutdownHooks.delete(fn);
+    };
+  }
+
+  private async runShutdownHooks(timeoutMs = 2_500): Promise<void> {
+    if (this.shutdownHooks.size === 0) return;
+    const hooks = [...this.shutdownHooks];
+    const work = Promise.allSettled(
+      hooks.map(async (fn) => {
+        await fn();
+      })
+    );
+    await Promise.race([
+      work,
+      new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, timeoutMs);
+        t.unref?.();
+      }),
+    ]);
+  }
+
   private installCleanup(): void {
     if (this.cleanupBound) return;
     this.cleanupBound = true;
@@ -204,10 +236,19 @@ export class RunLock {
 
     process.once("exit", release);
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"] as const) {
-      process.once(signal, () => {
-        release();
-        // Re-raise with the conventional exit code so Ctrl-C still feels normal.
-        process.exit(signal === "SIGINT" ? 130 : 143);
+      process.on(signal, () => {
+        const code = signal === "SIGINT" ? 130 : 143;
+        if (this.shuttingDown) {
+          // Second signal forces immediate exit.
+          release();
+          process.exit(code);
+        }
+        this.shuttingDown = true;
+        void this.runShutdownHooks().finally(() => {
+          release();
+          // Re-raise with the conventional exit code so Ctrl-C still feels normal.
+          process.exit(code);
+        });
       });
     }
     process.once("uncaughtException", (err) => {

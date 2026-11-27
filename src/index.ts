@@ -67,7 +67,7 @@ import { panelReviewerFor } from "./securityPanel.js";
 import { isScratchPath } from "./scratch.js";
 import { runSecurityAudit } from "./securityAudit.js";
 import { existingDirOnly, existingFilesOnly, projectLayout, renderLayout } from "./projectLayout.js";
-import { loadRepoMap, recordConfirmedFindings } from "./repoMap.js";
+import { compactRepoMapView, loadRepoMap, recordConfirmedFindings } from "./repoMap.js";
 import { describeSync, syncRepoMap } from "./repoMapSync.js";
 import { buildPhaseProgress, renderProgressNote, PhaseProgress } from "./progressNote.js";
 import { archiveFinishedRoadmap, attachTaskToUnit, builtByUnits, loadRoadmap, nextUnits, onRoadmapChanged, progress as roadmapProgress, renderRoadmap, roadmapWire, saveRoadmap } from "./roadmap.js";
@@ -145,10 +145,10 @@ import {
   failureSignature, isVisualOnlyFailure, evaluateRepairProgress, failuresUnrelatedToChange, buildWidenedScopeSection, computeRepairPlannerMaxRounds,
   extractPitfallSummary,
 } from "./repairPolicy.js";
-import { AgentTools, plannerReadBudget, READ_ONLY_TOOLS_SCHEMA, PLANNER_TOOLS_SCHEMA, DISCOVERY_TOOLS_SCHEMA, TOOLS_SCHEMA, REPAIR_RUN_TEST_TOOL, ManualStep } from "./agentTools.js";
+import { AgentTools, plannerReadBudget, READ_ONLY_TOOLS_SCHEMA, PLANNER_TOOLS_SCHEMA, REPAIR_PLANNER_WIDENED_TOOLS_SCHEMA, DISCOVERY_TOOLS_SCHEMA, TOOLS_SCHEMA, REPAIR_RUN_TEST_TOOL, ManualStep } from "./agentTools.js";
 import { testTierContext } from "./repairTestContext.js";
 import { repairRunTestFor, REPAIR_RUN_TEST_NOTE } from "./repairRunTest.js";
-import { extractTaskFindings, extractDiscoveryTargetFiles, recoverDiscoveryOutput } from "./discoveryParsing.js";
+import { extractTaskFindings, extractDiscoveryTargetFiles, parseDiscoveryJson, recoverDiscoveryOutput } from "./discoveryParsing.js";
 import { DISCOVERY_FILE_BUDGET, DISCOVERY_ROUND_BUDGET } from "./agentLoop.js";
 import { mergeLiveRules, mergeArchitectureRules, mergeTechStack } from "./memoryRules.js";
 import { DISCOVERY_SYSTEM, INTENT_SYSTEM, SETUP_SYSTEM, buildConsolidationPrompt } from "./prompts.js";
@@ -299,22 +299,56 @@ interface CodebaseMemory {
   pendingManualSteps: ManualStep[];
 }
 
-function readPlannerMetadata(repoRoot: string, blockedDirs?: string[]): string {
-  const allowed = ["repo_map.json", "nav_map.json", "codebase-memory.json"];
+function readPlannerMetadata(repoRoot: string, blockedDirs?: string[], maxPromptEntries?: number): string {
   const metadata: Record<string, unknown> = {};
-  for (const name of allowed) {
-    const file = path.join(repoRoot, ".agent", name);
-    try {
-      const raw = fs.readFileSync(file, "utf-8");
-      const parsed = JSON.parse(raw);
-      // The memory file is free text from earlier runs; what the Planner sees must
-      // not describe files that are gone (see memoryHealth.ts).
-      if (name === "codebase-memory.json" && parsed && typeof parsed === "object") reconcileMemoryWithDisk(parsed, repoRoot, blockedDirs);
-      metadata[name.replace(/\.json$/, "")] = parsed;
-    } catch {
-      // Metadata is advisory. A missing or malformed cache must not block planning.
+
+  // 1. repo_map: ONE clean, alphabetically sorted, compact copy with volatile fields stripped.
+  try {
+    const raw = fs.readFileSync(path.join(repoRoot, ".agent", "repo_map.json"), "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const compact = compactRepoMapView(parsed, maxPromptEntries);
+      if (Object.keys(compact).length > 0) metadata.repo_map = compact;
     }
+  } catch {
+    // Metadata is advisory. A missing or malformed cache must not block planning.
   }
+
+  // 2. nav_map: alphabetically sorted, volatile timestamps stripped.
+  try {
+    const raw = fs.readFileSync(path.join(repoRoot, ".agent", "nav_map.json"), "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const sortedNav: Record<string, unknown> = {};
+      for (const key of Object.keys(parsed).sort((a, b) => a.localeCompare(b))) {
+        const entry = parsed[key];
+        if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+          const { lastUpdated: _lu, observedAt: _oa, ...rest } = entry as Record<string, unknown>;
+          sortedNav[key] = rest;
+        } else {
+          sortedNav[key] = entry;
+        }
+      }
+      if (Object.keys(sortedNav).length > 0) metadata.nav_map = sortedNav;
+    }
+  } catch {
+    // Advisory.
+  }
+
+  // 3. codebase-memory: reconciled with disk, omitting liveRules (rendered separately in plannerPrompt)
+  //    and volatile per-run counters.
+  try {
+    const raw = fs.readFileSync(path.join(repoRoot, ".agent", "codebase-memory.json"), "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      reconcileMemoryWithDisk(parsed, repoRoot, blockedDirs);
+      const { liveRules: _lr, lastRunDate: _lrd, totalRuns: _tr, ...rest } = parsed as Record<string, unknown>;
+      metadata["codebase-memory"] = rest;
+    }
+  } catch {
+    // Advisory.
+  }
+
   return JSON.stringify(metadata, null, 2);
 }
 
@@ -1770,6 +1804,8 @@ let activeRelay: ProvisionedRelay | undefined;
 let activeQuestionListener: ((q: PendingQuestion) => void) | undefined;
 let activeResolvedListener: ((id: string) => void) | undefined;
 let activeAnsweredListener: ((q: PendingQuestion, answer: string, by: import("./remote/control.js").AnswerSource) => void) | undefined;
+let activeShutdownUnregister: (() => void) | undefined;
+let activeRunLock: RunLock | undefined;
 /** Who is asking right now, for question.ask (set by the main loop: the running phase and the innermost shown worker). */
 let questionContext: () => { taskId?: string; phaseId?: string; worker?: string; workerId?: string } = () => ({});
 
@@ -1815,8 +1851,11 @@ async function connectRemote(
     if (activeQuestionListener) runControl.offQuestion(activeQuestionListener);
     if (activeResolvedListener) runControl.offQuestionResolved(activeResolvedListener);
     if (activeAnsweredListener) runControl.offQuestionAnswered(activeAnsweredListener);
+    activeShutdownUnregister?.();
+    activeShutdownUnregister = undefined;
     activeQuestionListener = undefined;
     activeResolvedListener = undefined;
+    activeAnsweredListener = undefined;
   }
 
   let relay: ProvisionedRelay;
@@ -2063,16 +2102,23 @@ async function connectRemote(
       if (root === repoRoot) session.pushRoadmapState(roadmapWire(loadRoadmap(repoRoot)));
     });
 
-    // Tear the published endpoint down with the process, so nothing outlives
-    // the session that created it. Best-effort and not awaited, same as
-    // relay.stop() below — a signal handler can't reliably block process
-    // exit on an async fetch anyway (runLock's own SIGINT handler calls
-    // process.exit() synchronously and may win the race), but this still
-    // helps whenever it doesn't, and never makes the existing race worse.
-    const teardown = () => { stopRoadmapFeed(); void session.stop("process exit"); void relay.stop(); };
-    process.once("exit", teardown);
-    process.once("SIGINT", teardown);
-    process.once("SIGTERM", teardown);
+    // Tear the published endpoint down cleanly on SIGINT/SIGTERM/SIGHUP/SIGBREAK
+    // BEFORE RunLock releases and calls process.exit(), and unregister on re-pair
+    // so process listeners never leak across sessions.
+    const teardown = () => { stopRoadmapFeed(); return Promise.allSettled([session.stop("process exit"), relay.stop()]).then(() => {}); };
+    if (activeRunLock) {
+      activeShutdownUnregister = activeRunLock.registerShutdownHook(teardown);
+    } else {
+      const syncTeardown = () => { void teardown(); };
+      process.once("exit", syncTeardown);
+      process.once("SIGINT", syncTeardown);
+      process.once("SIGTERM", syncTeardown);
+      activeShutdownUnregister = () => {
+        process.off("exit", syncTeardown);
+        process.off("SIGINT", syncTeardown);
+        process.off("SIGTERM", syncTeardown);
+      };
+    }
 
     return session;
   } catch (err: any) {
@@ -2882,8 +2928,10 @@ ${instructions}`;
       console.log(`\n🧭 [PLANNER] Reading the code to tell the Editor the exact file and section to change...`);
       let directive: string | undefined;
       try {
+        const stallTargets = candidateTargets(inspectedPaths, repoRoot);
+        agentTools.beginPlannerInspection(stallTargets, plannerReadBudget(stallTargets.length));
         directive = await runToolAgent({
-          prompt: buildStallDirectivePrompt(phaseGoal, handoff.failure.message, candidateTargets(inspectedPaths, repoRoot)),
+          prompt: buildStallDirectivePrompt(phaseGoal, handoff.failure.message, stallTargets),
           phase,
           repo,
           repoRoot,
@@ -2892,6 +2940,7 @@ ${instructions}`;
           agentTools,
           models: config.models.repairPlanner ?? config.models.planner,
           agentName: "REPAIR_PLANNER",
+          tools: PLANNER_TOOLS_SCHEMA,
           maxRoundsOverride: 12,
           reason: "Stalled Editor: naming the exact file and section to change",
         });
@@ -3788,6 +3837,7 @@ Instructions:
             agentTools,
             models: config.models.repairPlanner ?? config.models.planner,
             agentName: "REPAIR_PLANNER",
+            tools: needsWidenedSearch ? REPAIR_PLANNER_WIDENED_TOOLS_SCHEMA : PLANNER_TOOLS_SCHEMA,
             maxRoundsOverride: repairPlannerMaxRounds,
           });
         } catch (err: any) {
@@ -4306,6 +4356,7 @@ async function main(): Promise<void> {
   // Ctrl-C'd run never locks the user out.
   const runId = `run-${Date.now()}-${process.pid}`;
   const lock = new RunLock(repoRoot, config.recovery.stateDirectory);
+  activeRunLock = lock;
   const lockResult = lock.acquire(runId, `yimpim ${args.command}`, args.forceUnlock);
 
   if (!lockResult.acquired && lockResult.heldBy) {
@@ -6307,9 +6358,8 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
       ? `\n\nLINES ALREADY READ FOR YOU (real line numbers of the current files: the request cites some, the check of what already exists verified the rest; do not read these ranges again, read only other lines):\n${preRead.text}`
       : "";
 
-    const discoveryText = `${DISCOVERY_SYSTEM}
-
-Target Task:
+    // DISCOVERY_SYSTEM is already injected into the system prompt by buildContextualSystemPrompt("DISCOVERY", ...).
+    const discoveryText = `Target Task:
 ${instructions.trim()}
 
 Existing Codebase Memory:
@@ -6497,17 +6547,18 @@ You have a small budget: after about ${DISCOVERY_FILE_BUDGET} files read or ${DI
       agentTools.readLedger.begin("PLANNER");
       for (const r of plannerForward.included) agentTools.readLedger.record("PLANNER", r.file, r.from, r.to);
     };
+    const parsedDiscovery = parseDiscoveryJson(discoveryOutput);
+    const taskFindingsFallback = parsedDiscovery?.taskFindings
+      ? ""
+      : `\n\nTask-Specific Discovery Evidence:\n${extractTaskFindings(discoveryOutput)}`;
     const plannerPrompt = `User Request:
 ${instructions.trim()}${userDocsSection}${lastFailureSection}${securitySection}${existenceSection}${plannerReadSection}
 
 Discovery Findings:
-${discoveryOutput}
+${discoveryOutput}${taskFindingsFallback}
 
-  Task-Specific Discovery Evidence:
-  ${extractTaskFindings(discoveryOutput)}
-
-  Read-only Architecture Metadata:
-  ${readPlannerMetadata(repoRoot, config.safety?.blockedDirectories)}
+Read-only Architecture Metadata:
+${readPlannerMetadata(repoRoot, config.safety?.blockedDirectories, config.memory?.maxPromptEntries)}
 
 Active Live Rules:
 ${memory.liveRules.map((r) => `- ${r}`).join("\n") || "None"}`;
@@ -7593,6 +7644,8 @@ The user wants you to decide, not ask: ${d.choice}`);
 
       continue;
     }
+    await remote?.stop("process exit");
+    await activeRelay?.stop();
     return;
 
     } catch (err: any) {
@@ -7728,6 +7781,8 @@ The user wants you to decide, not ask: ${d.choice}`);
       }
       // No prompt to return to (one-shot --task/--task-file/--resume) — this
       // really is the end of the process, same exit code as before.
+      await remote?.stop(err instanceof AbortedError ? "aborted" : "failed");
+      await activeRelay?.stop();
       process.exit(err instanceof TaskFailedError ? 1 : 130);
     } finally {
       stopInputListener();
@@ -7735,7 +7790,7 @@ The user wants you to decide, not ask: ${d.choice}`);
   }
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   // A remote stop is an expected outcome, not a crash. Completed phases stay
   // committed; the in-flight phase is unwound by the normal scoped revert.
   if (err instanceof AbortedError) {
@@ -7743,8 +7798,10 @@ main().catch((err) => {
     console.log(`Completed phases remain committed. Resume with: yimpim --resume`);
     const usage = events.renderUsage();
     if (usage) console.log(usage);
+    try { await activeRelay?.stop(); } catch {}
     process.exit(130);
   }
   console.error(`[FATAL] Unhandled execution error:`, err);
+  try { await activeRelay?.stop(); } catch {}
   process.exit(1);
 });

@@ -222,3 +222,32 @@ export function promptView(
   }
   return out;
 }
+
+/**
+ * Deterministic, cache-friendly compact view of the repo map for Planner's
+ * initial user context: strips volatile per-run fields (mtimeMs, lastUpdated,
+ * size, confirmedAt, stale) and sorts keys alphabetically so repeated runs
+ * produce a stable, compact representation without duplicate dumps.
+ */
+export function compactRepoMapView(
+  map: Record<string, RepoMapEntry>,
+  limit = DEFAULT_PROMPT_ENTRIES
+): Record<string, { path: string; summary?: string; exports?: string[] }> {
+  const entries = Object.entries(map);
+  const selected =
+    entries.length > limit
+      ? entries
+          .sort((a, b) => (b[1].lastUpdated ?? 0) - (a[1].lastUpdated ?? 0))
+          .slice(0, Math.max(1, limit))
+      : entries;
+  selected.sort((a, b) => a[0].localeCompare(b[0]));
+  const out: Record<string, { path: string; summary?: string; exports?: string[] }> = {};
+  for (const [k, e] of selected) {
+    out[k] = {
+      path: e.path,
+      ...(e.summary ? { summary: e.summary } : {}),
+      ...(e.exports && e.exports.length > 0 ? { exports: e.exports } : {}),
+    };
+  }
+  return out;
+}
