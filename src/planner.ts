@@ -70,6 +70,8 @@ export const PhaseSchema = z.object({
    */
   newFiles: z.array(z.string()).default([]),
   changes: z.array(z.string()).default([]),
+  /** Optional exact edit anchors (e.g. "src/foo.ts:L42 function bar") to guide the cheap Editor. */
+  anchors: z.array(z.string()).optional(),
   verification: z.array(z.string()).default([]),
   /**
    * Optional contract specifications (signatures, types, constraints)
@@ -719,6 +721,9 @@ export function phaseInstructions(plan: Plan, phase: PlannedPhase, index: number
   }
   if (phase.changes.length > 0) {
     parts.push(``, `Specific changes:`, ...phase.changes.map((c) => `  - ${c}`));
+  }
+  if (phase.anchors && phase.anchors.length > 0) {
+    parts.push(``, `Edit anchors (exact locations to inspect/patch):`, ...phase.anchors.map((a) => `  - ${a}`));
   }
   const contracts = resolvePhaseContracts(phase);
   if (contracts) {

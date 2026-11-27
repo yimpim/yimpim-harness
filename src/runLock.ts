@@ -50,7 +50,7 @@ export interface AcquireResult {
  * handle outlives the process. Verified on Windows 11 — a dead PID returned
  * no-throw while an unused PID threw ESRCH. So Windows asks the OS directly.
  */
-function isPidAlive(pid: number): boolean {
+export function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
 
   if (process.platform === "win32") {

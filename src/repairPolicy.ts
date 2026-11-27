@@ -19,9 +19,23 @@ export interface BlockingFailure {
  * consecutive identical failures are detectable even though the editor
  * genuinely attempted something different in between.
  */
+function normalizeFailureDetail(detail: string): string {
+  return detail
+    // ISO timestamps (e.g. 2026-11-26T21:30:12.345Z)
+    .replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\b/g, "<ts>")
+    // Durations / timings (e.g. 123ms, 1.45s, 2.3 s)
+    .replace(/\b\d+(?:\.\d+)?\s*(?:ms|s)\b/g, "<dur>")
+    // Ephemeral temp worktree/sandbox directory suffixes
+    .replace(/\byimpim-[a-z]+-[A-Za-z0-9_-]+\b/g, "yimpim-tmp")
+    // Localhost ephemeral ports
+    .replace(/\b(localhost|127\.0\.0\.1):\d+\b/g, "$1:<port>")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function failureSignature(blockingFailures?: BlockingFailure[]): string {
   return (blockingFailures ?? [])
-    .map((f) => `${f.gate}:${f.detail}`)
+    .map((f) => `${f.gate}:${normalizeFailureDetail(f.detail)}`)
     .sort()
     .join("\n");
 }
@@ -75,15 +89,40 @@ export function evaluateRepairProgress(
   currentFailureSignature: string,
   previousFailureSignature: string | undefined,
   repairUsingBackup: boolean,
-  hasRealBackupChain: boolean
+  hasRealBackupChain: boolean,
+  seenSignatures?: Set<string>
 ): RepairProgressOutcome {
-  if (!isNoProgress(attempt, currentFailureSignature, previousFailureSignature)) {
+  const repeated =
+    isNoProgress(attempt, currentFailureSignature, previousFailureSignature) ||
+    (attempt > 0 && currentFailureSignature.length > 0 && Boolean(seenSignatures?.has(currentFailureSignature)));
+  if (!repeated) {
     return { kind: "continue" };
   }
   if (!repairUsingBackup && hasRealBackupChain) {
     return { kind: "switch_to_backup" };
   }
   return { kind: "stop" };
+}
+
+/**
+ * Gate expensive Hydrogen REPAIR_PLANNER on attempt 1 for simple, local, single-cause
+ * build/test errors (<= 2 distinct errors, no external files, no runtime/visual failures,
+ * no missing-dependency hint). Cheap REPAIR fixes these directly in 1 pass; if attempt 1
+ * fails, attempt 2+ escalates to Hydrogen REPAIR_PLANNER as usual.
+ */
+export function shouldSkipRepairPlannerOnFirstAttempt(opts: {
+  attempt: number;
+  madeNoChanges: boolean;
+  blockingFailures?: BlockingFailure[];
+  externalPathsCount: number;
+  runtimeOrVisualFailed: boolean;
+  hasManifestHint: boolean;
+}): boolean {
+  if (opts.madeNoChanges) return true;
+  if (opts.attempt !== 1) return false;
+  if (opts.externalPathsCount > 0 || opts.runtimeOrVisualFailed || opts.hasManifestHint) return false;
+  const distinct = (opts.blockingFailures ?? []).reduce((sum, f) => sum + countDistinctErrors(f.detail), 0);
+  return distinct > 0 && distinct <= 2;
 }
 
 /**

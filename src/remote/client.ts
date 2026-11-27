@@ -11,6 +11,9 @@
 
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { isPidAlive } from "../runLock.js";
 import {
   Envelope, ModelCatalogEntry, PendingQuestion, RemoteCommand, RemoteStatus, RemoteVerb, TaskIndexEntry,
   ALWAYS_ALLOWED, PROTOCOL_VERSION, REDACTED_EVENT_KINDS,
@@ -239,6 +242,92 @@ export function phoneCommandEcho(
   }
 }
 
+export interface ActiveSessionRecord {
+  sessionId: string;
+  brokerUrl: string;
+  agentToken: string;
+  pid: number;
+  startedAt: string;
+}
+
+export function defaultActiveSessionsPath(): string {
+  return path.join(os.homedir(), ".yimpim", "active-sessions.json");
+}
+
+function readActiveSessions(filePath: string): ActiveSessionRecord[] {
+  try {
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeActiveSessions(filePath: string, records: ActiveSessionRecord[]): void {
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(filePath, JSON.stringify(records, null, 2), { encoding: "utf-8", mode: 0o600 });
+  } catch {
+    // Best-effort persistence: never block remote pairing on home-dir I/O.
+  }
+}
+
+export function recordActiveSession(record: ActiveSessionRecord, filePath = defaultActiveSessionsPath()): void {
+  const existing = readActiveSessions(filePath).filter((r) => r.sessionId !== record.sessionId);
+  existing.push(record);
+  writeActiveSessions(filePath, existing);
+}
+
+export function removeActiveSession(sessionId: string, filePath = defaultActiveSessionsPath()): void {
+  if (!sessionId) return;
+  const existing = readActiveSessions(filePath);
+  const next = existing.filter((r) => r.sessionId !== sessionId);
+  if (next.length !== existing.length) writeActiveSessions(filePath, next);
+}
+
+/**
+ * Best-effort startup reaper for sessions orphaned by SIGKILL / power loss / crashes.
+ * Checks each persisted record's PID with RunLock's Windows-safe isPidAlive(); any dead-PID
+ * entry gets a best-effort POST /v1/unregister and is pruned from active-sessions.json.
+ */
+export async function reapOrphanRemoteSessions(opts?: {
+  filePath?: string;
+  isAlive?: (pid: number) => boolean;
+  fetchFn?: typeof fetch;
+}): Promise<number> {
+  const filePath = opts?.filePath ?? defaultActiveSessionsPath();
+  const isAlive = opts?.isAlive ?? isPidAlive;
+  const fetchFn = opts?.fetchFn ?? fetch;
+  const records = readActiveSessions(filePath);
+  if (records.length === 0) return 0;
+
+  const alive: ActiveSessionRecord[] = [];
+  const dead: ActiveSessionRecord[] = [];
+  for (const r of records) {
+    if (r.pid === process.pid || isAlive(r.pid)) alive.push(r);
+    else dead.push(r);
+  }
+  if (dead.length === 0) return 0;
+
+  await Promise.allSettled(
+    dead.map(async (r) => {
+      const base = r.brokerUrl.replace(/\/+$/, "");
+      try {
+        await fetchFn(`${base}/v1/unregister`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${r.agentToken}` },
+          body: JSON.stringify({ sessionId: r.sessionId }),
+          signal: AbortSignal.timeout(4_000),
+        });
+      } catch {
+        // Best effort: broker may be unreachable or session already expired.
+      }
+    })
+  );
+  writeActiveSessions(filePath, alive);
+  return dead.length;
+}
+
 export class RemoteSession {
   private key = generateSessionKey();
   private sessionId = "";
@@ -305,6 +394,9 @@ export class RemoteSession {
 
     const pairingSecret = generatePairingSecret();
 
+    // Best-effort cleanup of any sessions orphaned by prior SIGKILL/crashes before registering a new one.
+    await reapOrphanRemoteSessions().catch(() => {});
+
     const res = await fetch(`${this.base()}/v1/register`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -331,6 +423,13 @@ export class RemoteSession {
     const body: any = await res.json();
     this.sessionId = body.sessionId;
     this.agentToken = body.agentToken;
+    recordActiveSession({
+      sessionId: this.sessionId,
+      brokerUrl: this.opts.brokerUrl,
+      agentToken: this.agentToken,
+      pid: process.pid,
+      startedAt: this.status.startedAt,
+    });
     if (typeof body.limit === "number") this.limit = body.limit;
     this.hello = { repoName, platform: process.platform, startedAt: this.status.startedAt, ...(hello ?? {}) };
 
@@ -982,5 +1081,6 @@ export class RemoteSession {
         signal: AbortSignal.timeout(5000),
       });
     } catch {}
+    removeActiveSession(this.sessionId);
   }
 }

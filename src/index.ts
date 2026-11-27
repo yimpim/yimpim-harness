@@ -144,7 +144,7 @@ import {
 } from "./verifierTools.js";
 import {
   failureSignature, isVisualOnlyFailure, evaluateRepairProgress, failuresUnrelatedToChange, buildWidenedScopeSection, computeRepairPlannerMaxRounds,
-  extractPitfallSummary,
+  extractPitfallSummary, shouldSkipRepairPlannerOnFirstAttempt,
 } from "./repairPolicy.js";
 import { AgentTools, plannerReadBudget, READ_ONLY_TOOLS_SCHEMA, PLANNER_TOOLS_SCHEMA, REPAIR_PLANNER_WIDENED_TOOLS_SCHEMA, DISCOVERY_TOOLS_SCHEMA, TOOLS_SCHEMA, REPAIR_RUN_TEST_TOOL, ManualStep } from "./agentTools.js";
 import { testTierContext } from "./repairTestContext.js";
@@ -3184,6 +3184,7 @@ ${instructions}`;
 
   lastPhaseRuns = 1;
   lastPhaseConfidence = undefined;
+  const seenFailureSignatures = new Set<string>();
   while (attempt <= maxRepairs) {
     lastPhaseRuns = attempt + 1;
     console.log(`\n[VERIFIER] 🛡️ Running verification for ${phaseName} (Attempt ${attempt + 1}/${maxRepairs + 1})...`);
@@ -3587,7 +3588,8 @@ Test hook just added: ${hookHowTo}` : hookHowTo;
       currentFailureSignature,
       previousFailureSignature,
       repairUsingBackup,
-      hasRealBackupChain
+      hasRealBackupChain,
+      seenFailureSignatures
     );
     if (progress.kind === "switch_to_backup") {
       // The model just got the EXACT same failure back after a real
@@ -3609,6 +3611,7 @@ Test hook just added: ${hookHowTo}` : hookHowTo;
       // first try against the primary's already-stuck failure would risk
       // tripping no-progress again before the backup ever got a real turn.
       previousFailureSignature = undefined;
+      seenFailureSignatures.clear();
     } else if (progress.kind === "stop") {
       stopReason = "no_progress";
       console.error(`\n⛔ [NO PROGRESS] The repair attempt did not change the outcome — the exact same`);
@@ -3623,6 +3626,7 @@ Test hook just added: ${hookHowTo}` : hookHowTo;
       break;
     } else {
       previousFailureSignature = currentFailureSignature;
+      if (currentFailureSignature) seenFailureSignatures.add(currentFailureSignature);
     }
 
     const visualOnlyFailure = isVisualOnlyFailure(result.blockingFailures);
@@ -3781,7 +3785,15 @@ installed toolchain) counts as environmental.`
       // that prompt already has a direct, unambiguous instruction ("write the
       // file"), so there is nothing to diagnose.
       let repairPlan: string | undefined;
-      if (!madeNoChanges) {
+      const skipRepairPlanner = shouldSkipRepairPlannerOnFirstAttempt({
+        attempt,
+        madeNoChanges,
+        blockingFailures: result.blockingFailures,
+        externalPathsCount: externalPaths.length,
+        runtimeOrVisualFailed,
+        hasManifestHint: Boolean(manifestHint),
+      });
+      if (!skipRepairPlanner) {
         const manifestCandidates = manifestHint ? dependencyManifestCandidatePaths(repoRoot, result.stacks) : [];
         const triageCandidateFiles = Array.from(
           new Set([...(phase.allowedPaths ?? []), ...externalPaths, ...manifestCandidates])
@@ -6870,7 +6882,7 @@ ${discoveryOutput ?? ""}`,
         complete: (messages) =>
           runLabeledCompletion({
             client,
-            models: config.models.planner,
+            models: config.models.discovery ?? config.models.editor ?? config.models.planner,
             messages: messages as any,
             agentName: "PLANNER",
             jsonMode: true,

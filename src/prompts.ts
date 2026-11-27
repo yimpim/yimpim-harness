@@ -110,6 +110,7 @@ file is the closest analog. Do not leave this empty when the task requires code 
     "existingFiles": [{
       "path": "relative/path",
       "symbols": ["ExactClassOrFunction"],
+      "lineRanges": ["L10-L45"],
       "relevantCode": "Concrete behavior observed in the file",
       "whyRelevant": "Why this file owns the requested change"
     }],

@@ -366,6 +366,43 @@ export async function runLabeledCompletion(options: LabeledCompletionOptions): P
   }
 }
 
+/**
+ * Cache-friendly rolling compaction of older, oversized tool outputs.
+ * Only triggers once total conversation size crosses `highWaterChars` (160 KB),
+ * leaving the system prompt, initial user prompt, and the most recent `keepTailMessages`
+ * untouched so prompt-cache prefixes stay warm on normal runs while preventing runaway
+ * context bloat on long multi-round sessions.
+ */
+export function compactOldToolOutputs(
+  messages: any[],
+  highWaterChars = 160_000,
+  keepTailMessages = 6,
+  toolThresholdChars = 4_000
+): number {
+  let total = 0;
+  for (const m of messages) {
+    if (typeof m?.content === "string") total += m.content.length;
+  }
+  if (total <= highWaterChars) return 0;
+
+  const cutoff = Math.max(2, messages.length - keepTailMessages);
+  let compacted = 0;
+  for (let i = 2; i < cutoff; i++) {
+    const m = messages[i];
+    if (m?.role !== "tool" || typeof m.content !== "string") continue;
+    if (m.content.length <= toolThresholdChars || m.content.startsWith("[compacted earlier ")) continue;
+    const origLen = m.content.length;
+    const head = m.content.slice(0, 800);
+    const tail = m.content.slice(-400);
+    const toolLabel = m.name || "tool";
+    m.content = `[compacted earlier ${toolLabel} output: ${origLen} chars]\n${head}\n... (${origLen - 1200} chars omitted) ...\n${tail}`;
+    total -= origLen - m.content.length;
+    compacted++;
+    if (total <= highWaterChars) break;
+  }
+  return compacted;
+}
+
 export async function runToolAgent(options: AgentRunOptions): Promise<string> {
   if (!options.readStage) return runToolAgentConversation(options);
   options.onConversationStart?.();
@@ -549,6 +586,7 @@ async function runToolAgentConversation(options: AgentRunOptions): Promise<strin
       return `STOPPED: ${stopReason}`;
     }
 
+    compactOldToolOutputs(messages);
     const response = await client.complete(models, messages, {
       tools: availableTools,
       toolChoice: forceTextOnly ? "none" : "auto",

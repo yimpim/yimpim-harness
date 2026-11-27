@@ -2060,17 +2060,36 @@ export class AgentTools {
     const MAX_BATCH = 12;
     const capped = paths.slice(0, MAX_BATCH);
     const overflow = paths.length - capped.length;
+    const maxBatchBytes = Math.max(this.config.limits?.maxFileBytes ?? 50_000, 50_000) * 3;
 
-    const parts = await Promise.all(
+    const rawParts = await Promise.all(
       capped.map(async (p) => {
         try {
-          return `=== ${p} ===\n${await this.readFile(p)}`;
+          return { p, text: `=== ${p} ===\n${await this.readFile(p)}` };
         } catch (err: any) {
-          return `=== ${p} ===\n[ERROR reading file: ${err.message}]`;
+          return { p, text: `=== ${p} ===\n[ERROR reading file: ${err.message}]` };
         }
       })
     );
 
+    const parts: string[] = [];
+    let totalBytes = 0;
+    const omittedForSize: string[] = [];
+    for (const item of rawParts) {
+      if (parts.length > 0 && totalBytes + item.text.length > maxBatchBytes) {
+        omittedForSize.push(item.p);
+        continue;
+      }
+      parts.push(item.text);
+      totalBytes += item.text.length;
+    }
+
+    if (omittedForSize.length > 0) {
+      parts.push(
+        `\n... ${omittedForSize.length} file(s) omitted to keep batch under ${maxBatchBytes} bytes ` +
+          `(${omittedForSize.join(", ")}). Read them with narrower startLine/endLine ranges or a follow-up call.`
+      );
+    }
     if (overflow > 0) {
       parts.push(
         `\n... ${overflow} more path(s) were not read — batch capped at ${MAX_BATCH} files per call. ` +
@@ -2832,10 +2851,18 @@ export class AgentTools {
         // A match inside a secrets file or a blocked folder is never shown: read_file refuses those files, so a search must not be the way around it.
         const lines = stdout.split(/\r?\n/).filter(Boolean).filter((l) => this.searchLineAllowed(l));
         if (lines.length === 0) return "No matches found.";
-        const shown = lines.slice(0, maxResults);
+        const MAX_LINE_CHARS = 240;
+        const MAX_OUTPUT_CHARS = 24_000;
+        const shown = lines.slice(0, maxResults).map((l) =>
+          l.length > MAX_LINE_CHARS ? `${l.slice(0, MAX_LINE_CHARS)}… [line truncated]` : l
+        );
         const suffix =
           lines.length > maxResults ? `\n... (${lines.length - maxResults} more matches, narrow the pattern)` : "";
-        return shown.join("\n") + suffix;
+        const joined = shown.join("\n") + suffix;
+        if (joined.length > MAX_OUTPUT_CHARS) {
+          return `${joined.slice(0, MAX_OUTPUT_CHARS)}\n... [search output truncated at ${MAX_OUTPUT_CHARS} chars; narrow the pattern or path]`;
+        }
+        return joined;
       } catch (err: any) {
         // Exit code 1 is grep's "no matches" — a real answer, not an error.
         if (err?.code === 1) return "No matches found.";
