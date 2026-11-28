@@ -325,4 +325,39 @@ describe("hooks", () => {
   test("get_usage is a read-only verb every paired phone may use", () => {
     assert.ok(ALWAYS_ALLOWED.includes("get_usage"));
   });
+
+  test("SQLite WAL: non-destructive one-time legacy JSON import and concurrent multi-terminal merges", () => {
+    const legacyPayload = {
+      v: 1,
+      desktopId: "desktop-legacy-1",
+      since: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      totals: { calls: 2, prompt: 200, completion: 100, total: 300, cost: 0.05, pricedCalls: 2, cached: 0, cachedOf: 0 },
+      taskCount: 1,
+      byAgent: { EDITOR: { calls: 2, prompt: 200, completion: 100, total: 300, cost: 0.05, pricedCalls: 2, cached: 0, cachedOf: 0 } },
+      byModel: { "m/legacy": { calls: 2, prompt: 200, completion: 100, total: 300, cost: 0.05, pricedCalls: 2, cached: 0, cachedOf: 0 } },
+      tasks: [],
+    };
+    const rawJson = JSON.stringify(legacyPayload);
+    fs.writeFileSync(file, rawJson, "utf8");
+
+    // Two concurrent terminals (separate UsageLedger instances targeting the same store)
+    const termA = new UsageLedger(file);
+    const termB = new UsageLedger(file);
+    termA.recordCall(call({ role: "EDITOR", model: "m/one", total: 100, cost: 0.01 }));
+    termB.recordCall(call({ role: "QA", model: "m/two", total: 200, cost: 0.02 }));
+    termA.flush();
+    termB.flush();
+
+    const snap = new UsageLedger(file).snapshot();
+    assert.equal(snap.desktopId, "desktop-legacy-1");
+    assert.equal(snap.totals.total, 600, "legacy 300 + termA 100 + termB 200");
+    assert.equal(snap.totals.calls, 4);
+    assert.equal(snap.byAgent.EDITOR.total, 400);
+    assert.equal(snap.byAgent.QA.total, 200);
+    assert.equal(snap.byModel["m/legacy"].total, 300);
+    assert.equal(snap.byModel["m/one"].total, 100);
+    assert.equal(snap.byModel["m/two"].total, 200);
+    assert.equal(fs.readFileSync(file, "utf8"), rawJson, "legacy JSON file must remain untouched on disk");
+  });
 });

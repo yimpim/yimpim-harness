@@ -134,6 +134,44 @@ function initSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_events_repo_event_id ON events (repo_root, event_id);
     CREATE INDEX IF NOT EXISTS idx_events_repo_task ON events (repo_root, task_id, seq_order);
     CREATE INDEX IF NOT EXISTS idx_tasks_repo_first ON tasks (repo_root, first_event_id DESC);
+
+    CREATE TABLE IF NOT EXISTS usage_meta (
+      id              INTEGER PRIMARY KEY CHECK (id = 1),
+      desktop_id      TEXT NOT NULL,
+      since           TEXT NOT NULL,
+      updated_at      TEXT NOT NULL,
+      task_count      INTEGER NOT NULL DEFAULT 0,
+      totals_json     TEXT NOT NULL,
+      legacy_imported INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS usage_buckets (
+      kind         TEXT NOT NULL,
+      key          TEXT NOT NULL,
+      calls        INTEGER NOT NULL DEFAULT 0,
+      prompt       INTEGER NOT NULL DEFAULT 0,
+      completion   INTEGER NOT NULL DEFAULT 0,
+      total        INTEGER NOT NULL DEFAULT 0,
+      cost         REAL NOT NULL DEFAULT 0,
+      priced_calls INTEGER NOT NULL DEFAULT 0,
+      cached       INTEGER NOT NULL DEFAULT 0,
+      cached_of    INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (kind, key)
+    );
+
+    CREATE TABLE IF NOT EXISTS usage_tasks (
+      task_id       TEXT PRIMARY KEY,
+      repo          TEXT,
+      title         TEXT,
+      started_at    TEXT NOT NULL,
+      ended_at      TEXT,
+      state         TEXT NOT NULL,
+      pid           INTEGER,
+      usage_json    TEXT NOT NULL,
+      by_agent_json TEXT NOT NULL,
+      phases_json   TEXT NOT NULL,
+      seq_order     INTEGER NOT NULL DEFAULT 0
+    );
   `);
 }
 

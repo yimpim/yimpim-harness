@@ -30,7 +30,9 @@ import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { DatabaseSync } from "node:sqlite";
 import { formatCost, formatTokens } from "./events.js";
+import { getHistoryDb } from "./remote/historyDb.js";
 
 export interface LedgerBucket {
   calls: number;
@@ -248,8 +250,26 @@ export class UsageLedger {
   private owned = new Map<string, LedgerTask>();
   private timer?: NodeJS.Timeout;
   private lastFile?: LedgerFile;
+  private readonly useSharedHistoryDb: boolean;
+  private readonly dbPath: string;
+  private readonly legacyJsonPath: string;
 
-  constructor(private readonly filePath: string = defaultLedgerPath()) {}
+  constructor(private readonly filePath?: string) {
+    const envUsage = process.env.YIMPIM_USAGE_FILE?.trim();
+    if (filePath !== undefined) {
+      this.useSharedHistoryDb = false;
+      this.legacyJsonPath = filePath;
+      this.dbPath = filePath.endsWith(".db") || filePath.endsWith(".sqlite") ? filePath : `${filePath}.sqlite`;
+    } else if (envUsage) {
+      this.useSharedHistoryDb = false;
+      this.legacyJsonPath = envUsage;
+      this.dbPath = envUsage.endsWith(".db") || envUsage.endsWith(".sqlite") ? envUsage : `${envUsage}.sqlite`;
+    } else {
+      this.useSharedHistoryDb = true;
+      this.legacyJsonPath = defaultLedgerPath();
+      this.dbPath = "";
+    }
+  }
 
   // ------------------------------------------------------------- recording
 
@@ -384,12 +404,77 @@ export class UsageLedger {
     this.timer.unref?.();
   }
 
-  private load(): LedgerFile {
+  private ensureUsageSchema(db: DatabaseSync): void {
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA busy_timeout = 5000;
+      PRAGMA synchronous = NORMAL;
+
+      CREATE TABLE IF NOT EXISTS usage_meta (
+        id              INTEGER PRIMARY KEY CHECK (id = 1),
+        desktop_id      TEXT NOT NULL,
+        since           TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        task_count      INTEGER NOT NULL DEFAULT 0,
+        totals_json     TEXT NOT NULL,
+        legacy_imported INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS usage_buckets (
+        kind         TEXT NOT NULL,
+        key          TEXT NOT NULL,
+        calls        INTEGER NOT NULL DEFAULT 0,
+        prompt       INTEGER NOT NULL DEFAULT 0,
+        completion   INTEGER NOT NULL DEFAULT 0,
+        total        INTEGER NOT NULL DEFAULT 0,
+        cost         REAL NOT NULL DEFAULT 0,
+        priced_calls INTEGER NOT NULL DEFAULT 0,
+        cached       INTEGER NOT NULL DEFAULT 0,
+        cached_of    INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (kind, key)
+      );
+
+      CREATE TABLE IF NOT EXISTS usage_tasks (
+        task_id       TEXT PRIMARY KEY,
+        repo          TEXT,
+        title         TEXT,
+        started_at    TEXT NOT NULL,
+        ended_at      TEXT,
+        state         TEXT NOT NULL,
+        pid           INTEGER,
+        usage_json    TEXT NOT NULL,
+        by_agent_json TEXT NOT NULL,
+        phases_json   TEXT NOT NULL,
+        seq_order     INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+  }
+
+  private withDb<T>(fn: (db: DatabaseSync) => T): T {
+    if (this.useSharedHistoryDb) {
+      const db = getHistoryDb();
+      return fn(db);
+    }
+    fs.mkdirSync(path.dirname(this.dbPath), { recursive: true });
+    const db = new DatabaseSync(this.dbPath);
+    try {
+      this.ensureUsageSchema(db);
+      return fn(db);
+    } finally {
+      try {
+        db.close();
+      } catch {
+        // Ignore close error.
+      }
+    }
+  }
+
+  private readLegacyJson(): LedgerFile | null {
     let text: string;
     try {
-      text = fs.readFileSync(this.filePath, "utf8");
+      text = fs.readFileSync(this.legacyJsonPath, "utf8");
     } catch {
-      return freshFile();
+      return null;
     }
     try {
       return coerceFile(JSON.parse(text));
@@ -397,59 +482,311 @@ export class UsageLedger {
       // Unreadable: keep the bytes for a human, start a new ledger. Never
       // silently overwrite something we could not parse.
       try {
-        fs.renameSync(this.filePath, `${this.filePath}.corrupt-${Date.now()}`);
+        fs.renameSync(this.legacyJsonPath, `${this.legacyJsonPath}.corrupt-${Date.now()}`);
       } catch {
         /* best effort */
       }
-      return freshFile();
+      return null;
     }
   }
 
-  /** Merge this process's pending deltas into the file on disk. Never throws. */
+  private ensureMetaAndLegacyImportInTx(db: DatabaseSync): {
+    desktopId: string;
+    since: string;
+    updatedAt: string;
+    taskCount: number;
+    totals: LedgerBucket;
+  } {
+    const row = db
+      .prepare("SELECT desktop_id, since, updated_at, task_count, totals_json, legacy_imported FROM usage_meta WHERE id = 1")
+      .get() as
+      | {
+          desktop_id: string;
+          since: string;
+          updated_at: string;
+          task_count: number;
+          totals_json: string;
+          legacy_imported: number;
+        }
+      | undefined;
+
+    if (row) {
+      let totals = emptyBucket();
+      try {
+        totals = coerceBucket(JSON.parse(row.totals_json));
+      } catch {
+        totals = emptyBucket();
+      }
+      return {
+        desktopId: row.desktop_id,
+        since: row.since,
+        updatedAt: row.updated_at,
+        taskCount: num(row.task_count),
+        totals,
+      };
+    }
+
+    const legacy = this.readLegacyJson();
+    const seed = legacy ?? freshFile();
+
+    db.prepare(
+      `INSERT INTO usage_meta (id, desktop_id, since, updated_at, task_count, totals_json, legacy_imported)
+       VALUES (1, ?, ?, ?, ?, ?, 1)`
+    ).run(seed.desktopId, seed.since, seed.updatedAt, seed.taskCount, JSON.stringify(seed.totals));
+
+    if (legacy) {
+      const upsertBucket = db.prepare(`
+        INSERT INTO usage_buckets (kind, key, calls, prompt, completion, total, cost, priced_calls, cached, cached_of)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(kind, key) DO UPDATE SET
+          calls = calls + excluded.calls,
+          prompt = prompt + excluded.prompt,
+          completion = completion + excluded.completion,
+          total = total + excluded.total,
+          cost = cost + excluded.cost,
+          priced_calls = priced_calls + excluded.priced_calls,
+          cached = cached + excluded.cached,
+          cached_of = cached_of + excluded.cached_of
+      `);
+      for (const [k, b] of Object.entries(legacy.byAgent)) {
+        upsertBucket.run("agent", k, b.calls, b.prompt, b.completion, b.total, b.cost, b.pricedCalls, b.cached, b.cachedOf);
+      }
+      for (const [k, b] of Object.entries(legacy.byModel)) {
+        upsertBucket.run("model", k, b.calls, b.prompt, b.completion, b.total, b.cost, b.pricedCalls, b.cached, b.cachedOf);
+      }
+      const upsertTask = db.prepare(`
+        INSERT OR REPLACE INTO usage_tasks (task_id, repo, title, started_at, ended_at, state, pid, usage_json, by_agent_json, phases_json, seq_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      legacy.tasks.forEach((t, idx) => {
+        upsertTask.run(
+          t.taskId,
+          t.repo ?? null,
+          t.title ?? null,
+          t.startedAt,
+          t.endedAt ?? null,
+          t.state,
+          t.pid ?? null,
+          JSON.stringify(t.usage),
+          JSON.stringify(t.byAgent),
+          JSON.stringify(t.phases),
+          idx + 1
+        );
+      });
+    }
+
+    return {
+      desktopId: seed.desktopId,
+      since: seed.since,
+      updatedAt: seed.updatedAt,
+      taskCount: seed.taskCount,
+      totals: cloneBucket(seed.totals),
+    };
+  }
+
+  private readLedgerFileInTx(db: DatabaseSync): LedgerFile {
+    const meta = this.ensureMetaAndLegacyImportInTx(db);
+    const bucketRows = db
+      .prepare("SELECT kind, key, calls, prompt, completion, total, cost, priced_calls, cached, cached_of FROM usage_buckets")
+      .all() as Array<{
+        kind: string;
+        key: string;
+        calls: number;
+        prompt: number;
+        completion: number;
+        total: number;
+        cost: number;
+        priced_calls: number;
+        cached: number;
+        cached_of: number;
+      }>;
+
+    const byAgent: Record<string, LedgerBucket> = {};
+    const byModel: Record<string, LedgerBucket> = {};
+    for (const r of bucketRows) {
+      const b: LedgerBucket = {
+        calls: num(r.calls),
+        prompt: num(r.prompt),
+        completion: num(r.completion),
+        total: num(r.total),
+        cost: num(r.cost),
+        pricedCalls: num(r.priced_calls),
+        cached: num(r.cached),
+        cachedOf: num(r.cached_of),
+      };
+      if (r.kind === "agent") byAgent[r.key] = b;
+      else if (r.kind === "model") byModel[r.key] = b;
+    }
+
+    const taskRows = db
+      .prepare(
+        "SELECT task_id, repo, title, started_at, ended_at, state, pid, usage_json, by_agent_json, phases_json FROM usage_tasks ORDER BY seq_order ASC"
+      )
+      .all() as Array<{
+        task_id: string;
+        repo: string | null;
+        title: string | null;
+        started_at: string;
+        ended_at: string | null;
+        state: string;
+        pid: number | null;
+        usage_json: string;
+        by_agent_json: string;
+        phases_json: string;
+      }>;
+
+    const tasks: LedgerTask[] = [];
+    for (const r of taskRows) {
+      try {
+        const coerced = coerceTask({
+          taskId: r.task_id,
+          repo: r.repo ?? undefined,
+          title: r.title ?? undefined,
+          startedAt: r.started_at,
+          endedAt: r.ended_at ?? undefined,
+          state: r.state,
+          pid: r.pid ?? undefined,
+          usage: JSON.parse(r.usage_json),
+          byAgent: JSON.parse(r.by_agent_json),
+          phases: JSON.parse(r.phases_json),
+        });
+        if (coerced) tasks.push(coerced);
+      } catch {
+        // Skip malformed row.
+      }
+    }
+
+    return {
+      v: 1,
+      desktopId: meta.desktopId,
+      since: meta.since,
+      updatedAt: meta.updatedAt,
+      totals: meta.totals,
+      taskCount: meta.taskCount,
+      byAgent,
+      byModel,
+      tasks,
+    };
+  }
+
+  /** Atomically merge this process's pending deltas into SQLite WAL. Never throws. */
   flush(): void {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
     try {
-      const file = this.load();
-      addInto(file.totals, this.pending.totals);
-      file.taskCount += this.pending.tasks;
-      mergeMap(file.byAgent, this.pending.byAgent);
-      mergeMap(file.byModel, this.pending.byModel);
+      const file = this.withDb((db) => {
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          const meta = this.ensureMetaAndLegacyImportInTx(db);
+          addInto(meta.totals, this.pending.totals);
+          const nextTaskCount = meta.taskCount + this.pending.tasks;
+          const nowIso = new Date().toISOString();
 
-      for (const t of this.owned.values()) {
-        const rec = JSON.parse(JSON.stringify(t)) as LedgerTask;
-        const i = file.tasks.findIndex((x) => x.taskId === t.taskId);
-        if (i >= 0) file.tasks[i] = rec;
-        else file.tasks.push(rec);
-      }
-      for (const t of file.tasks) {
-        if (t.state === "running" && !this.owned.has(t.taskId) && (!t.pid || !pidAlive(t.pid))) {
-          t.state = "interrupted";
-          delete t.pid;
-        }
-      }
-      if (file.tasks.length > MAX_TASKS) {
-        // Oldest ended tasks go first; a running task is never evicted.
-        const excess = file.tasks.length - MAX_TASKS;
-        let dropped = 0;
-        file.tasks = file.tasks.filter((t) => {
-          if (dropped < excess && t.state !== "running") {
-            dropped++;
-            return false;
+          db.prepare("UPDATE usage_meta SET totals_json = ?, task_count = ?, updated_at = ? WHERE id = 1").run(
+            JSON.stringify(meta.totals),
+            nextTaskCount,
+            nowIso
+          );
+
+          const upsertBucket = db.prepare(`
+            INSERT INTO usage_buckets (kind, key, calls, prompt, completion, total, cost, priced_calls, cached, cached_of)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(kind, key) DO UPDATE SET
+              calls = calls + excluded.calls,
+              prompt = prompt + excluded.prompt,
+              completion = completion + excluded.completion,
+              total = total + excluded.total,
+              cost = cost + excluded.cost,
+              priced_calls = priced_calls + excluded.priced_calls,
+              cached = cached + excluded.cached,
+              cached_of = cached_of + excluded.cached_of
+          `);
+          for (const [k, b] of Object.entries(this.pending.byAgent)) {
+            upsertBucket.run("agent", k, b.calls, b.prompt, b.completion, b.total, b.cost, b.pricedCalls, b.cached, b.cachedOf);
           }
-          return true;
-        });
-      }
-      file.updatedAt = new Date().toISOString();
+          for (const [k, b] of Object.entries(this.pending.byModel)) {
+            upsertBucket.run("model", k, b.calls, b.prompt, b.completion, b.total, b.cost, b.pricedCalls, b.cached, b.cachedOf);
+          }
 
-      fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-      const tmp = `${this.filePath}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(file), "utf8");
-      fs.renameSync(tmp, this.filePath);
+          let maxSeq = Number(
+            (db.prepare("SELECT COALESCE(MAX(seq_order), 0) AS m FROM usage_tasks").get() as { m?: number } | undefined)?.m ?? 0
+          );
+          const getExistingSeq = db.prepare("SELECT seq_order FROM usage_tasks WHERE task_id = ?");
+          const upsertTask = db.prepare(`
+            INSERT INTO usage_tasks (task_id, repo, title, started_at, ended_at, state, pid, usage_json, by_agent_json, phases_json, seq_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id) DO UPDATE SET
+              repo = excluded.repo,
+              title = excluded.title,
+              started_at = excluded.started_at,
+              ended_at = excluded.ended_at,
+              state = excluded.state,
+              pid = excluded.pid,
+              usage_json = excluded.usage_json,
+              by_agent_json = excluded.by_agent_json,
+              phases_json = excluded.phases_json
+          `);
 
-      // Only after the write landed: a failed write keeps the deltas for next time.
+          for (const t of this.owned.values()) {
+            const existing = getExistingSeq.get(t.taskId) as { seq_order?: number } | undefined;
+            const seq = typeof existing?.seq_order === "number" ? existing.seq_order : ++maxSeq;
+            upsertTask.run(
+              t.taskId,
+              t.repo ?? null,
+              t.title ?? null,
+              t.startedAt,
+              t.endedAt ?? null,
+              t.state,
+              t.pid ?? null,
+              JSON.stringify(t.usage),
+              JSON.stringify(t.byAgent),
+              JSON.stringify(t.phases),
+              seq
+            );
+          }
+
+          // Reconcile running tasks whose owning process died.
+          const runningRows = db
+            .prepare("SELECT task_id, pid FROM usage_tasks WHERE state = 'running'")
+            .all() as Array<{ task_id: string; pid: number | null }>;
+          const markInterrupted = db.prepare("UPDATE usage_tasks SET state = 'interrupted', pid = NULL WHERE task_id = ?");
+          for (const r of runningRows) {
+            if (!this.owned.has(r.task_id) && (!r.pid || !pidAlive(r.pid))) {
+              markInterrupted.run(r.task_id);
+            }
+          }
+
+          // Evict oldest non-running tasks beyond MAX_TASKS (totals & taskCount never shrink).
+          const totalTaskRows = Number(
+            (db.prepare("SELECT COUNT(*) AS c FROM usage_tasks").get() as { c?: number } | undefined)?.c ?? 0
+          );
+          if (totalTaskRows > MAX_TASKS) {
+            const excess = totalTaskRows - MAX_TASKS;
+            const toDelete = db
+              .prepare("SELECT task_id FROM usage_tasks WHERE state != 'running' ORDER BY seq_order ASC LIMIT ?")
+              .all(excess) as Array<{ task_id: string }>;
+            const del = db.prepare("DELETE FROM usage_tasks WHERE task_id = ?");
+            for (const row of toDelete) {
+              del.run(row.task_id);
+            }
+          }
+
+          const snapshotFile = this.readLedgerFileInTx(db);
+          db.exec("COMMIT");
+          return snapshotFile;
+        } catch (err) {
+          try {
+            db.exec("ROLLBACK");
+          } catch {
+            // Ignore rollback error.
+          }
+          throw err;
+        }
+      });
+
+      // Only after the transaction committed: a failed write keeps the deltas for next time.
       this.pending = { totals: emptyBucket(), tasks: 0, byAgent: {}, byModel: {} };
       this.hasPending = false;
       for (const [id, t] of this.owned) if (t.state !== "running") this.owned.delete(id);
@@ -462,7 +799,26 @@ export class UsageLedger {
   /** Current on-disk truth (flushes first, so it includes this process's spend). */
   snapshot(): LedgerFile {
     this.flush();
-    return this.lastFile ?? this.load();
+    if (this.lastFile) return this.lastFile;
+    try {
+      return this.withDb((db) => {
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          const f = this.readLedgerFileInTx(db);
+          db.exec("COMMIT");
+          return f;
+        } catch (err) {
+          try {
+            db.exec("ROLLBACK");
+          } catch {
+            // Ignore rollback error.
+          }
+          throw err;
+        }
+      });
+    } catch {
+      return freshFile();
+    }
   }
 
   /** True when there are unflushed deltas — exposed for tests. */

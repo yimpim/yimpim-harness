@@ -79,9 +79,11 @@ describe("the ledger", () => {
   });
   test("it survives a save and a reload, and an older ledger without the fields loads as zero", () => {
     ledger.flush();
+    assert.equal(new UsageLedger(file).snapshot().totals.cached, 800);
+    const oldFile = path.join(path.dirname(file), "old-usage-ledger.json");
     const old = { v: 1, desktopId: "d", since: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", totals: { calls: 2, prompt: 10, completion: 1, total: 11, cost: 0, pricedCalls: 0 }, taskCount: 0, byAgent: {}, byModel: {}, tasks: [] };
-    fs.writeFileSync(file, JSON.stringify(old));
-    const reloaded = new UsageLedger(file).snapshot();
+    fs.writeFileSync(oldFile, JSON.stringify(old));
+    const reloaded = new UsageLedger(oldFile).snapshot();
     assert.equal(reloaded.totals.cached, 0);
     assert.equal(cacheText(reloaded.totals), "");
   });
