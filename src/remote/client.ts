@@ -374,6 +374,7 @@ export class RemoteSession {
   private recentEvents: Array<{ eventId: number; kind: string; at: string; payload: Record<string, unknown> }> = [];
   private nextEventId = 1;
   private hasEmittedTaskEvents = false;
+  private lastCompletedTaskId: string | null = null;
 
   private status: RemoteStatus = {
     runId: "",
@@ -420,6 +421,7 @@ export class RemoteSession {
     this.recentEvents = [];
     this.nextEventId = 1;
     this.hasEmittedTaskEvents = false;
+    this.lastCompletedTaskId = null;
     this.failures = 0;
     this.flushFailures = 0;
     this.unauthorizedPolls = 0;
@@ -435,6 +437,8 @@ export class RemoteSession {
       state: "idle",
       taskRunning: false,
       taskStatus: "idle",
+      activeTaskId: null,
+      lastCompletedTaskId: null,
       phases: [],
       pendingQuestions: [],
       tokensUsed: 0,
@@ -810,11 +814,24 @@ export class RemoteSession {
   updateStatus(patch: Partial<RemoteStatus>): void {
     const nextState = patch.state ?? this.status.state;
     const derived = this.deriveTaskStatusFields(nextState);
+    const nextRunning = patch.taskRunning ?? derived.taskRunning;
+    const nextTaskId = patch.taskId ?? this.status.taskId;
+    if (!nextRunning && (nextState === "done" || nextState === "failed" || nextState === "aborted") && nextTaskId) {
+      this.lastCompletedTaskId = nextTaskId;
+    }
+    const activeTaskId =
+      patch.activeTaskId !== undefined
+        ? patch.activeTaskId
+        : nextRunning && nextTaskId
+          ? nextTaskId
+          : null;
     this.status = {
       ...this.status,
       ...patch,
-      taskRunning: patch.taskRunning ?? derived.taskRunning,
+      taskRunning: nextRunning,
       taskStatus: patch.taskStatus ?? derived.taskStatus,
+      activeTaskId,
+      lastCompletedTaskId: patch.lastCompletedTaskId !== undefined ? patch.lastCompletedTaskId : this.lastCompletedTaskId,
       updatedAt: new Date().toISOString(),
     };
     this.push("status", { status: this.status });
@@ -848,10 +865,16 @@ export class RemoteSession {
       tokensUsed: opts.tokens,
       ...(opts.cost !== undefined ? { cost: opts.cost, costUsd: opts.cost } : {}),
     });
+    if (opts.taskId) {
+      this.lastCompletedTaskId = opts.taskId;
+    }
     this.updateStatus({
+      taskId: opts.taskId,
       state: opts.state,
       taskRunning: false,
       taskStatus: opts.state === "done" ? "completed" : "failed",
+      activeTaskId: null,
+      lastCompletedTaskId: this.lastCompletedTaskId,
       tokensUsed: opts.tokens,
       ...(opts.cost !== undefined ? { costUsd: opts.cost } : {}),
     });

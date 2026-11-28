@@ -215,6 +215,10 @@ export interface RemoteStatus {
   taskRunning?: boolean;
   /** Explicit task-level terminal/active status carried on every status heartbeat for reliable reconciliation. */
   taskStatus?: "idle" | "running" | "completed" | "failed";
+  /** Authoritative active task id (`null` when idle between tasks). */
+  activeTaskId?: string | null;
+  /** Most recently completed task id in this session (`null` if none yet). */
+  lastCompletedTaskId?: string | null;
   goal?: string;
   phases: { id: string; name: string; status: string }[];
   currentPhase?: string;
