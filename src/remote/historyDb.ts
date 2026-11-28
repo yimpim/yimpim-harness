@@ -589,12 +589,12 @@ function applyEventToSnapshot(
         agent.toUpperCase() === "TESTABILITY_PLANNER" ||
         (payload as any).stage === "planning");
 
-    const targetPhaseId = rawPhaseId ?? (isDiscoveryOrPlanning ? "discover-plan" : base.phases[base.phases.length - 1]?.id ?? "discover-plan");
+    const targetPhaseId = rawPhaseId ?? (isDiscoveryOrPlanning ? "__discover_plan__" : base.phases[base.phases.length - 1]?.id ?? "__discover_plan__");
     let phase: TaskSnapshotPhase | undefined = base.phases.find((x) => x.id === targetPhaseId);
     if (!phase) {
       phase = {
         id: targetPhaseId,
-        name: rawPhaseName ?? (targetPhaseId === "discover-plan" ? "Discover & Plan" : targetPhaseId),
+        name: rawPhaseName ?? (targetPhaseId === "__discover_plan__" ? "Discover & Plan" : targetPhaseId),
         status: "IN_PROGRESS",
         runs: [],
       };
@@ -635,7 +635,7 @@ function applyEventToSnapshot(
     if (!target) {
       let phase = base.phases[base.phases.length - 1];
       if (!phase) {
-        phase = { id: "discover-plan", name: "Discover & Plan", status: "IN_PROGRESS", runs: [] };
+        phase = { id: "__discover_plan__", name: "Discover & Plan", status: "IN_PROGRESS", runs: [] };
         base.phases.push(phase);
       }
       target = { ...(workerId ? { workerId } : {}), agent, phaseId: phase.id };
