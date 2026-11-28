@@ -20,6 +20,12 @@ import {
   runResolvedCommand,
 } from "./commandPolicy.js";
 import { findInstalledVersions, snapshotDirs } from "./installVerify.js";
+import {
+  buildTargetedRebuildInvocation,
+  formatRebuildEscalationQuestion,
+  planPostInstallRebuild,
+  readInstalledLifecycleScripts,
+} from "./nativeRebuild.js";
 import { javaAwareEnv, probeJava, winSafeCommand } from "./capabilities.js";
 import {
   ECOSYSTEMS,
@@ -2782,7 +2788,13 @@ export class AgentTools {
     // CLI (e.g. `expo install`) that drops or mis-forwards the flag cannot
     // turn the add into a run of the package's install scripts.
     const runEnv: NodeJS.ProcessEnv = addsPackages
-      ? { ...env, npm_config_ignore_scripts: "true", YARN_ENABLE_SCRIPTS: "false", PIP_ONLY_BINARY: ":all:" }
+      ? {
+          ...env,
+          NPM_CONFIG_IGNORE_SCRIPTS: "true",
+          npm_config_ignore_scripts: "true",
+          YARN_ENABLE_SCRIPTS: "false",
+          PIP_ONLY_BINARY: ":all:",
+        }
       : env;
     const result = await runResolvedCommand(found, decision.argv.slice(1), {
       cwd: decision.cwd,
@@ -2806,9 +2818,86 @@ export class AgentTools {
     }
     if (result.ok && addsPackages && addsPackages.length > 0) {
       const check = await this.verifyAddedPackages(addsPackages, beforeSnapshot, snapshotDirsList);
-      return check ? `${text}\n\n${check}` : text;
+      const rebuildNotes = await this.handlePostInstallRebuilds(
+        addsPackages,
+        check,
+        decision.cwd,
+        snapshotDirsList,
+        env,
+        decision.argv[0] ?? "",
+        found
+      );
+      const extras = [check, rebuildNotes].filter(Boolean).join("\n\n");
+      return extras ? `${text}\n\n${extras}` : text;
     }
     return text;
+  }
+
+  private async handlePostInstallRebuilds(
+    names: string[],
+    verifyOutput: string,
+    cwd: string,
+    dirs: string[],
+    baseEnv: NodeJS.ProcessEnv,
+    exeName: string,
+    resolvedExe: string
+  ): Promise<string> {
+    const exe = path.basename(exeName).toLowerCase().replace(/\.(cmd|exe)$/, "");
+    if (!["npm", "pnpm", "yarn", "bun", "expo", "npx"].includes(exe)) {
+      return "";
+    }
+    const notes: string[] = [];
+    const allowlist = this.config.security?.nativeRebuildAllowlist;
+    for (const pkg of names) {
+      const lifecycleScripts = readInstalledLifecycleScripts(pkg, dirs);
+      const passedVerification =
+        !verifyOutput.includes(`[VERSION ATTENTION] ${pkg}@`) &&
+        !verifyOutput.includes(`[VERSION UNVERIFIED] ${pkg}:`) &&
+        !verifyOutput.includes(`[VERSION UNCHECKED] ${pkg}:`);
+      const plan = planPostInstallRebuild({
+        pkgName: pkg,
+        lifecycleScripts,
+        passedVerification,
+        allowlist,
+      });
+      if (plan.action === "none" || !plan.scripts) {
+        continue;
+      }
+
+      let shouldRebuild = plan.action === "auto_rebuild";
+      if (plan.action === "escalate_human") {
+        const question = formatRebuildEscalationQuestion(this.activeAgent, pkg, plan.scripts);
+        console.log("\n==========================================");
+        console.log(" [USER INTERACTION REQUIRED] ");
+        console.log("==========================================");
+        console.log(`${question}\n`);
+        const answer = (await this.askFn(question, "no", "approval")).trim().toLowerCase();
+        shouldRebuild = answer === "yes" || answer === "y";
+        if (!shouldRebuild) {
+          notes.push(`[REBUILD SKIPPED] ${pkg}: user declined targeted \`npm rebuild ${pkg} --ignore-scripts=false\`.`);
+          continue;
+        }
+      }
+
+      const npmBin = exe === "npm" ? resolvedExe : resolveExecutable("npm", cwd, baseEnv);
+      if (!npmBin) {
+        notes.push(`[REBUILD SKIPPED] ${pkg}: npm executable not found on PATH for targeted rebuild.`);
+        continue;
+      }
+      const invocation = buildTargetedRebuildInvocation(pkg, baseEnv);
+      console.log(`[${this.activeAgent}] ⚙️ Targeted native rebuild: npm ${invocation.argv.join(" ")}`);
+      const rebuildResult = await runResolvedCommand(npmBin, invocation.argv, {
+        cwd,
+        env: invocation.env,
+        wrap: winSafeCommand,
+      });
+      notes.push(
+        rebuildResult.ok
+          ? `[REBUILD PASS] npm rebuild ${pkg} --ignore-scripts=false\n${rebuildResult.output}`.trim()
+          : `[REBUILD FAIL: exit ${rebuildResult.code}] npm rebuild ${pkg} --ignore-scripts=false\n${rebuildResult.output}`.trim()
+      );
+    }
+    return notes.join("\n");
   }
 
   /**

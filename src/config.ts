@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { DEFAULT_BLOCKED_FILE_PATTERNS } from "./sensitivePaths.js";
 import { DEFAULT_BLOCKED_DIRECTORIES } from "./projectPaths.js";
+import { DEFAULT_NATIVE_REBUILD_ALLOWLIST } from "./nativeRebuild.js";
 
 /**
  * A blocked list a person can add to but never shorten: their entries are unioned with the built-in ones, each kept once, built-in first.
@@ -128,6 +129,9 @@ export const ConfigSchema = z.object({
           reasoning: z.enum(["low", "medium", "high"]).default("medium"),
         })
         .prefault({}),
+      // Trusted native/binary npm packages permitted to run a targeted
+      // `npm rebuild <pkg> --ignore-scripts=false` after passing verification.
+      nativeRebuildAllowlist: z.array(z.string()).default([...DEFAULT_NATIVE_REBUILD_ALLOWLIST]),
     })
     .prefault({}),
   uiDesign: z

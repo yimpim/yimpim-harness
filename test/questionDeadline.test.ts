@@ -179,7 +179,7 @@ describe("the setting", () => {
 describe("approvals are marked as approvals", () => {
   test("the command, install, package and deletion approvals ask as 'approval', and the wiring passes that on", () => {
     const tools = fs.readFileSync("src/agentTools.ts", "utf8").replace(/\r\n/g, "\n");
-    assert.equal((tools.match(/this\.askFn\(question, "no", "approval"\)/g) ?? []).length, 3);
+    assert.equal((tools.match(/this\.askFn\(question, "no", "approval"\)/g) ?? []).length, 4);
     assert.ok(!/this\.askFn\(question, "no"\)/.test(tools));
     const idx = fs.readFileSync("src/index.ts", "utf8").replace(/\r\n/g, "\n");
     assert.ok(idx.includes('kind: kind === "approval" ? "approval" : "blocking",'));
