@@ -182,7 +182,6 @@ import { translateForRemote } from "./remoteEventTranslator.js";
 import { PlannerStage } from "./plannerStage.js";
 import { logLocal, isLocalOnly } from "./localLog.js";
 import {
-  readHistoryBacklogForReplay,
   readHistoryBacklogSince,
   readHistoryBacklogSinceEventId,
   readTaskEvents,
@@ -2080,22 +2079,18 @@ async function connectRemote(
     };
     runControl.onQuestionAnswered(activeAnsweredListener);
 
-    // onQuestion above only ever fires for questions asked AFTER this listener
-    // is registered — a question already outstanding when this phone (re)pairs
-    // (e.g. Discovery or the Planner asked something while it was disconnected,
-    // or before /remote-control was even run) was never pushed to THIS
-    // session and so never appears in its event stream at all, regardless of
-    // how correctly the phone replays past events. Catch it up immediately.
-    for (const q of runControl.pending()) session.askQuestion(q);
+    // Only catch up an actively running task's non-idle pending question;
+    // never push stale questions or replay prior tasks into a fresh QR session.
+    const activeCtx = questionContext();
+    if (activeCtx.taskId) {
+      for (const q of runControl.pending()) {
+        if (!q.idle) session.askQuestion(q);
+      }
+    }
 
-    // connectRemote always represents a BRAND-NEW session — previous is torn
-    // down unconditionally above — so its event stream starts empty on the
-    // broker even though this repo may have a long history behind it.
-    // replayHistory (not push() — see its own doc comment) seeds the outbox
-    // with the durable backlog, original timestamps intact, before any live
-    // events — the phone needs no special handling, these just arrive as the
-    // first events of the new session, in order.
-    session.replayHistory(readHistoryBacklogForReplay(repoRoot));
+    // Historical tasks are served strictly on-demand via `history.list` and
+    // `fetch_history({ taskId })` — never dumped unconditionally into a fresh
+    // QR session's outbox.
     // The lifetime totals are this DESKTOP's, not this session's, so a phone
     // that was just installed (or re-paired) sees the real number straight away.
     session.pushUsageTotals(toUsageWire(usageLedger().snapshot()));
