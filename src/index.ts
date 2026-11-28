@@ -5556,7 +5556,7 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
   if (config.interaction.modelAnswersOnTimeout !== false) setTimeoutResolver(makeTimeoutResolver({ client, config, repoRoot }));
   setQuestionExplainer((q) =>
     plainWordsFor(q, (messages) =>
-      runLabeledCompletion({ client, models: config.models.planner, messages: messages as any, agentName: "PLANNER", jsonMode: true, reason: "Explaining a question in plain words" })
+      runLabeledCompletion({ client, models: config.models.planner, messages: messages as any, agentName: "PLANNER", jsonMode: true, background: true, reason: "Explaining a question in plain words" })
     )
   );
   agentTools.setQuestionResolver(async (question) => {
@@ -5573,7 +5573,7 @@ ${result.ok ? "🎨" : "⚠️"} [DESIGN] ${result.text}`);
       named,
       shortlist,
       repoRoot,
-      complete: (messages) => runLabeledCompletion({ client, models: config.models.planner, messages: messages as any, agentName: "PLANNER", jsonMode: true, reason: "Checking an agent's question against the specs and code before asking you" }),
+      complete: (messages) => runLabeledCompletion({ client, models: config.models.planner, messages: messages as any, agentName: "PLANNER", jsonMode: true, background: true, reason: "Checking an agent's question against the specs and code before asking you" }),
     });
     if (!got) return null;
     let logged = "";

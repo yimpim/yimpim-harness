@@ -23,11 +23,13 @@ export interface AskedQuestion {
   prompt: string;
   choices?: string[];
   idle?: boolean;
+  kind?: string;
 }
 
 /** Does this question still need a plain-words explanation? */
 export function needsPlainWords(q: AskedQuestion): boolean {
   if (q.idle) return false; // the normal "what should I do" prompt is not a question about the work
+  if (q.kind === "approval") return false; // command/install approvals are already plain English and must reach the user/phone immediately
   const p = String(q.prompt ?? "").trim();
   if (p.length < MIN_PROMPT) return false;
   if (p.toLowerCase().includes(PLAIN_MARK.toLowerCase())) return false; // the asker already wrote it

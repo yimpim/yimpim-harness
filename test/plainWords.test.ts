@@ -15,6 +15,7 @@ describe("which questions get an explanation", () => {
   test("a real question does; the idle prompt, one that already has it, and a tiny one do not", () => {
     assert.equal(needsPlainWords({ prompt: Q }), true);
     assert.equal(needsPlainWords({ prompt: Q, idle: true }), false);
+    assert.equal(needsPlainWords({ prompt: Q, kind: "approval" }), false, "command/install approvals skip the planner explainer");
     assert.equal(needsPlainWords({ prompt: `${Q}\n\n(In plain words: where the list is kept.)` }), false);
     assert.equal(needsPlainWords({ prompt: "ok?" }), false);
   });

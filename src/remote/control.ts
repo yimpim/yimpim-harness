@@ -12,7 +12,7 @@
 
 import { PendingQuestion } from "./protocol.js";
 import { startPrompt } from "../terminalPrompt.js";
-import { withPlainWords, type PlainExplanation } from "../plainWords.js";
+import { PLAIN_MARK, withPlainWords, type PlainExplanation } from "../plainWords.js";
 import { events } from "../events.js";
 import { logLocal } from "../localLog.js";
 import fs from "fs";
@@ -367,8 +367,9 @@ export async function askAnywhere(
       if (found) {
         const original = question.prompt;
         question = { ...question, prompt: withPlainWords(original, found.plain) };
-        promptText = promptText.includes(original) ? promptText.split(original).join(question.prompt) : `${question.prompt}
-${promptText}`;
+        promptText = promptText.includes(original)
+          ? promptText.split(original).join(question.prompt)
+          : `(${PLAIN_MARK} ${found.plain})\n${promptText}`;
         // Each option gets its plain gloss too; whatever is chosen is turned back into the original option below.
         const choices = question.choices ?? [];
         if (found.options && found.options.length === choices.length) {

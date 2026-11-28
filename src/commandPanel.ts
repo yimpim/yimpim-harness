@@ -79,6 +79,18 @@ const PM_RUN = new Set(["npm", "pnpm", "yarn", "bun"]);
 const SCRIPT_FILE = /\.(c?js|mjs|ts|tsx|jsx|py|rb|sh|bash|ps1|bat|cmd|json|ya?ml|toml)$/i;
 const MAX_SCRIPT_FILE = 60_000;
 
+/** Implicit config files loaded by standard build/typecheck/test runners so security judges see them instead of flagging "unseen build config". */
+const RUNNER_CONFIG_CANDIDATES: Record<string, string[]> = {
+  vite: ["vite.config.ts", "vite.config.mts", "vite.config.js", "vite.config.mjs", "vite.config.cjs", "tsconfig.json"],
+  vitest: ["vitest.config.ts", "vitest.config.mts", "vitest.config.js", "vite.config.ts", "vite.config.js"],
+  tsc: ["tsconfig.json", "tsconfig.app.json", "tsconfig.node.json"],
+  jest: ["jest.config.ts", "jest.config.js", "jest.config.cjs", "jest.config.mjs"],
+  next: ["next.config.ts", "next.config.mjs", "next.config.js", "next.config.cjs"],
+  webpack: ["webpack.config.ts", "webpack.config.js", "webpack.config.cjs"],
+  rollup: ["rollup.config.ts", "rollup.config.mjs", "rollup.config.js"],
+  tsup: ["tsup.config.ts", "tsup.config.js"],
+};
+
 /** For `npm run x` / `npm test` / `yarn x`: the script text the package manager would run, and the project files that script names, in full. */
 function scriptContext(req: ReviewRequest): { text: string; files: { rel: string; text: string }[] } | undefined {
   const exe = path.basename(req.argv[0] ?? "").toLowerCase().replace(/\.(cmd|exe)$/, "");
@@ -94,16 +106,29 @@ function scriptContext(req: ReviewRequest): { text: string; files: { rel: string
     const body = pkg?.scripts?.[name];
     if (typeof body !== "string") return { text: `package.json has no script named "${name}".`, files: [] };
     const files: { rel: string; text: string }[] = [];
-    for (const token of body.split(/[\s&|;]+/)) {
-      const t = token.replace(/^["']|["']$/g, "");
-      if (!t || t.startsWith("-") || !SCRIPT_FILE.test(t)) continue;
-      const abs = path.resolve(req.cwd, t);
+    const addProjectFile = (candidatePath: string): void => {
+      const abs = path.resolve(req.cwd, candidatePath);
       const rel = path.relative(req.repoRoot, abs).replace(/\\/g, "/");
-      if (rel.startsWith("..") || path.isAbsolute(rel) || files.some((f) => f.rel === rel)) continue;
+      if (rel.startsWith("..") || path.isAbsolute(rel) || files.some((f) => f.rel === rel)) return;
       try {
-        if (fs.statSync(abs).isFile() && fs.statSync(abs).size <= MAX_SCRIPT_FILE) files.push({ rel, text: fs.readFileSync(abs, "utf8") });
+        if (fs.statSync(abs).isFile() && fs.statSync(abs).size <= MAX_SCRIPT_FILE) {
+          files.push({ rel, text: fs.readFileSync(abs, "utf8") });
+        }
       } catch {
         // not a file here
+      }
+    };
+    const tokens = body.split(/[\s&|;]+/);
+    for (const token of tokens) {
+      const t = token.replace(/^["']|["']$/g, "");
+      if (!t || t.startsWith("-")) continue;
+      if (SCRIPT_FILE.test(t)) {
+        addProjectFile(t);
+      }
+      const bare = path.basename(t).toLowerCase().replace(/\.(cmd|exe)$/, "");
+      const implicitConfigs = RUNNER_CONFIG_CANDIDATES[bare];
+      if (implicitConfigs) {
+        for (const cfg of implicitConfigs) addProjectFile(cfg);
       }
     }
     // What else the package manager runs with it, so "it may also run pre/post scripts" is answered with what is there, not guessed at.
