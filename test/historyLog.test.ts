@@ -17,7 +17,7 @@
  * continuing across every file — a filename's range only ever records
  * where that segment landed, never a per-file restart.
  */
-import { test, describe, after } from "node:test";
+import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
@@ -33,6 +33,7 @@ import {
   listTasks,
   reconcileInterruptedTask,
   _setMaxRetainedTasksForTesting,
+  _resetHistoryDbForTesting,
 } from "../src/remote/historyLog.js";
 
 const tempDirs: string[] = [];
@@ -47,47 +48,30 @@ function historyDir(repoRoot: string): string {
   return path.join(repoRoot, ".agent", "remote_history");
 }
 
-/** Writes a CLOSED segment file directly — simulates history that already
- *  existed on disk before this process started. */
+/** Writes a CLOSED segment file directly — simulates legacy JSONL history
+ *  that already existed on disk before migration to SQLite. */
 function writeClosedSegment(repoRoot: string, name: string, firstEventId: number, lastEventId: number, entries: unknown[]): void {
   const dir = historyDir(repoRoot);
   fsSync.mkdirSync(dir, { recursive: true });
   fsSync.writeFileSync(path.join(dir, `${name}_${firstEventId}-${lastEventId}.jsonl`), entries.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf-8");
 }
 
-/** Writes a STILL-OPEN segment file directly — simulates a task (or between)
- *  that was active when a prior process ended, never yet finalized. */
+/** Writes a STILL-OPEN segment file directly — simulates a legacy task (or
+ *  between-segment) that was active when a prior process ended. */
 function writeOpenSegment(repoRoot: string, name: string, firstEventId: number, entries: unknown[]): void {
   const dir = historyDir(repoRoot);
   fsSync.mkdirSync(dir, { recursive: true });
   fsSync.writeFileSync(path.join(dir, `${name}_${firstEventId}-open.jsonl`), entries.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf-8");
 }
 
-/** The one segment file currently open for this repo — there's always
- *  exactly one once anything has been appended. */
-function findOpenSegmentFile(repoRoot: string): string {
-  const dir = historyDir(repoRoot);
-  const open = fsSync.readdirSync(dir).find((f) => f.endsWith("-open.jsonl"));
-  if (!open) throw new Error(`no open segment found in ${dir}`);
-  return path.join(dir, open);
-}
-
-/** Reads tasks.index directly, for assertions that want the raw lines rather
- *  than going through listTasks's own paging/newest-first behavior. */
-function readRawTaskIndex(repoRoot: string): any[] {
-  let raw: string;
-  try {
-    raw = fsSync.readFileSync(path.join(historyDir(repoRoot), "tasks.index"), "utf-8");
-  } catch {
-    return [];
-  }
-  return raw
-    .split("\n")
-    .filter((l) => l.trim())
-    .map((l) => JSON.parse(l));
-}
+before(async () => {
+  const dbDir = await fs.mkdtemp(path.join(os.tmpdir(), "yimpim-historylog-db-"));
+  tempDirs.push(dbDir);
+  _resetHistoryDbForTesting(path.join(dbDir, "historylog-test.db"));
+});
 
 after(async () => {
+  _resetHistoryDbForTesting(undefined);
   await Promise.all(tempDirs.map((d) => fs.rm(d, { recursive: true, force: true })));
 });
 
@@ -192,9 +176,17 @@ describe("readHistoryBacklog", () => {
 
   test("skips a corrupt line instead of failing the whole read", async () => {
     const repoRoot = await makeTempRepo();
-    appendHistoryEntry(repoRoot, "worker.start", { agent: "EDITOR" }, "2026-01-01T00:00:00.000Z", false);
-    await fs.appendFile(findOpenSegmentFile(repoRoot), "not valid json at all\n");
-    appendHistoryEntry(repoRoot, "worker.end", { agent: "EDITOR", outcome: "passed" }, "2026-01-01T00:00:05.000Z", false);
+    const dir = historyDir(repoRoot);
+    fsSync.mkdirSync(dir, { recursive: true });
+    fsSync.writeFileSync(
+      path.join(dir, "between_1-open.jsonl"),
+      [
+        JSON.stringify({ eventId: 1, kind: "worker.start", payload: { agent: "EDITOR" }, at: "2026-01-01T00:00:00.000Z" }),
+        "not valid json at all",
+        JSON.stringify({ eventId: 2, kind: "worker.end", payload: { agent: "EDITOR", outcome: "passed" }, at: "2026-01-01T00:00:05.000Z" }),
+      ].join("\n") + "\n",
+      "utf-8"
+    );
 
     const entries = readHistoryBacklog(repoRoot);
     assert.equal(entries.length, 2, "the corrupt middle line must be skipped, not fatal");
@@ -245,10 +237,9 @@ describe("appendHistoryEntry — per-task segmentation, never trimmed", () => {
       appendHistoryEntry(repoRoot, "task.end", { taskId, state: "done" }, `2026-01-01T00:0${i}:03.000Z`, false);
     }
 
-    const files = fsSync.readdirSync(historyDir(repoRoot));
-    const taskFiles = files.filter((f) => f.startsWith("task-"));
-    assert.equal(taskFiles.length, TASK_COUNT, "every task must have its own, separately closed file");
-    assert.ok(taskFiles.every((f) => !f.endsWith("-open.jsonl")), "a task that ended cleanly must have its file closed, not left open");
+    const { entries: tasks } = listTasks(repoRoot, TASK_COUNT + 10);
+    assert.equal(tasks.length, TASK_COUNT, "every task must have its own task index entry");
+    assert.ok(tasks.every((t) => t.lastEventId !== null), "a task that ended cleanly must be closed with a lastEventId");
 
     const entries = readHistoryBacklog(repoRoot);
     assert.equal(entries.length, TASK_COUNT * 4);
@@ -258,28 +249,23 @@ describe("appendHistoryEntry — per-task segmentation, never trimmed", () => {
     assert.ok(entries.some((e) => e.kind === "task.end" && e.payload.taskId === "task-0"));
   });
 
-  test("a running task's file is renamed exactly once, at task.end -- never on every intermediate write", async () => {
+  test("a running task stays open across intermediate writes and finalizes at task.end", async () => {
     const repoRoot = await makeTempRepo();
     appendHistoryEntry(repoRoot, "task.start", { taskId: "task-1" }, "2026-01-01T00:00:00.000Z", false);
-    const afterStart = fsSync.readdirSync(historyDir(repoRoot));
-    const openName = afterStart.find((f) => f.startsWith("task-1_"));
-    assert.ok(openName?.endsWith("-open.jsonl"));
+    assert.equal(listTasks(repoRoot, 10).entries[0].lastEventId, null);
 
-    // Several more writes into the still-running task -- the LAST id in this
-    // segment changes with every one of these, but the filename must not.
+    // Several more writes into the still-running task -- task stays open until task.end.
     for (let i = 0; i < 20; i++) {
       appendHistoryEntry(repoRoot, "log", { taskId: "task-1", message: `step-${i}` }, `2026-01-01T00:00:${String(i + 1).padStart(2, "0")}.000Z`, false);
-      const current = fsSync.readdirSync(historyDir(repoRoot));
-      assert.ok(current.includes(openName!), `the open segment's filename must still be exactly "${openName}" after write ${i}, not renamed on every append`);
     }
+    assert.equal(listTasks(repoRoot, 10).entries[0].lastEventId, null);
 
-    appendHistoryEntry(repoRoot, "task.end", { taskId: "task-1", state: "done" }, "2026-01-01T00:00:30.000Z", false);
-    const afterEnd = fsSync.readdirSync(historyDir(repoRoot));
-    assert.ok(!afterEnd.includes(openName!), "task.end must finally rename it away from -open");
-    assert.ok(afterEnd.some((f) => f.startsWith("task-1_") && !f.endsWith("-open.jsonl")), "renamed to its real, final range");
+    const endId = appendHistoryEntry(repoRoot, "task.end", { taskId: "task-1", state: "done" }, "2026-01-01T00:00:30.000Z", false);
+    assert.equal(listTasks(repoRoot, 10).entries[0].lastEventId, endId, "task.end must finalize the task with its lastEventId");
+    assert.equal(readTaskEvents(repoRoot, "task-1", 0, 100).entries.length, 22);
   });
 
-  test("idle-time events between tasks land in their own 'between' file, separate from either task's", async () => {
+  test("idle-time events between tasks stay separate from either task's own events", async () => {
     const repoRoot = await makeTempRepo();
     appendHistoryEntry(repoRoot, "task.start", { taskId: "task-1", runId: "run-1", prompt: "p1", attachments: [] }, "2026-01-01T00:00:00.000Z", false);
     appendHistoryEntry(repoRoot, "task.end", { taskId: "task-1", state: "done" }, "2026-01-01T00:00:01.000Z", false);
@@ -287,10 +273,8 @@ describe("appendHistoryEntry — per-task segmentation, never trimmed", () => {
     appendHistoryEntry(repoRoot, "task.start", { taskId: "task-2", runId: "run-1", prompt: "p2", attachments: [] }, "2026-01-01T00:00:03.000Z", false);
     appendHistoryEntry(repoRoot, "task.end", { taskId: "task-2", state: "done" }, "2026-01-01T00:00:04.000Z", false);
 
-    const files = fsSync.readdirSync(historyDir(repoRoot));
-    assert.equal(files.filter((f) => f.startsWith("between_")).length, 1, "the idle-time advisor.start belongs in its own between-segment file");
-    assert.equal(files.filter((f) => f.startsWith("task-1_")).length, 1);
-    assert.equal(files.filter((f) => f.startsWith("task-2_")).length, 1);
+    assert.deepEqual(readTaskEvents(repoRoot, "task-1", 0, 10).entries.map((e) => e.kind), ["task.start", "task.end"]);
+    assert.deepEqual(readTaskEvents(repoRoot, "task-2", 0, 10).entries.map((e) => e.kind), ["task.start", "task.end"]);
 
     // Still reassembled in the right overall order by the full-backlog reader.
     const kinds = readHistoryBacklog(repoRoot).map((e) => e.kind);
@@ -480,11 +464,12 @@ describe("appendHistoryEntry — task retention (keep the most recent N, evict t
     assert.equal(typeof startId, "number", "a new task must never be blocked by having reached the cap");
     assert.equal(typeof endId, "number");
 
-    const taskFiles = fsSync.readdirSync(historyDir(repoRoot)).filter((f) => f.startsWith("task-"));
-    assert.equal(taskFiles.length, CAP, `exactly ${CAP} task files must remain, got ${taskFiles.length}`);
-    assert.ok(!taskFiles.some((f) => f.startsWith("task-0_")), "the single oldest task must be the one evicted");
-    assert.ok(taskFiles.some((f) => f.startsWith("task-1_")), "the second-oldest must survive -- only exactly one was evicted");
-    assert.ok(taskFiles.some((f) => f.startsWith("task-new_")), "the brand-new task must survive, not itself be evicted");
+    const remainingTasks = listTasks(repoRoot, CAP + 10).entries.map((t) => t.taskId);
+    assert.equal(remainingTasks.length, CAP, `exactly ${CAP} tasks must remain, got ${remainingTasks.length}`);
+    assert.ok(!remainingTasks.includes("task-0"), "the single oldest task must be the one evicted");
+    assert.equal(readTaskEvents(repoRoot, "task-0", 0, 10).missing, true);
+    assert.ok(remainingTasks.includes("task-1"), "the second-oldest must survive -- only exactly one was evicted");
+    assert.ok(remainingTasks.includes("task-new"), "the brand-new task must survive, not itself be evicted");
   });
 
   test("a between-segment with no surviving task on either side of it is evicted along with the task it preceded", async () => {
@@ -502,8 +487,8 @@ describe("appendHistoryEntry — task retention (keep the most recent N, evict t
     appendHistoryEntry(repoRoot, "task.start", { taskId: "task-new" }, "2026-01-01T00:01:00.000Z", false);
     appendHistoryEntry(repoRoot, "task.end", { taskId: "task-new", state: "done" }, "2026-01-01T00:01:01.000Z", false);
 
-    const files = fsSync.readdirSync(historyDir(repoRoot));
-    assert.ok(!files.some((f) => f.startsWith("between_")), "a between-segment older than every retained task has no context left and must be evicted too");
+    const backlog = readHistoryBacklog(repoRoot);
+    assert.ok(!backlog.some((e) => e.eventId === 1 && e.kind === "status"), "a between-segment older than every retained task has no context left and must be evicted too");
   });
 
   test("does nothing while the task count is at or under the cap", async () => {
@@ -512,8 +497,7 @@ describe("appendHistoryEntry — task retention (keep the most recent N, evict t
       appendHistoryEntry(repoRoot, "task.start", { taskId: `task-${i}` }, `2026-01-01T00:0${i}:00.000Z`, false);
       appendHistoryEntry(repoRoot, "task.end", { taskId: `task-${i}`, state: "done" }, `2026-01-01T00:0${i}:01.000Z`, false);
     }
-    const files = fsSync.readdirSync(historyDir(repoRoot));
-    assert.equal(files.filter((f) => f.startsWith("task-")).length, 5, "well under the cap -- nothing should ever be evicted");
+    assert.equal(listTasks(repoRoot, 20).entries.length, 5, "well under the cap -- nothing should ever be evicted");
   });
 
   // By the time appendHistoryEntry's OWN task.end branch calls
@@ -536,44 +520,42 @@ describe("appendHistoryEntry — task retention (keep the most recent N, evict t
 
     reconcileInterruptedTask(repoRoot); // no task was interrupted here, but the retention sweep still runs unconditionally
 
-    const openFile = fsSync.readdirSync(historyDir(repoRoot)).find((f) => f.endsWith("-open.jsonl"));
-    assert.ok(openFile?.startsWith("between_1-open"), "the still-open between-segment must survive retention no matter how old it is");
+    const backlog = readHistoryBacklog(repoRoot);
+    assert.ok(backlog.some((e) => e.eventId === 1 && e.kind === "status"), "the still-open between-segment must survive retention no matter how old it is");
   });
 
   // Task history files, acceptance criterion 9, verbatim: "with
   // the limit set to 3 in a test, creating a 4th task evicts the oldest
   // task's file, its index line, and between-files older than the oldest
   // kept task."
-  test("acceptance criterion 9: with the limit set to 3, a 4th task evicts the oldest task's file, its index line, and older between-files", async () => {
+  test("acceptance criterion 9: with the limit set to 3, a 4th task evicts the oldest task's events, its index row, and older between-events", async () => {
     const repoRoot = await makeTempRepo();
     _setMaxRetainedTasksForTesting(3);
     try {
       appendHistoryEntry(repoRoot, "task.start", { taskId: "task-0" }, "2026-01-01T00:00:00.000Z", false);
       appendHistoryEntry(repoRoot, "task.end", { taskId: "task-0", state: "done" }, "2026-01-01T00:00:01.000Z", false);
-      appendHistoryEntry(repoRoot, "advisor.start", { exchangeId: "ask-1", question: "q" }, "2026-01-01T00:00:02.000Z", false); // between-file, older than every task below
+      appendHistoryEntry(repoRoot, "advisor.start", { exchangeId: "ask-1", question: "q" }, "2026-01-01T00:00:02.000Z", false); // between-event, older than every task below
       appendHistoryEntry(repoRoot, "task.start", { taskId: "task-1" }, "2026-01-01T00:00:03.000Z", false);
       appendHistoryEntry(repoRoot, "task.end", { taskId: "task-1", state: "done" }, "2026-01-01T00:00:04.000Z", false);
       appendHistoryEntry(repoRoot, "task.start", { taskId: "task-2" }, "2026-01-01T00:00:05.000Z", false);
       appendHistoryEntry(repoRoot, "task.end", { taskId: "task-2", state: "done" }, "2026-01-01T00:00:06.000Z", false);
 
       // Still only 3 tasks -- nothing evicted yet.
-      let files = fsSync.readdirSync(historyDir(repoRoot));
-      assert.ok(files.some((f) => f.startsWith("task-0_")), "task-0 must still be present before the 4th task");
-      assert.ok(files.some((f) => f.startsWith("between_")), "the between-file must still be present before the 4th task");
+      assert.equal(readTaskEvents(repoRoot, "task-0", 0, 10).missing, false, "task-0 must still be present before the 4th task");
+      assert.ok(readHistoryBacklog(repoRoot).some((e) => e.kind === "advisor.start"), "the between-event must still be present before the 4th task");
 
       // The 4th task pushes the count to 4, over the limit of 3.
       appendHistoryEntry(repoRoot, "task.start", { taskId: "task-3" }, "2026-01-01T00:00:07.000Z", false);
       appendHistoryEntry(repoRoot, "task.end", { taskId: "task-3", state: "done" }, "2026-01-01T00:00:08.000Z", false);
 
-      files = fsSync.readdirSync(historyDir(repoRoot));
-      assert.ok(!files.some((f) => f.startsWith("task-0_")), "task-0's own file must be evicted");
-      assert.ok(!files.some((f) => f.startsWith("between_")), "the between-file older than the oldest kept task must be evicted too");
+      assert.equal(readTaskEvents(repoRoot, "task-0", 0, 10).missing, true, "task-0's own events must be evicted");
+      assert.ok(!readHistoryBacklog(repoRoot).some((e) => e.kind === "advisor.start"), "the between-event older than the oldest kept task must be evicted too");
       for (const id of [1, 2, 3]) {
-        assert.ok(files.some((f) => f.startsWith(`task-${id}_`)), `task-${id} must survive`);
+        assert.equal(readTaskEvents(repoRoot, `task-${id}`, 0, 10).missing, false, `task-${id} must survive`);
       }
 
-      const indexTaskIds = readRawTaskIndex(repoRoot).map((e) => e.taskId);
-      assert.ok(!indexTaskIds.includes("task-0"), "task-0's own index line must be evicted too");
+      const indexTaskIds = listTasks(repoRoot, 20).entries.map((e) => e.taskId);
+      assert.ok(!indexTaskIds.includes("task-0"), "task-0's own index row must be evicted too");
       assert.deepEqual(indexTaskIds.sort(), ["task-1", "task-2", "task-3"]);
     } finally {
       _setMaxRetainedTasksForTesting(undefined);
@@ -793,8 +775,8 @@ describe("reconcileInterruptedTask", () => {
 
     // Task history files, acceptance criterion 3: the index
     // line must say interrupted too, not just the event itself.
-    const indexEntry = readRawTaskIndex(repoRoot).find((e) => e.taskId === "task-1");
-    assert.ok(indexEntry, "the task must still have an index line");
+    const indexEntry = listTasks(repoRoot, 20).entries.find((e) => e.taskId === "task-1");
+    assert.ok(indexEntry, "the task must still have an index row");
     assert.equal(indexEntry.state, "interrupted");
     assert.equal(indexEntry.lastEventId, end!.eventId);
   });
@@ -903,8 +885,7 @@ describe("readHistoryBacklogSinceEventId — acceptance criterion 3 (paging)", (
     appendHistoryEntry(repoRoot, "task.start", { taskId: "task-3" }, "2026-01-01T00:00:10.000Z", false); // 11
     appendHistoryEntry(repoRoot, "task.end", { taskId: "task-3", state: "done" }, "2026-01-01T00:00:11.000Z", false); // 12
 
-    const files = fsSync.readdirSync(historyDir(repoRoot)).filter((f) => f !== "tasks.index");
-    assert.equal(files.length, 5, "5 separate files: 1 leading between, 3 tasks, 1 between in the middle");
+    assert.equal(listTasks(repoRoot, 20).entries.length, 3, "3 distinct tasks stored");
 
     // Page size 4 -- deliberately NOT aligned to any file's own size (3, 3,
     // 1, 3, 2), so page boundaries land both mid-file and exactly on a file
