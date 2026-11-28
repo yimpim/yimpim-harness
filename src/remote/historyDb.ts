@@ -10,7 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { TaskIndexEntry } from "./protocol.js";
+import type { TaskIndexEntry, TaskSnapshotPhase, TaskSnapshotWire, TaskSnapshotWorker } from "./protocol.js";
 
 export interface HistoryEntry {
   eventId?: number;
@@ -415,6 +415,267 @@ export function ensureRepoMigrated(rawRepoRoot: string): string {
   return norm;
 }
 
+const SNAPSHOT_EVENT_KINDS = new Set([
+  "task.start",
+  "plan.ready",
+  "phase.start",
+  "phase.end",
+  "worker.start",
+  "worker.end",
+  "task.end",
+]);
+
+function applyEventToSnapshot(
+  current: TaskSnapshotWire | null,
+  taskId: string,
+  kind: string,
+  payload: Record<string, unknown>,
+  at: string,
+  repoName?: string
+): TaskSnapshotWire {
+  const base: TaskSnapshotWire = current
+    ? { ...current, phases: current.phases.map((p) => ({ ...p, runs: [...p.runs] })) }
+    : {
+        taskId,
+        ...(repoName ? { repoName } : {}),
+        goal: "",
+        prompt: "",
+        state: "running",
+        tokensUsed: 0,
+        startedAt: at,
+        endedAt: null,
+        updatedAt: at,
+        phases: [],
+      };
+
+  base.updatedAt = at;
+  if (repoName && !base.repoName) base.repoName = repoName;
+
+  if (kind === "task.start") {
+    const prompt = typeof (payload as any).prompt === "string" ? firstLine((payload as any).prompt) : base.prompt;
+    base.prompt = prompt;
+    if (!base.goal) base.goal = prompt;
+    base.state = "running";
+    base.startedAt = at;
+    base.endedAt = null;
+    return base;
+  }
+
+  if (kind === "plan.ready") {
+    const goal = typeof (payload as any).goal === "string" ? firstLine((payload as any).goal) : "";
+    if (goal) base.goal = goal;
+    const planned = Array.isArray((payload as any).phases) ? (payload as any).phases : [];
+    for (let i = 0; i < planned.length; i++) {
+      const p = planned[i] as Record<string, unknown>;
+      const pid = typeof p.id === "string" && p.id ? p.id : `phase-${i + 1}`;
+      const existing = base.phases.find((x) => x.id === pid);
+      if (existing) {
+        if (typeof p.name === "string" && p.name) existing.name = p.name;
+        if (typeof p.goal === "string" && p.goal) existing.goal = p.goal;
+        if (typeof p.executor === "string" && p.executor) existing.executor = p.executor;
+      } else {
+        base.phases.push({
+          id: pid,
+          name: typeof p.name === "string" && p.name ? p.name : `Phase ${i + 1}`,
+          ...(typeof p.goal === "string" && p.goal ? { goal: p.goal } : {}),
+          status: "PENDING",
+          index: i,
+          ...(typeof p.executor === "string" && p.executor ? { executor: p.executor } : {}),
+          runs: [],
+        });
+      }
+    }
+    return base;
+  }
+
+  if (kind === "phase.start") {
+    const pid = typeof (payload as any).phaseId === "string" && (payload as any).phaseId ? (payload as any).phaseId : "phase-0";
+    const name = typeof (payload as any).name === "string" && (payload as any).name ? (payload as any).name : pid;
+    const goal = typeof (payload as any).goal === "string" ? (payload as any).goal : undefined;
+    const index = typeof (payload as any).index === "number" ? (payload as any).index : undefined;
+    const executor = typeof (payload as any).executor === "string" ? (payload as any).executor : undefined;
+    const existing = base.phases.find((x) => x.id === pid);
+    if (existing) {
+      existing.name = name;
+      existing.status = "IN_PROGRESS";
+      if (goal !== undefined) existing.goal = goal;
+      if (index !== undefined) existing.index = index;
+      if (executor !== undefined) existing.executor = executor;
+    } else {
+      base.phases.push({
+        id: pid,
+        name,
+        ...(goal !== undefined ? { goal } : {}),
+        status: "IN_PROGRESS",
+        ...(index !== undefined ? { index } : {}),
+        ...(executor !== undefined ? { executor } : {}),
+        runs: [],
+      });
+    }
+    return base;
+  }
+
+  if (kind === "phase.end") {
+    const pid = typeof (payload as any).phaseId === "string" && (payload as any).phaseId ? (payload as any).phaseId : "phase-0";
+    const name = typeof (payload as any).name === "string" && (payload as any).name ? (payload as any).name : pid;
+    const passed = (payload as any).passed !== false;
+    const existing = base.phases.find((x) => x.id === pid);
+    if (existing) {
+      existing.status = passed ? "COMPLETED" : "ABORTED";
+    } else {
+      base.phases.push({
+        id: pid,
+        name,
+        status: passed ? "COMPLETED" : "ABORTED",
+        runs: [],
+      });
+    }
+    return base;
+  }
+
+  if (kind === "worker.start") {
+    const agent = typeof (payload as any).agent === "string" ? (payload as any).agent : "WORKER";
+    const workerId = typeof (payload as any).workerId === "string" ? (payload as any).workerId : undefined;
+    const rawPhaseId =
+      typeof (payload as any).parentPhaseId === "string" && (payload as any).parentPhaseId
+        ? (payload as any).parentPhaseId
+        : typeof (payload as any).phaseId === "string" && (payload as any).phaseId
+          ? (payload as any).phaseId
+          : undefined;
+    const rawPhaseName = typeof (payload as any).phaseName === "string" && (payload as any).phaseName ? (payload as any).phaseName : undefined;
+
+    const isDiscoveryOrPlanning =
+      !rawPhaseId &&
+      (agent.toUpperCase() === "DISCOVERY" ||
+        agent.toUpperCase() === "PLANNER" ||
+        agent.toUpperCase() === "TESTABILITY_PLANNER" ||
+        (payload as any).stage === "planning");
+
+    const targetPhaseId = rawPhaseId ?? (isDiscoveryOrPlanning ? "discover-plan" : base.phases[base.phases.length - 1]?.id ?? "discover-plan");
+    let phase: TaskSnapshotPhase | undefined = base.phases.find((x) => x.id === targetPhaseId);
+    if (!phase) {
+      phase = {
+        id: targetPhaseId,
+        name: rawPhaseName ?? (targetPhaseId === "discover-plan" ? "Discover & Plan" : targetPhaseId),
+        status: "IN_PROGRESS",
+        runs: [],
+      };
+      base.phases.push(phase);
+    } else if (phase.status === "PENDING") {
+      phase.status = "IN_PROGRESS";
+    }
+
+    const worker: TaskSnapshotWorker = {
+      ...(workerId ? { workerId } : {}),
+      agent,
+      phaseId: targetPhaseId,
+      ...(rawPhaseName ? { phaseName: rawPhaseName } : {}),
+      startedAt: at,
+    };
+    phase.runs.push(worker);
+    return base;
+  }
+
+  if (kind === "worker.end") {
+    const agent = typeof (payload as any).agent === "string" ? (payload as any).agent : "WORKER";
+    const workerId = typeof (payload as any).workerId === "string" ? (payload as any).workerId : undefined;
+    let target: TaskSnapshotWorker | undefined;
+    for (let i = base.phases.length - 1; i >= 0 && !target; i--) {
+      const runs = base.phases[i].runs;
+      for (let j = runs.length - 1; j >= 0; j--) {
+        const r = runs[j];
+        if (workerId && r.workerId === workerId) {
+          target = r;
+          break;
+        }
+        if (!workerId && !r.endedAt && r.agent === agent) {
+          target = r;
+          break;
+        }
+      }
+    }
+    if (!target) {
+      let phase = base.phases[base.phases.length - 1];
+      if (!phase) {
+        phase = { id: "discover-plan", name: "Discover & Plan", status: "IN_PROGRESS", runs: [] };
+        base.phases.push(phase);
+      }
+      target = { ...(workerId ? { workerId } : {}), agent, phaseId: phase.id };
+      phase.runs.push(target);
+    }
+    if (typeof (payload as any).outcome === "string") target.outcome = (payload as any).outcome;
+    if (typeof (payload as any).tokensUsed === "number") target.tokensUsed = (payload as any).tokensUsed;
+    if (typeof (payload as any).costUsd === "number") target.costUsd = (payload as any).costUsd;
+    if (typeof (payload as any).elapsedMs === "number") target.elapsedMs = (payload as any).elapsedMs;
+    if (typeof (payload as any).summary === "string") target.summary = (payload as any).summary;
+    if (typeof (payload as any).safeCount === "number") target.safeCount = (payload as any).safeCount;
+    if (typeof (payload as any).totalJudges === "number") target.totalJudges = (payload as any).totalJudges;
+    target.endedAt = at;
+    return base;
+  }
+
+  if (kind === "task.end") {
+    const rawState = (payload as any).state;
+    const finalState: TaskSnapshotWire["state"] =
+      rawState === "failed" || rawState === "aborted" || rawState === "interrupted" ? rawState : "done";
+    base.state = finalState;
+    base.endedAt = at;
+    if (typeof (payload as any).tokensUsed === "number") base.tokensUsed = (payload as any).tokensUsed;
+    else if (typeof (payload as any).tokens === "number") base.tokensUsed = (payload as any).tokens;
+    if (typeof (payload as any).costUsd === "number") base.costUsd = (payload as any).costUsd;
+    else if (typeof (payload as any).cost === "number") base.costUsd = (payload as any).cost;
+
+    const closedPhaseStatus = finalState === "done" ? "COMPLETED" : "ABORTED";
+    const defaultWorkerOutcome = finalState === "done" ? "completed" : finalState;
+    for (const p of base.phases) {
+      if (p.status === "IN_PROGRESS") {
+        p.status = closedPhaseStatus;
+      }
+      for (const r of p.runs) {
+        if (!r.endedAt) {
+          r.endedAt = at;
+          if (!r.outcome) r.outcome = defaultWorkerOutcome;
+        }
+      }
+    }
+    return base;
+  }
+
+  return base;
+}
+
+function updateTaskSnapshotInTx(
+  db: DatabaseSync,
+  norm: string,
+  taskId: string,
+  kind: string,
+  payload: Record<string, unknown>,
+  at: string,
+  repoName?: string
+): void {
+  if (!SNAPSHOT_EVENT_KINDS.has(kind)) return;
+  const row = db
+    .prepare("SELECT snapshot_json, repo_name FROM tasks WHERE repo_root = ? AND task_id = ?")
+    .get(norm, taskId) as { snapshot_json?: string | null; repo_name?: string | null } | undefined;
+  if (!row) return;
+
+  let existing: TaskSnapshotWire | null = null;
+  if (typeof row.snapshot_json === "string" && row.snapshot_json.length > 0) {
+    try {
+      existing = JSON.parse(row.snapshot_json) as TaskSnapshotWire;
+    } catch {
+      existing = null;
+    }
+  }
+  const updated = applyEventToSnapshot(existing, taskId, kind, payload, at, repoName ?? row.repo_name ?? undefined);
+  db.prepare("UPDATE tasks SET snapshot_json = ?, updated_at = ? WHERE repo_root = ? AND task_id = ?").run(
+    JSON.stringify(updated),
+    at,
+    norm,
+    taskId
+  );
+}
+
 function nextEventIdForRepo(db: DatabaseSync, normRepoRoot: string): number {
   const row = db
     .prepare("SELECT MAX(event_id) AS max_id FROM events WHERE repo_root = ? AND event_id IS NOT NULL")
@@ -467,6 +728,7 @@ export function appendHistoryEntryDb(
           ended_at = NULL,
           updated_at = excluded.updated_at
       `).run(norm, taskId, repoName ?? null, prompt, prompt, JSON.stringify(attachments), assignedEventId, at, at);
+      updateTaskSnapshotInTx(db, norm, taskId, kind, payload, at, repoName);
     } else {
       const currentOpenTask = openTaskIdByRepo.get(norm) ?? null;
       const effectiveTaskId = currentOpenTask ?? (kind === "task.end" ? (payloadTaskId ?? null) : null);
@@ -507,6 +769,11 @@ export function appendHistoryEntryDb(
           `).run(finalState, at, tokensUsed, costUsd, assignedEventId, at, norm, tid);
         }
         openTaskIdByRepo.set(norm, null);
+      }
+
+      const snapshotTaskId = payloadTaskId ?? effectiveTaskId;
+      if (snapshotTaskId && SNAPSHOT_EVENT_KINDS.has(kind)) {
+        updateTaskSnapshotInTx(db, norm, snapshotTaskId, kind, payload, at, repoName);
       }
     }
 
@@ -765,6 +1032,90 @@ export function readTaskEventsDb(
   const slice = truncated ? rows.slice(0, limit) : rows;
   const entries = slice.map(rowToHistoryEntry).filter((e): e is HistoryEntry => e !== undefined);
   return { entries, truncated, missing: false };
+}
+
+export function readTaskSnapshotDb(repoRoot: string, taskId: string): TaskSnapshotWire | null {
+  const norm = ensureRepoMigrated(repoRoot);
+  const db = getHistoryDb();
+  const row = db
+    .prepare(
+      `SELECT task_id, repo_name, title, prompt, state, tokens_used, cost_usd,
+              snapshot_json, started_at, ended_at, updated_at
+       FROM tasks
+       WHERE repo_root = ? AND task_id = ?`
+    )
+    .get(norm, taskId) as
+    | {
+        task_id: string;
+        repo_name: string | null;
+        title: string;
+        prompt: string;
+        state: string;
+        tokens_used: number | null;
+        cost_usd: number | null;
+        snapshot_json: string | null;
+        started_at: string;
+        ended_at: string | null;
+        updated_at: string;
+      }
+    | undefined;
+
+  if (!row) return null;
+
+  if (typeof row.snapshot_json === "string" && row.snapshot_json.length > 0) {
+    try {
+      return JSON.parse(row.snapshot_json) as TaskSnapshotWire;
+    } catch {
+      // Fall through to rebuild from events.
+    }
+  }
+
+  // Lazy backfill for legacy imported tasks that predate Phase 2 snapshot_json.
+  let snapshot: TaskSnapshotWire = {
+    taskId: row.task_id,
+    ...(row.repo_name ? { repoName: row.repo_name } : {}),
+    goal: row.title || row.prompt,
+    prompt: row.prompt,
+    state: (row.state === "running" || row.state === "failed" || row.state === "aborted" || row.state === "interrupted"
+      ? row.state
+      : "done") as TaskSnapshotWire["state"],
+    tokensUsed: typeof row.tokens_used === "number" ? row.tokens_used : 0,
+    ...(typeof row.cost_usd === "number" ? { costUsd: row.cost_usd } : {}),
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    updatedAt: row.updated_at,
+    phases: [],
+  };
+
+  const events = db
+    .prepare("SELECT kind, at, payload_json FROM events WHERE repo_root = ? AND task_id = ? ORDER BY seq_order ASC")
+    .all(norm, taskId) as Array<{ kind: string; at: string; payload_json: string }>;
+
+  for (const ev of events) {
+    if (!SNAPSHOT_EVENT_KINDS.has(ev.kind)) continue;
+    try {
+      const payload = JSON.parse(ev.payload_json) as Record<string, unknown>;
+      snapshot = applyEventToSnapshot(snapshot, taskId, ev.kind, payload, ev.at, row.repo_name ?? undefined);
+    } catch {
+      // Skip malformed payload.
+    }
+  }
+
+  if (row.title && !snapshot.goal) snapshot.goal = row.title;
+  if (typeof row.tokens_used === "number" && snapshot.tokensUsed === 0) snapshot.tokensUsed = row.tokens_used;
+  if (typeof row.cost_usd === "number" && snapshot.costUsd === undefined) snapshot.costUsd = row.cost_usd;
+
+  try {
+    db.prepare("UPDATE tasks SET snapshot_json = ? WHERE repo_root = ? AND task_id = ?").run(
+      JSON.stringify(snapshot),
+      norm,
+      taskId
+    );
+  } catch {
+    // Best-effort cache backfill.
+  }
+
+  return snapshot;
 }
 
 export function reconcileInterruptedTaskDb(repoRoot: string, retentionCap: number): void {

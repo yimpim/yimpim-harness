@@ -22,6 +22,8 @@ import {
   readHistoryBacklogDb,
   listTasksDb,
   readTaskEventsDb,
+  readTaskSnapshotDb,
+  reconcileInterruptedTaskDb,
   _resetHistoryDbForTesting,
 } from "../src/remote/historyDb.js";
 
@@ -183,5 +185,81 @@ describe("historyDb — cascade cleanup on retention eviction", () => {
     const remainingEvents = readHistoryBacklogDb(repo);
     assert.equal(remainingEvents.length, 4, "only t1 and t2 events (2 each) should remain");
     assert.ok(remainingEvents.every((e) => e.payload.taskId === "t1" || e.payload.taskId === "t2"));
+  });
+});
+
+describe("historyDb — Phase 2 authoritative task.snapshot", () => {
+  test("updates tasks.snapshot_json across plan, phases, workers, and task.end", async () => {
+    const repo = await makeTempDir("yimpim-historydb-snap-");
+    appendHistoryEntryDb(repo, "task.start", { taskId: "snap-1", prompt: "Build settings screen" }, "2026-01-01T00:00:00.000Z", "my-app", 100);
+    appendHistoryEntryDb(
+      repo,
+      "plan.ready",
+      {
+        taskId: "snap-1",
+        goal: "Implement Settings Screen",
+        phases: [
+          { id: "p1", name: "UI", goal: "Build UI" },
+          { id: "p2", name: "Tests", goal: "Add tests" },
+        ],
+      },
+      "2026-01-01T00:00:02.000Z",
+      "my-app",
+      100
+    );
+    appendHistoryEntryDb(repo, "phase.start", { taskId: "snap-1", phaseId: "p1", name: "UI", goal: "Build UI", index: 0, total: 2 }, "2026-01-01T00:00:03.000Z", "my-app", 100);
+    appendHistoryEntryDb(repo, "worker.start", { taskId: "snap-1", workerId: "w1", agent: "EDITOR", phaseId: "p1", phaseName: "UI" }, "2026-01-01T00:00:04.000Z", "my-app", 100);
+    appendHistoryEntryDb(repo, "worker.end", { taskId: "snap-1", workerId: "w1", agent: "EDITOR", outcome: "completed", tokensUsed: 300, costUsd: 0.015 }, "2026-01-01T00:00:08.000Z", "my-app", 100);
+    appendHistoryEntryDb(repo, "phase.end", { taskId: "snap-1", phaseId: "p1", name: "UI", passed: true, attempts: 1 }, "2026-01-01T00:00:09.000Z", "my-app", 100);
+    appendHistoryEntryDb(repo, "task.end", { taskId: "snap-1", state: "done", tokensUsed: 300, costUsd: 0.015 }, "2026-01-01T00:00:10.000Z", "my-app", 100);
+
+    const snap = readTaskSnapshotDb(repo, "snap-1");
+    assert.ok(snap);
+    assert.equal(snap.taskId, "snap-1");
+    assert.equal(snap.repoName, "my-app");
+    assert.equal(snap.goal, "Implement Settings Screen");
+    assert.equal(snap.state, "done");
+    assert.equal(snap.tokensUsed, 300);
+    assert.equal(snap.costUsd, 0.015);
+    assert.equal(snap.phases.length, 2);
+    assert.equal(snap.phases[0].status, "COMPLETED");
+    assert.equal(snap.phases[0].runs.length, 1);
+    assert.equal(snap.phases[0].runs[0].agent, "EDITOR");
+    assert.equal(snap.phases[0].runs[0].outcome, "completed");
+    assert.equal(snap.phases[0].runs[0].tokensUsed, 300);
+  });
+
+  test("lazily backfills snapshot_json for legacy imported tasks and closes interrupted snapshots", async () => {
+    const repo = await makeTempDir("yimpim-historydb-snap-legacy-");
+    const legacyDir = path.join(repo, ".agent", "remote_history");
+    fsSync.mkdirSync(legacyDir, { recursive: true });
+    fsSync.writeFileSync(
+      path.join(legacyDir, "old-1_1-3.jsonl"),
+      [
+        JSON.stringify({ eventId: 1, kind: "task.start", payload: { taskId: "old-1", prompt: "Old prompt" }, at: "2026-01-01T00:00:00.000Z" }),
+        JSON.stringify({ eventId: 2, kind: "worker.start", payload: { taskId: "old-1", workerId: "w-old", agent: "EDITOR", phaseId: "p1", phaseName: "Phase 1" }, at: "2026-01-01T00:00:01.000Z" }),
+        JSON.stringify({ eventId: 3, kind: "task.end", payload: { taskId: "old-1", state: "done", tokensUsed: 75 }, at: "2026-01-01T00:00:05.000Z" }),
+      ].join("\n") + "\n",
+      "utf-8"
+    );
+
+    const legacySnap = readTaskSnapshotDb(repo, "old-1");
+    assert.ok(legacySnap);
+    assert.equal(legacySnap.state, "done");
+    assert.equal(legacySnap.tokensUsed, 75);
+    assert.equal(legacySnap.phases.length, 1);
+    assert.equal(legacySnap.phases[0].runs[0].agent, "EDITOR");
+    assert.equal(legacySnap.phases[0].runs[0].outcome, "completed");
+
+    // Also verify interrupted reconciliation closes open phases/workers in snapshot_json
+    appendHistoryEntryDb(repo, "task.start", { taskId: "crash-1", prompt: "Mid-flight" }, "2026-01-01T00:01:00.000Z", "my-app", 100);
+    appendHistoryEntryDb(repo, "worker.start", { taskId: "crash-1", workerId: "w-c", agent: "EDITOR", phaseId: "p1", phaseName: "Build" }, "2026-01-01T00:01:01.000Z", "my-app", 100);
+    reconcileInterruptedTaskDb(repo, 100);
+
+    const crashSnap = readTaskSnapshotDb(repo, "crash-1");
+    assert.ok(crashSnap);
+    assert.equal(crashSnap.state, "interrupted");
+    assert.equal(crashSnap.phases[0].status, "ABORTED");
+    assert.equal(crashSnap.phases[0].runs[0].outcome, "interrupted");
   });
 });

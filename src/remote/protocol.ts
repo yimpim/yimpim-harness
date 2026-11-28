@@ -274,6 +274,52 @@ export interface TaskIndexEntry {
   attachments: string[];
 }
 
+export interface TaskSnapshotWorker {
+  workerId?: string;
+  agent: string;
+  phaseId?: string;
+  phaseName?: string;
+  outcome?: string;
+  tokensUsed?: number;
+  costUsd?: number;
+  elapsedMs?: number;
+  summary?: string;
+  safeCount?: number;
+  totalJudges?: number;
+  startedAt?: string;
+  endedAt?: string;
+}
+
+export interface TaskSnapshotPhase {
+  id: string;
+  name: string;
+  goal?: string;
+  status: "PENDING" | "IN_PROGRESS" | "COMPLETED" | "ABORTED";
+  index?: number;
+  executor?: string;
+  runs: TaskSnapshotWorker[];
+}
+
+/**
+ * Authoritative pre-reduced snapshot of a single task stored in SQLite
+ * (`tasks.snapshot_json`) and pushed on `fetch_history({ taskId })` so the
+ * phone renders phases and worker cards immediately without re-reducing raw
+ * events.
+ */
+export interface TaskSnapshotWire {
+  taskId: string;
+  repoName?: string;
+  goal: string;
+  prompt: string;
+  state: "running" | "done" | "failed" | "aborted" | "interrupted";
+  tokensUsed: number;
+  costUsd?: number;
+  startedAt: string;
+  endedAt: string | null;
+  updatedAt: string;
+  phases: TaskSnapshotPhase[];
+}
+
 /**
  * The complete set of things the desktop pushes to a paired device, once
  * decrypted. Formalized here (matching `RemoteVerb`'s pattern) so new event
@@ -410,6 +456,11 @@ export type RemoteEvent =
    * rather than keep retrying the same fetch forever.
    */
   | { kind: "history.fetched"; requestedAfter: string; lastEventId?: number; count: number; truncated: boolean; taskId?: string; missing?: boolean }
+  /**
+   * Authoritative pre-reduced task snapshot pushed ahead of raw events on
+   * `fetch_history({ taskId })`. Not persisted into the raw event stream.
+   */
+  | { kind: "task.snapshot"; snapshot: TaskSnapshotWire }
   /**
    * Answers `history.list` — one page of the History list, newest first.
    * Not persisted (like history.fetched): it's an on-demand index read, not

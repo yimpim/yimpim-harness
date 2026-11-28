@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { isPidAlive } from "../runLock.js";
 import {
-  Envelope, ModelCatalogEntry, PendingQuestion, RemoteCommand, RemoteStatus, RemoteVerb, TaskIndexEntry,
+  Envelope, ModelCatalogEntry, PendingQuestion, RemoteCommand, RemoteStatus, RemoteVerb, TaskIndexEntry, TaskSnapshotWire,
   ALWAYS_ALLOWED, PROTOCOL_VERSION, REDACTED_EVENT_KINDS,
   encodePairing, generatePairingSecret, generateSessionKey, hashToken, open, seal,
 } from "./protocol.js";
@@ -141,6 +141,7 @@ const NOT_PERSISTED_KINDS = new Set([
   "pong",
   "history.fetched",
   "history.index",
+  "task.snapshot",
   "command.refused",
   "session.end",
   // Identity of THIS session, sent again at every pairing: an old copy replayed into a new session would name the wrong terminal.
@@ -157,6 +158,7 @@ const NON_TASK_EVENT_KINDS = new Set([
   "command.refused",
   "history.fetched",
   "history.index",
+  "task.snapshot",
   "model.config",
   "usage.totals",
   "roadmap.state",
@@ -749,6 +751,12 @@ export class RemoteSession {
   pushHistoryIndex(entries: TaskIndexEntry[], hasMore: boolean): void {
     if (!this.connected) return;
     this.push("history.index", { entries, hasMore });
+  }
+
+  /** Pushes an authoritative pre-reduced task snapshot for instant History hydration. */
+  pushTaskSnapshot(snapshot: TaskSnapshotWire): void {
+    if (!this.connected) return;
+    this.push("task.snapshot", { snapshot });
   }
 
   /** The full current model config — sent in response to `get_model_config`,

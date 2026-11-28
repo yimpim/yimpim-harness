@@ -185,6 +185,7 @@ import {
   readHistoryBacklogSince,
   readHistoryBacklogSinceEventId,
   readTaskEvents,
+  readTaskSnapshot,
   listTasks,
   reconcileInterruptedTask,
 } from "./remote/historyLog.js";
@@ -1988,12 +1989,21 @@ async function connectRemote(
         // keeps one recovery batch comfortably under the broker's 1MB
         // per-request body cap.
         if (cursor.taskId !== undefined) {
-          // Opening one task from the History list — scoped to that task's
-          // own file only, never the repo-wide merged cursor below.
-          const { entries, truncated, missing } = readTaskEvents(repoRoot, cursor.taskId, cursor.afterEventId ?? 0, 500);
+          // Opening one task from the History list — emit authoritative
+          // `task.snapshot` first on initial page (afterEventId === 0) so
+          // Phase 2 phones render phases & worker cards immediately, then
+          // stream raw events for full detail & backward compatibility.
+          const afterId = cursor.afterEventId ?? 0;
+          if (afterId === 0) {
+            const snapshot = readTaskSnapshot(repoRoot, cursor.taskId);
+            if (snapshot) {
+              session.pushTaskSnapshot(snapshot);
+            }
+          }
+          const { entries, truncated, missing } = readTaskEvents(repoRoot, cursor.taskId, afterId, 500);
           session.replayHistory(entries);
           const lastEventId = entries.length > 0 ? entries[entries.length - 1].eventId : undefined;
-          session.pushHistoryFetched(String(cursor.afterEventId ?? 0), lastEventId, entries.length, truncated, cursor.taskId, missing);
+          session.pushHistoryFetched(String(afterId), lastEventId, entries.length, truncated, cursor.taskId, missing);
           return;
         }
         // afterEventId preferred (no tied-timestamp page-boundary risk — see

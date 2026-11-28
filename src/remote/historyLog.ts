@@ -9,7 +9,7 @@
  * once, non-destructively, on first access per normalized `repoRoot`.
  */
 
-import { REDACTED_EVENT_KINDS, TaskIndexEntry } from "./protocol.js";
+import { REDACTED_EVENT_KINDS, TaskIndexEntry, TaskSnapshotWire } from "./protocol.js";
 import {
   type HistoryEntry,
   appendHistoryEntryDb,
@@ -19,6 +19,7 @@ import {
   readHistoryBacklogSinceEventIdDb,
   listTasksDb,
   readTaskEventsDb,
+  readTaskSnapshotDb,
   reconcileInterruptedTaskDb,
   normalizeRepoRoot,
   closeHistoryDb,
@@ -165,6 +166,18 @@ export function readTaskEvents(
     return readTaskEventsDb(repoRoot, taskId, afterEventId, limit);
   } catch {
     return { entries: [], truncated: false, missing: true };
+  }
+}
+
+/**
+ * Authoritative pre-reduced snapshot for a single task (from SQLite
+ * `tasks.snapshot_json`, lazily backfilled for legacy imported tasks).
+ */
+export function readTaskSnapshot(repoRoot: string, taskId: string): TaskSnapshotWire | null {
+  try {
+    return readTaskSnapshotDb(repoRoot, taskId);
+  } catch {
+    return null;
   }
 }
 
