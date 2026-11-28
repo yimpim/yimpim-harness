@@ -23,7 +23,7 @@ import { RemoteTelemetry } from "./telemetry.js";
 import { logLocal } from "../localLog.js";
 import { UploadCollector } from "./uploads.js";
 import { Persona, type RoleInfoWire } from "../models.js";
-import { appendHistoryEntry, HistoryEntry } from "./historyLog.js";
+import { appendHistoryEntry, HistoryEntry, readTaskSnapshot } from "./historyLog.js";
 import type { UsageTotalsWire } from "../usageLedger.js";
 import { roadmapStateWire, type RoadmapWire } from "../roadmap.js";
 
@@ -1146,6 +1146,17 @@ export class RemoteSession {
     // the phone see a gap and then skip the queued events below its cursor.
     if (p.verb === "ping") {
       this.push("pong", {});
+      // Snap-to-truth on foreground wake-up / liveness ping: push the
+      // authoritative SQLite `task.snapshot` (unpersisted, leaves zero trace)
+      // for the active or most recently completed task so a phone waking from
+      // Android Doze reconciles in a single message even if events were dropped.
+      const snapTaskId = this.status.activeTaskId || this.lastCompletedTaskId;
+      if (this.opts.repoRoot && snapTaskId) {
+        const snapshot = readTaskSnapshot(this.opts.repoRoot, snapTaskId);
+        if (snapshot) {
+          this.pushTaskSnapshot(snapshot);
+        }
+      }
       return;
     }
 
