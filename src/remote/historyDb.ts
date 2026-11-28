@@ -463,6 +463,81 @@ const SNAPSHOT_EVENT_KINDS = new Set([
   "task.end",
 ]);
 
+const DISCOVER_PLAN_PHASE_ID = "__discover_plan__";
+const DISCOVER_PLAN_PHASE_NAME = "Discover & Plan";
+
+function isDiscoverPlanIdentifier(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const norm = value.trim().toLowerCase();
+  return (
+    norm === DISCOVER_PLAN_PHASE_ID ||
+    norm === "discover-and-plan" ||
+    norm === "discover-plan" ||
+    norm === "discover & plan"
+  );
+}
+
+function normalizeSnapshotPhaseId(rawId?: string, rawName?: string): string | undefined {
+  if (isDiscoverPlanIdentifier(rawId) || isDiscoverPlanIdentifier(rawName)) {
+    return DISCOVER_PLAN_PHASE_ID;
+  }
+  return rawId;
+}
+
+function mergePhaseStatus(
+  a: TaskSnapshotPhase["status"],
+  b: TaskSnapshotPhase["status"]
+): TaskSnapshotPhase["status"] {
+  if (a === "ABORTED" || b === "ABORTED") return "ABORTED";
+  if (a === "IN_PROGRESS" || b === "IN_PROGRESS") return "IN_PROGRESS";
+  if (a === "COMPLETED" || b === "COMPLETED") return "COMPLETED";
+  return "PENDING";
+}
+
+function normalizeSnapshotPhases(snapshot: TaskSnapshotWire): { snapshot: TaskSnapshotWire; changed: boolean } {
+  let changed = false;
+  const out: TaskSnapshotPhase[] = [];
+  let discoverPhase: TaskSnapshotPhase | undefined;
+
+  for (const phase of snapshot.phases) {
+    const isDiscover = isDiscoverPlanIdentifier(phase.id) || isDiscoverPlanIdentifier(phase.name);
+    if (!isDiscover) {
+      out.push(phase);
+      continue;
+    }
+    const normalizedRuns = phase.runs.map((r) => {
+      if (r.phaseId !== DISCOVER_PLAN_PHASE_ID || (r.phaseName && isDiscoverPlanIdentifier(r.phaseName))) {
+        changed = true;
+        return {
+          ...r,
+          phaseId: DISCOVER_PLAN_PHASE_ID,
+          ...(r.phaseName && isDiscoverPlanIdentifier(r.phaseName) ? { phaseName: DISCOVER_PLAN_PHASE_NAME } : {}),
+        };
+      }
+      return r;
+    });
+    if (phase.id !== DISCOVER_PLAN_PHASE_ID || phase.name !== DISCOVER_PLAN_PHASE_NAME) {
+      changed = true;
+    }
+    if (!discoverPhase) {
+      discoverPhase = {
+        ...phase,
+        id: DISCOVER_PLAN_PHASE_ID,
+        name: DISCOVER_PLAN_PHASE_NAME,
+        runs: [...normalizedRuns],
+      };
+      out.push(discoverPhase);
+    } else {
+      changed = true;
+      discoverPhase.status = mergePhaseStatus(discoverPhase.status, phase.status);
+      discoverPhase.runs.push(...normalizedRuns);
+    }
+  }
+
+  if (!changed) return { snapshot, changed: false };
+  return { snapshot: { ...snapshot, phases: out }, changed: true };
+}
+
 function applyEventToSnapshot(
   current: TaskSnapshotWire | null,
   taskId: string,
@@ -505,16 +580,20 @@ function applyEventToSnapshot(
     const planned = Array.isArray((payload as any).phases) ? (payload as any).phases : [];
     for (let i = 0; i < planned.length; i++) {
       const p = planned[i] as Record<string, unknown>;
-      const pid = typeof p.id === "string" && p.id ? p.id : `phase-${i + 1}`;
+      const rawPid = typeof p.id === "string" && p.id ? p.id : `phase-${i + 1}`;
+      const rawName = typeof p.name === "string" && p.name ? p.name : undefined;
+      const pid = normalizeSnapshotPhaseId(rawPid, rawName) ?? rawPid;
+      const displayName = pid === DISCOVER_PLAN_PHASE_ID ? DISCOVER_PLAN_PHASE_NAME : (rawName ?? `Phase ${i + 1}`);
       const existing = base.phases.find((x) => x.id === pid);
       if (existing) {
-        if (typeof p.name === "string" && p.name) existing.name = p.name;
+        if (pid === DISCOVER_PLAN_PHASE_ID) existing.name = DISCOVER_PLAN_PHASE_NAME;
+        else if (rawName) existing.name = rawName;
         if (typeof p.goal === "string" && p.goal) existing.goal = p.goal;
         if (typeof p.executor === "string" && p.executor) existing.executor = p.executor;
       } else {
         base.phases.push({
           id: pid,
-          name: typeof p.name === "string" && p.name ? p.name : `Phase ${i + 1}`,
+          name: displayName,
           ...(typeof p.goal === "string" && p.goal ? { goal: p.goal } : {}),
           status: "PENDING",
           index: i,
@@ -527,8 +606,10 @@ function applyEventToSnapshot(
   }
 
   if (kind === "phase.start") {
-    const pid = typeof (payload as any).phaseId === "string" && (payload as any).phaseId ? (payload as any).phaseId : "phase-0";
-    const name = typeof (payload as any).name === "string" && (payload as any).name ? (payload as any).name : pid;
+    const rawPid = typeof (payload as any).phaseId === "string" && (payload as any).phaseId ? (payload as any).phaseId : "phase-0";
+    const rawName = typeof (payload as any).name === "string" && (payload as any).name ? (payload as any).name : undefined;
+    const pid = normalizeSnapshotPhaseId(rawPid, rawName) ?? rawPid;
+    const name = pid === DISCOVER_PLAN_PHASE_ID ? DISCOVER_PLAN_PHASE_NAME : (rawName ?? pid);
     const goal = typeof (payload as any).goal === "string" ? (payload as any).goal : undefined;
     const index = typeof (payload as any).index === "number" ? (payload as any).index : undefined;
     const executor = typeof (payload as any).executor === "string" ? (payload as any).executor : undefined;
@@ -554,8 +635,10 @@ function applyEventToSnapshot(
   }
 
   if (kind === "phase.end") {
-    const pid = typeof (payload as any).phaseId === "string" && (payload as any).phaseId ? (payload as any).phaseId : "phase-0";
-    const name = typeof (payload as any).name === "string" && (payload as any).name ? (payload as any).name : pid;
+    const rawPid = typeof (payload as any).phaseId === "string" && (payload as any).phaseId ? (payload as any).phaseId : "phase-0";
+    const rawName = typeof (payload as any).name === "string" && (payload as any).name ? (payload as any).name : undefined;
+    const pid = normalizeSnapshotPhaseId(rawPid, rawName) ?? rawPid;
+    const name = pid === DISCOVER_PLAN_PHASE_ID ? DISCOVER_PLAN_PHASE_NAME : (rawName ?? pid);
     const passed = (payload as any).passed !== false;
     const existing = base.phases.find((x) => x.id === pid);
     if (existing) {
@@ -581,20 +664,28 @@ function applyEventToSnapshot(
           ? (payload as any).phaseId
           : undefined;
     const rawPhaseName = typeof (payload as any).phaseName === "string" && (payload as any).phaseName ? (payload as any).phaseName : undefined;
+    const normalizedRawPhaseId = normalizeSnapshotPhaseId(rawPhaseId, rawPhaseName);
 
     const isDiscoveryOrPlanning =
-      !rawPhaseId &&
-      (agent.toUpperCase() === "DISCOVERY" ||
-        agent.toUpperCase() === "PLANNER" ||
-        agent.toUpperCase() === "TESTABILITY_PLANNER" ||
-        (payload as any).stage === "planning");
+      normalizedRawPhaseId === DISCOVER_PLAN_PHASE_ID ||
+      (!normalizedRawPhaseId &&
+        (agent.toUpperCase() === "DISCOVERY" ||
+          agent.toUpperCase() === "PLANNER" ||
+          agent.toUpperCase() === "TESTABILITY_PLANNER" ||
+          (payload as any).stage === "planning"));
 
-    const targetPhaseId = rawPhaseId ?? (isDiscoveryOrPlanning ? "__discover_plan__" : base.phases[base.phases.length - 1]?.id ?? "__discover_plan__");
+    const targetPhaseId =
+      normalizedRawPhaseId ??
+      (isDiscoveryOrPlanning ? DISCOVER_PLAN_PHASE_ID : base.phases[base.phases.length - 1]?.id ?? DISCOVER_PLAN_PHASE_ID);
+    const displayPhaseName =
+      targetPhaseId === DISCOVER_PLAN_PHASE_ID
+        ? DISCOVER_PLAN_PHASE_NAME
+        : (rawPhaseName ?? targetPhaseId);
     let phase: TaskSnapshotPhase | undefined = base.phases.find((x) => x.id === targetPhaseId);
     if (!phase) {
       phase = {
         id: targetPhaseId,
-        name: rawPhaseName ?? (targetPhaseId === "__discover_plan__" ? "Discover & Plan" : targetPhaseId),
+        name: displayPhaseName,
         status: "IN_PROGRESS",
         runs: [],
       };
@@ -607,7 +698,7 @@ function applyEventToSnapshot(
       ...(workerId ? { workerId } : {}),
       agent,
       phaseId: targetPhaseId,
-      ...(rawPhaseName ? { phaseName: rawPhaseName } : {}),
+      ...(rawPhaseName && !isDiscoverPlanIdentifier(rawPhaseName) ? { phaseName: rawPhaseName } : {}),
       startedAt: at,
     };
     phase.runs.push(worker);
@@ -1102,7 +1193,20 @@ export function readTaskSnapshotDb(repoRoot: string, taskId: string): TaskSnapsh
 
   if (typeof row.snapshot_json === "string" && row.snapshot_json.length > 0) {
     try {
-      return JSON.parse(row.snapshot_json) as TaskSnapshotWire;
+      const parsed = JSON.parse(row.snapshot_json) as TaskSnapshotWire;
+      const { snapshot: healed, changed } = normalizeSnapshotPhases(parsed);
+      if (changed) {
+        try {
+          db.prepare("UPDATE tasks SET snapshot_json = ? WHERE repo_root = ? AND task_id = ?").run(
+            JSON.stringify(healed),
+            norm,
+            taskId
+          );
+        } catch {
+          // Best-effort self-heal persist.
+        }
+      }
+      return healed;
     } catch {
       // Fall through to rebuild from events.
     }

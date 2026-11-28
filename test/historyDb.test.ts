@@ -262,4 +262,46 @@ describe("historyDb — Phase 2 authoritative task.snapshot", () => {
     assert.equal(crashSnap.phases[0].status, "ABORTED");
     assert.equal(crashSnap.phases[0].runs[0].outcome, "interrupted");
   });
+
+  test("folds pre-planner SECURITY (parentPhaseId: discover-and-plan) into the single Discover & Plan phase and self-heals cached duplicates", async () => {
+    const repo = await makeTempDir("yimpim-historydb-discover-plan-");
+    appendHistoryEntryDb(repo, "task.start", { taskId: "dp-1", prompt: "Add filters" }, "2026-01-01T00:00:00.000Z", "AmyTest", 100);
+    appendHistoryEntryDb(repo, "worker.start", { taskId: "dp-1", workerId: "w-disc", agent: "DISCOVERY" }, "2026-01-01T00:00:01.000Z", "AmyTest", 100);
+    appendHistoryEntryDb(repo, "worker.end", { taskId: "dp-1", workerId: "w-disc", agent: "DISCOVERY", outcome: "completed", tokensUsed: 1000, costUsd: 0.01 }, "2026-01-01T00:00:02.000Z", "AmyTest", 100);
+    appendHistoryEntryDb(repo, "worker.start", { taskId: "dp-1", workerId: "w-sec", agent: "SECURITY", parentPhaseId: "discover-and-plan", stage: "planning" }, "2026-01-01T00:00:03.000Z", "AmyTest", 100);
+    appendHistoryEntryDb(repo, "worker.end", { taskId: "dp-1", workerId: "w-sec", agent: "SECURITY", outcome: "completed", tokensUsed: 500, costUsd: 0.001, summary: "3/3 safe", safeCount: 3, totalJudges: 3 }, "2026-01-01T00:00:04.000Z", "AmyTest", 100);
+    appendHistoryEntryDb(repo, "worker.start", { taskId: "dp-1", workerId: "w-plan", agent: "PLANNER" }, "2026-01-01T00:00:05.000Z", "AmyTest", 100);
+    appendHistoryEntryDb(repo, "worker.end", { taskId: "dp-1", workerId: "w-plan", agent: "PLANNER", outcome: "completed", tokensUsed: 2000, costUsd: 0.02 }, "2026-01-01T00:00:06.000Z", "AmyTest", 100);
+    appendHistoryEntryDb(repo, "plan.ready", { taskId: "dp-1", goal: "Add filters", phases: [{ id: "p1", name: "Helpers", goal: "Add helpers" }] }, "2026-01-01T00:00:07.000Z", "AmyTest", 100);
+    appendHistoryEntryDb(repo, "task.end", { taskId: "dp-1", state: "done", tokensUsed: 3500, costUsd: 0.031 }, "2026-01-01T00:00:08.000Z", "AmyTest", 100);
+
+    const snap = readTaskSnapshotDb(repo, "dp-1");
+    assert.ok(snap);
+    assert.equal(snap.phases.length, 2, "must have exactly Discover & Plan + Helpers, never a duplicate discover-and-plan card");
+    assert.equal(snap.phases[0].id, "__discover_plan__");
+    assert.equal(snap.phases[0].name, "Discover & Plan");
+    assert.deepEqual(snap.phases[0].runs.map((r) => r.agent), ["DISCOVERY", "SECURITY", "PLANNER"]);
+    assert.equal(snap.phases[1].id, "p1");
+
+    // Simulate a legacy SQLite row that already cached duplicate phases and verify readTaskSnapshotDb self-heals it.
+    const { getHistoryDb } = await import("../src/remote/historyDb.js");
+    const db = getHistoryDb();
+    const brokenSnapshot = {
+      ...snap,
+      phases: [
+        { id: "__discover_plan__", name: "Discover & Plan", status: "COMPLETED", runs: [snap.phases[0].runs[0], snap.phases[0].runs[2]] },
+        { id: "discover-and-plan", name: "discover-and-plan", status: "COMPLETED", runs: [{ ...snap.phases[0].runs[1], phaseId: "discover-and-plan" }] },
+        snap.phases[1],
+      ],
+    };
+    db.prepare("UPDATE tasks SET snapshot_json = ? WHERE task_id = ?").run(JSON.stringify(brokenSnapshot), "dp-1");
+
+    const healed = readTaskSnapshotDb(repo, "dp-1");
+    assert.ok(healed);
+    assert.equal(healed.phases.length, 2);
+    assert.equal(healed.phases[0].id, "__discover_plan__");
+    assert.equal(healed.phases[0].name, "Discover & Plan");
+    assert.equal(healed.phases[0].runs.length, 3);
+    assert.ok(healed.phases[0].runs.every((r) => r.phaseId === "__discover_plan__"));
+  });
 });
